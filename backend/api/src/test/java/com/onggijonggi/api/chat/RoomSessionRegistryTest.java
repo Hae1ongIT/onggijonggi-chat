@@ -629,6 +629,22 @@ class RoomSessionRegistryTest {
 		assertThat(registry.evict(roomId, "still-nobody")).isFalse();
 	}
 
+	@Test
+	void evictCollabSubscriptionsLeavesDirectSubscriptionsUntouched() {
+		String subject = "same-subject";
+		RoomSessionRegistry.RoomMembership collab = registry.join(UUID.randomUUID(), UUID.randomUUID(), participant(subject));
+		RoomSessionRegistry.RoomMembership direct = registry.join(UUID.randomUUID(), UUID.randomUUID(), participant(subject), false);
+		AtomicBoolean collabKicked = new AtomicBoolean();
+		AtomicBoolean directKicked = new AtomicBoolean();
+		collab.kicked().doOnSuccess(ignored -> collabKicked.set(true)).subscribe();
+		direct.kicked().doOnSuccess(ignored -> directKicked.set(true)).subscribe();
+
+		assertThat(registry.evictCollabSubscriptions(subject)).isTrue();
+
+		assertThat(collabKicked).isTrue();
+		assertThat(directKicked).isFalse();
+	}
+
 	/**
 	* RoomState.add/remove/evict는 각각 synchronized라 상호 배제는 걸려 있지만, 서로 다른
 	* public 메서드(evict·leave)가 같은 연결을 동시에 건드리는 조합은 별도로 검증된 적이 없었다

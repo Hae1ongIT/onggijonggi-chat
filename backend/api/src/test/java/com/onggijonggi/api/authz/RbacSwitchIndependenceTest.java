@@ -56,19 +56,20 @@ class RbacSwitchIndependenceTest {
 	}
 
 	@Test
-	void cutoverValidationPassesTheEnabledKeycloakUsersToTheService() {
+	void cutoverValidationPassesOnlyTheEnabledKeycloakSubjectsToTheService() {
+		// Keycloak에서는 누가 로그인할 수 있는지만 쓴다. tenant 속성은 넘기지 않는다 — 현재 Tenant는 DB 배정이 정한다(#299).
 		KeycloakAdminClient keycloak = Mockito.mock(KeycloakAdminClient.class);
 		CutoverValidationService validation = Mockito.mock(CutoverValidationService.class);
-		List<KeycloakTenantUser> users = List.of(new KeycloakTenantUser("subject", Optional.of("acme")));
+		List<KeycloakTenantUser> users = List.of(new KeycloakTenantUser("subject", Optional.of("stale-attribute")));
 		CutoverValidationResult result = new CutoverValidationResult(List.of(), List.of(), List.of(), List.of());
 		when(keycloak.listEnabledTenantUsers()).thenReturn(Mono.just(users));
-		when(validation.validate(users)).thenReturn(result);
+		when(validation.validate(List.of("subject"))).thenReturn(result);
 
 		PlatformRbacController controller = new PlatformRbacController(Mockito.mock(RbacBootstrapService.class), keycloak,
 				validation);
 
 		assertThat(controller.validateCutover().block()).isSameAs(result);
-		verify(validation).validate(users);
+		verify(validation).validate(List.of("subject"));
 	}
 
 	private PlatformRbacController controller(RbacBootstrapService bootstrap) {

@@ -109,8 +109,11 @@ class ThreadWorkspacePostgresTest extends PostgresSpringTestBase {
 		common = nodes.findByTenantIdAndKey(tenantId, "common").orElseThrow();
 		hr = nodes.findByTenantIdAndKey(tenantId, "hr").orElseThrow();
 		hrLead = nodes.findByTenantIdAndKey(tenantId, "hr-lead").orElseThrow();
-		// 실제 판정처럼 워크스페이스가 없으면(null) 거부한다.
+		// 실제 판정처럼 워크스페이스가 없으면(null) 거부한다. 이 테스트의 사람들은 볼 수 있는 곳에 방도 만들 수 있다고
+		// 둔다(CONTRIBUTOR 이상) — 보기만 되고 못 만드는 경우는 ThreadWorkspaceServiceTest가 따로 본다(#299).
 		when(authorizer.canView(any(), any())).thenAnswer(call -> Mono.just(call.getArgument(1) != null
+				&& visible.getOrDefault(call.<String>getArgument(0), Set.of()).contains(call.<UUID>getArgument(1))));
+		when(authorizer.canCreateThread(any(), any())).thenAnswer(call -> Mono.just(call.getArgument(1) != null
 				&& visible.getOrDefault(call.<String>getArgument(0), Set.of()).contains(call.<UUID>getArgument(1))));
 	}
 

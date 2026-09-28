@@ -211,6 +211,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.COLLAB)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(membership.canEnterWorkspace(any(), any())).thenReturn(Mono.just(true));
 		return membership;
@@ -220,6 +221,7 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		return membership;
@@ -321,6 +323,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any(), any()))
 				.thenThrow(new IllegalStateException("database unavailable"));
@@ -389,6 +392,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any(), any()))
 				.thenReturn(new DirectChatTurnService.StoredTurn(humanMsgId, 0L, agentMsgId, threadId, 1L, true,

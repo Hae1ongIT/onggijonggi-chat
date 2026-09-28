@@ -600,6 +600,7 @@ class RbacSchemaPostgresTest {
 			deactivate(c, retired);
 
 			UUID rule = rankGrant(c, tenant, exec, "K");
+			rankGrant(c, tenant, exec, "K", "ADMIN");
 			rankGrant(c, tenant, exec, "B");
 			assertRejected("23505", "uq_rank_grn_policy", () -> rankGrant(c, tenant, exec, "K"));
 			assertRejected("23514", "rank_grn_rank_value", () -> rankGrant(c, tenant, exec, "X"));
@@ -608,7 +609,7 @@ class RbacSchemaPostgresTest {
 
 			execute(c, "update rank_grn set rank = 'C' where id = ?", rule);
 			assertThat(query(c, "select updated_at > created_at from rank_grn where id = ?", rule)).isEqualTo(true);
-			assertRejected("P0001", "only the rank of a rank grant can change",
+			assertRejected("P0001", "only the rank or role of a rank grant can change",
 					() -> execute(c, "update rank_grn set wrk_node_id = ? where id = ?", other, rule));
 		}
 	}
@@ -631,7 +632,7 @@ class RbacSchemaPostgresTest {
 			assertRejected("23505", "uq_rank_grn_policy", () -> rankGrant(c, tenant, lead, "K"));
 			assertRejected("23505", "uq_rank_grn_policy", () -> teamRankGrant(c, tenant, lead, hr, "K"));
 			assertRejected("P0001", "active organization unit", () -> teamRankGrant(c, tenant, lead, idle, "K"));
-			assertRejected("P0001", "only the rank of a rank grant can change",
+			assertRejected("P0001", "only the rank or role of a rank grant can change",
 					() -> execute(c, "update rank_grn set org_unit_id = ? where id = ?", fin, teamRule));
 			// 팀이 꺼져도 규칙 행은 남고 직급은 고칠 수 있다.
 			execute(c, "update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?", hr);
@@ -708,8 +709,12 @@ class RbacSchemaPostgresTest {
 	}
 
 	private UUID rankGrant(Connection c, UUID tenant, UUID node, String rank) throws SQLException {
+		return rankGrant(c, tenant, node, rank, "VIEWER");
+	}
+
+	private UUID rankGrant(Connection c, UUID tenant, UUID node, String rank, String role) throws SQLException {
 		UUID id = UUID.randomUUID();
-		execute(c, "insert into rank_grn (id, tnn_id, wrk_node_id, rank) values (?, ?, ?, ?)", id, tenant, node, rank);
+		execute(c, "insert into rank_grn (id, tnn_id, wrk_node_id, rank, role) values (?, ?, ?, ?, ?)", id, tenant, node, rank, role);
 		return id;
 	}
 

@@ -1,6 +1,6 @@
 package com.onggijonggi.api.auth;
 
-import com.onggijonggi.api.authz.OrgUnitMemberService;
+import com.onggijonggi.api.chat.CollabAuthorizationRevoker;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrInv;
@@ -32,6 +32,9 @@ import reactor.core.scheduler.Schedulers;
  *               그 사람이 보낸 대기 초대도 같은 사유로 거둔다(#127) — 초대는 아직 참가가 아니라
  *               참여 정리에 걸리지 않기 때문이다.
  *
+ *               조직·직급 배정(org_unit_mbr)은 지우지 않는다(#299) — 재활성화하면 그대로 다시 쓰인다. 대신 커밋 뒤
+ *               그 사람의 협업방 구독과 협업방 AI 턴을 바로 거둔다. 1:1 소유는 건드리지 않는다.
+ *
  *               팀·직급 배정(org_unit_mbr)도 해제한다. 배정은 Keycloak subject로 적혀 FK가 없어 계정 상태를
  *               따라오지 않는다 — 비활성 계정은 로그인을 못 해 권한이 새지는 않지만, 배정이 남으면 명단이 실제와
  *               어긋난다. 배정 서비스를 거쳐 SYSTEM 행위자 이력(MEMBER_UNASSIGNED)을 남긴다. 재활성화해도
@@ -58,15 +61,15 @@ public class AccountDeactivationService {
 
 	private final ThrInvRepository thrInvRepository;
 
-	private final OrgUnitMemberService orgUnitMemberService;
+	private final CollabAuthorizationRevoker collabAuthorizationRevoker;
 
 	public AccountDeactivationService(AppUserRepository appUserRepository, ThrMbrRepository thrMbrRepository,
-			ThrRepository thrRepository, ThrInvRepository thrInvRepository, OrgUnitMemberService orgUnitMemberService) {
+			ThrRepository thrRepository, ThrInvRepository thrInvRepository, CollabAuthorizationRevoker collabAuthorizationRevoker) {
 		this.appUserRepository = appUserRepository;
 		this.thrMbrRepository = thrMbrRepository;
 		this.thrRepository = thrRepository;
 		this.thrInvRepository = thrInvRepository;
-		this.orgUnitMemberService = orgUnitMemberService;
+		this.collabAuthorizationRevoker = collabAuthorizationRevoker;
 	}
 
 	/** ACTIVE 계정만 비활성화할 수 있다. 이미 INACTIVE면 409. */
@@ -76,10 +79,9 @@ public class AccountDeactivationService {
 					thrMbrRepository.findByUserIdAndStatus(userId, ThrMbrStatus.ACTIVE)
 							.forEach(this::endParticipation);
 					revokeSentInvitations(userId);
-					orgUnitMemberService.apply(OrgUnitMemberService.Change.unassign(user.getKeycloakSubj()),
-							OrgUnitMemberService.Actor.system("account-deactivation:" + userId));
 					user.deactivate();
 					appUserRepository.save(user);
+					collabAuthorizationRevoker.revoke(user.getKeycloakSubj());
 					return null;
 				})
 				.subscribeOn(Schedulers.boundedElastic());

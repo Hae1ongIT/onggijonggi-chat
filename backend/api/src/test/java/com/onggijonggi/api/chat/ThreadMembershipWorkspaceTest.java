@@ -60,13 +60,29 @@ class ThreadMembershipWorkspaceTest {
 		assertThat(service.canEnterWorkspace(thread.getId(), SUBJECT).block()).isFalse();
 	}
 
+	/** 1:1도 그 방의 common을 볼 수 있어야 연다(#299) — 배정을 잃으면 자기 1:1도 열 수 없다. */
 	@Test
-	void directThreadIsAlwaysEnterableWithoutAskingTheWorkspace() {
+	void directThreadAlsoRequiresSeeingItsCommonWorkspace() {
+		UUID commonId = UUID.randomUUID();
 		Thr thread = Thr.direct(UUID.randomUUID(), UUID.randomUUID(), "1:1");
+		thread.placeIn(UUID.randomUUID(), commonId);
 		when(threads.findById(thread.getId())).thenReturn(Optional.of(thread));
 
+		when(authorizer.canView(SUBJECT, commonId)).thenReturn(Mono.just(false));
+		assertThat(service.canEnterWorkspace(thread.getId(), SUBJECT).block()).isFalse();
+
+		when(authorizer.canView(SUBJECT, commonId)).thenReturn(Mono.just(true));
 		assertThat(service.canEnterWorkspace(thread.getId(), SUBJECT).block()).isTrue();
-		verifyNoInteractions(authorizer);
+	}
+
+	/** 워크스페이스가 없는 옛 1:1(절체 전)은 판정이 켜지면 열 수 없다 — 옛 방을 위한 우회는 두지 않는다. */
+	@Test
+	void unplacedDirectThreadIsClosedWhenEnforcementIsOn() {
+		Thr thread = Thr.direct(UUID.randomUUID(), UUID.randomUUID(), "옛 1:1");
+		when(threads.findById(thread.getId())).thenReturn(Optional.of(thread));
+		when(authorizer.canView(SUBJECT, null)).thenReturn(Mono.just(false));
+
+		assertThat(service.canEnterWorkspace(thread.getId(), SUBJECT).block()).isFalse();
 	}
 
 	@Test

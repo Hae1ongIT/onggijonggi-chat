@@ -1,5 +1,6 @@
 package com.onggijonggi.api.authz;
 
+import com.onggijonggi.api.chat.CollabAuthorizationRevoker;
 import com.onggijonggi.common.authz.AuthorizationAudit;
 import com.onggijonggi.common.authz.AuthorizationAuditEventKind;
 import com.onggijonggi.common.authz.AuthorizationAuditRepository;
@@ -38,14 +39,17 @@ public class OrgUnitMemberService {
 	private final AuthorizationAuditRepository audits;
 	private final ObjectMapper objectMapper;
 	private final TransactionTemplate transactions;
+	private final CollabAuthorizationRevoker collabAuthorizationRevoker;
 
 	public OrgUnitMemberService(OrgUnitMemberRepository members, OrgUnitRepository orgUnits, AuthorizationAuditRepository audits,
-			ObjectMapper objectMapper, PlatformTransactionManager transactionManager) {
+			ObjectMapper objectMapper, PlatformTransactionManager transactionManager,
+			CollabAuthorizationRevoker collabAuthorizationRevoker) {
 		this.members = members;
 		this.orgUnits = orgUnits;
 		this.audits = audits;
 		this.objectMapper = objectMapper;
 		this.transactions = new TransactionTemplate(transactionManager);
+		this.collabAuthorizationRevoker = collabAuthorizationRevoker;
 	}
 
 	/** 누가 바꾸는가. userId가 null이면 SYSTEM(CSV 임포트)이다. requestId는 한 번의 실행을 묶는다(CSV 파일 해시 등). */
@@ -99,11 +103,16 @@ public class OrgUnitMemberService {
 			if (!subjects.add(change.subject())) throw new InvalidChangeException("같은 사람이 두 번 있다: " + change.subject());
 			if (change.orgUnitId() != null && change.rank() == null) throw new InvalidChangeException("직급이 없다: " + change.subject());
 		}
-		return transactions.execute(status -> {
-			List<Result> results = new ArrayList<>();
-			for (Change change : changes) results.add(applyOne(change, actor));
-			return results;
+		List<Result> results = transactions.execute(status -> {
+			List<Result> applied = new ArrayList<>();
+			for (Change change : changes) applied.add(applyOne(change, actor));
+			return applied;
 		});
+		results.stream()
+				.filter(result -> result.outcome() == Outcome.CHANGED || result.outcome() == Outcome.UNASSIGNED)
+				.map(Result::subject)
+				.forEach(collabAuthorizationRevoker::revoke);
+		return results;
 	}
 
 	private Result applyOne(Change change, Actor actor) {
@@ -127,6 +136,9 @@ public class OrgUnitMemberService {
 			return new Result(change.subject(), Outcome.ASSIGNED);
 		}
 		OrgUnitMember member = current.get();
+		if (!member.getTenantId().equals(unit.getTenantId())) {
+			throw new InvalidChangeException("다른 Tenant의 팀으로는 옮길 수 없다: " + change.subject());
+		}
 		if (member.getOrgUnitId().equals(unit.getId()) && member.getRank() == change.rank()) {
 			return new Result(change.subject(), Outcome.UNCHANGED);
 		}

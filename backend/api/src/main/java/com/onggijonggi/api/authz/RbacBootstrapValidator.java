@@ -210,7 +210,8 @@ public class RbacBootstrapValidator {
 		Set<String> topNodes = new HashSet<>();
 		for (RbacBootstrapSpec.RankGrantSpec grant : tenant.rankGrants()) {
 			String grantScope = scope + " rank_grant " + (grant.orgUnit() == null ? "*" : grant.orgUnit()) + "/" + grant.rank()
-					+ "/" + grant.node();
+					+ "/" + grant.role() + "/" + grant.node();
+			if (!ROLES.contains(grant.role())) problems.add(grantScope + ": role은 VIEWER·CONTRIBUTOR·ADMIN 중 하나여야 한다");
 			if (!RANKS.contains(grant.rank())) problems.add(grantScope + ": rank는 TL·B·C·K·D·S 중 하나여야 한다");
 			if (grant.orgUnit() != null) {
 				RbacBootstrapSpec.OrgUnitSpec unit = units.get(grant.orgUnit());
@@ -230,7 +231,7 @@ public class RbacBootstrapValidator {
 				String top = topAncestor(node, nodes);
 				if (top != null) topNodes.add(top);
 			}
-			if (!seen.add(grant.orgUnit() + "|" + grant.rank() + "|" + grant.node())) {
+			if (!seen.add(grant.orgUnit() + "|" + grant.rank() + "|" + grant.role() + "|" + grant.node())) {
 				problems.add(grantScope + ": 같은 직급 규칙이 중복이다");
 			}
 		}

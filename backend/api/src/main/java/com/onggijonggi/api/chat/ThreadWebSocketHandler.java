@@ -288,7 +288,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 						if (inbound.clientMsgId() == null || inbound.turnId() == null) {
 							return Mono.just(malformed(threadId, traceId));
 						}
-						return threadMembershipService.isActiveDirectOwner(threadId, connection.userId())
+						return threadMembershipService.canUseDirect(threadId, connection.userId(), actor.subject())
 								.flatMap(owner -> owner
 										? prepareDirectTurn(threadId, connection.userId(), inbound.content(),
 												inbound.clientMsgId())
@@ -553,7 +553,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 				.flatMap(participant -> participant
 						? threadMembershipService.kindOf(threadId).flatMap(kind -> {
 							if (kind.filter(value -> value == ThrKind.DIRECT).isPresent()) {
-								return threadMembershipService.isActiveDirectOwner(threadId, connection.userId())
+								return threadMembershipService.canUseDirect(threadId, connection.userId(),
+												connection.actor().subject())
 										.flatMap(owner -> owner
 												? Mono.<WsFrame>fromRunnable(() -> subscribe(connection, threadId, false))
 												: Mono.just(new ErrorFrame(threadId, "FORBIDDEN", "이 방에 들어갈 권한이 없습니다.", traceId)));

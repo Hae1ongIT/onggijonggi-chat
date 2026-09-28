@@ -694,6 +694,63 @@ class ThreadMessageDispatcherTest {
 
 	/** 앞 턴이 있으면 뒤 턴은 기다린다는 것을 방에 알리고, 기다리는 중에 취소하면 큐에서 빠진다. */
 	@Test
+	void membershipRevocationCancelsTheSubjectsActiveCollabTurn() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+
+		awaitTrue(upstreamCancelled);
+		assertThat(upstreamCancelled).isTrue();
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.contains(ChatAnswerStatus.DONE);
+	}
+
+	/** 권한 회수는 1:1 턴을 건드리지 않는다(#299) — 1:1은 워크스페이스 권한이 아니라 소유자 계약으로 지킨다. */
+	@Test
+	void membershipRevocationLeavesTheSubjectsDirectTurnRunning() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+
+		// 취소는 호출 안에서 동기로 일어나므로, 호출이 끝났는데 끊기지 않았다면 건드리지 않은 것이다.
+		assertThat(upstreamCancelled).isFalse();
+	}
+
+	/** 같은 협업방이라도 다른 사람이 시작한 턴은 그대로 둔다 — 권한을 잃은 사람의 턴만 취소한다. */
+	@Test
+	void membershipRevocationLeavesOtherPeoplesCollabTurnsRunning() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom("someone-else");
+
+		assertThat(upstreamCancelled).isFalse();
+	}
+
+	@Test
 	void announcesQueuedTurnsAndDropsOneCancelledWhileWaiting() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();

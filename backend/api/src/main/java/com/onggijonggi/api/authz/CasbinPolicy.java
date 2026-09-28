@@ -16,9 +16,9 @@ import java.util.UUID;
  * Description : 03·CORE DB의 규칙(wrk_grn 팀 규칙, rank_grn 직급 서열 규칙 — 팀이 붙으면 팀과 서열을 함께 본다)을
  *               Casbin ABAC 정책 행으로 바꾼다.
  *               모델은 resources/casbin/model.conf다. 판정 요청의 속성 이름(ORG_UNIT·RANK)도 여기서 정해
- *               정책 식과 요청이 같은 이름을 쓰게 한다. wrk_grn의 role은 {@link #ROLE_ACTIONS}로 액션 집합에
- *               펼쳐지고, 같은 (팀, 노드, 액션) 조합은 한 행으로 합친다. rank_grn은 role 개념이 없어 항상
- *               VIEW 하나다("그 서열 이상이면 볼 수 있다"). 대상은 id로 적는다 — key는 Tenant 안에서만 유일하다.
+ *               정책 식과 요청이 같은 이름을 쓰게 한다. wrk_grn과 rank_grn 모두 role을 갖고, role은
+ *               {@link #ROLE_ACTIONS}로 액션 집합에 펼친다(#299). 같은 (조건, 노드, 액션) 조합은 한 행으로 합친다.
+ *               허용만 합친다(deny 없음). 대상은 id로 적는다 — key는 Tenant 안에서만 유일하다.
  */
 public final class CasbinPolicy {
 
@@ -66,7 +66,9 @@ public final class CasbinPolicy {
 			String rankRule = "r.sub." + RANK + " <= " + grant.getRank().order();
 			// 팀이 있으면 "그 팀 사람이면서 서열 조건" — 없으면 다른 팀의 같은 직급도 통과한다.
 			String rule = grant.getOrgUnitId() == null ? rankRule : orgUnitRule(grant.getOrgUnitId()) + " && " + rankRule;
-			rules.add(new Rule(rule, grant.getWorkspaceNodeId().toString(), VIEW));
+			for (String action : ROLE_ACTIONS.get(grant.getRole())) {
+				rules.add(new Rule(rule, grant.getWorkspaceNodeId().toString(), action));
+			}
 		}
 		return new ArrayList<>(rules);
 	}

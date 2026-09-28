@@ -357,7 +357,7 @@ public class RbacBootstrapService {
 	private void createMissingRankGrants(Run run, Tenant tenant, RbacBootstrapSpec.TenantSpec spec, Model model) {
 		Set<String> existing = new HashSet<>();
 		for (RankGrant grant : rankGrantRepository.findByTenantId(tenant.getId())) {
-			existing.add(rankGrantKey(grant.getOrgUnitId(), grant.getRank(), grant.getWorkspaceNodeId()));
+			existing.add(rankGrantKey(grant.getOrgUnitId(), grant.getRank(), grant.getRole(), grant.getWorkspaceNodeId()));
 		}
 		for (RbacBootstrapSpec.RankGrantSpec declared : spec.rankGrants()) {
 			OrgUnit unit = declared.orgUnit() == null ? null : model.unitsByKey.get(declared.orgUnit());
@@ -366,9 +366,10 @@ public class RbacBootstrapService {
 			if (node == null || node.getStatus() != WorkspaceNodeStatus.ACTIVE) continue;
 			if (declared.orgUnit() != null && (unit == null || unit.getStatus() != OrgUnitStatus.ACTIVE)) continue;
 			Rank rank = Rank.valueOf(declared.rank());
+			WorkspaceRole role = workspaceRole(declared.role());
 			UUID unitId = unit == null ? null : unit.getId();
-			if (!existing.add(rankGrantKey(unitId, rank, node.getId()))) continue;
-			RankGrant grant = rankGrantRepository.saveAndFlush(new RankGrant(tenant.getId(), node.getId(), unitId, rank));
+			if (!existing.add(rankGrantKey(unitId, rank, role, node.getId()))) continue;
+			RankGrant grant = rankGrantRepository.saveAndFlush(new RankGrant(tenant.getId(), node.getId(), unitId, rank, role));
 			audit(run, tenant, AuthorizationAuditEventKind.POLICY_ADDED, AuthorizationAuditTargetKind.POLICY,
 					rankPolicyRef(grant, unit), node.getId(), null, rankGrantSnapshot(grant));
 		}
@@ -641,6 +642,7 @@ public class RbacBootstrapService {
 		ref.put("rank_grn_id", grant.getId());
 		ref.put("org_unit_key", unit == null ? null : unit.getKey());
 		ref.put("rank", grant.getRank().name());
+		ref.put("role", grant.getRole().name());
 		ref.put("wrk_node_id", grant.getWorkspaceNodeId());
 		return ref;
 	}
@@ -694,6 +696,7 @@ public class RbacBootstrapService {
 		snapshot.put("tnn_id", grant.getTenantId());
 		snapshot.put("org_unit_id", grant.getOrgUnitId());
 		snapshot.put("rank", grant.getRank().name());
+		snapshot.put("role", grant.getRole().name());
 		snapshot.put("wrk_node_id", grant.getWorkspaceNodeId());
 		return snapshot;
 	}
@@ -704,8 +707,8 @@ public class RbacBootstrapService {
 		return orgUnitId + "|" + role + "|" + nodeId;
 	}
 
-	private String rankGrantKey(UUID orgUnitId, Rank rank, UUID nodeId) {
-		return orgUnitId + "|" + rank + "|" + nodeId;
+	private String rankGrantKey(UUID orgUnitId, Rank rank, WorkspaceRole role, UUID nodeId) {
+		return orgUnitId + "|" + rank + "|" + role + "|" + nodeId;
 	}
 
 	private TenantStatus tenantStatus(String value) { return TenantStatus.valueOf(value); }

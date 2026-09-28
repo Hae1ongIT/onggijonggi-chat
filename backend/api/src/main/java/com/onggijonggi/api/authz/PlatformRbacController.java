@@ -1,6 +1,7 @@
 package com.onggijonggi.api.authz;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
+import com.onggijonggi.api.auth.keycloak.KeycloakTenantUser;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -43,8 +44,10 @@ public class PlatformRbacController {
 
 	@PostMapping("/api/platform/rbac/cutover-validation")
 	public Mono<CutoverValidationResult> validateCutover() {
+		// Keycloak에서는 누가 로그인할 수 있는지(활성 계정)만 쓴다. 현재 Tenant는 DB 배정에서 구한다(#299).
 		return keycloakAdminClient.listEnabledTenantUsers()
-				.flatMap(users -> Mono.fromCallable(() -> cutoverValidationService.validate(users))
+				.map(users -> users.stream().map(KeycloakTenantUser::subject).toList())
+				.flatMap(subjects -> Mono.fromCallable(() -> cutoverValidationService.validate(subjects))
 						.subscribeOn(Schedulers.boundedElastic()));
 	}
 }

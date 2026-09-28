@@ -117,6 +117,15 @@ public class RoomSessionRegistry {
 		return room != null && room.evict(subject);
 	}
 
+	/** 그 사람을 모든 협업방 구독에서 뺀다(권한 회수, #299). 1:1 방은 presence가 꺼져 있어 건드리지 않는다. */
+	public boolean evictCollabSubscriptions(String subject) {
+		boolean evictedAny = false;
+		for (RoomState room : rooms.values()) {
+			evictedAny |= room.evictIfPresenceEnabled(subject);
+		}
+		return evictedAny;
+	}
+
 	/**
 	 * 현재 방 세대에만 프레임을 방송한다.
 	 *
@@ -375,6 +384,10 @@ public class RoomSessionRegistry {
 				}
 			}
 			return evictedAny;
+		}
+
+		synchronized boolean evictIfPresenceEnabled(String subject) {
+			return presenceEnabled && evict(subject);
 		}
 
 		Flux<WsFrame> frames() {

@@ -129,4 +129,19 @@ class MemberImportServiceTest {
 		assertThat(actor.getValue().userId()).isEqualTo(ACTOR);
 		assertThat(actor.getValue().requestId()).startsWith("import:");
 	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void omittedCsvRowsDoNotCreateAnUnassignment() {
+		when(memberService.applyAll(anyList(), any())).thenReturn(List.of(
+				new OrgUnitMemberService.Result("sub-kim@example.com", OrgUnitMemberService.Outcome.UNCHANGED)));
+
+		run("email,team,rank\nkim@example.com,hr,K", true);
+
+		ArgumentCaptor<List<OrgUnitMemberService.Change>> changes = ArgumentCaptor.forClass(List.class);
+		verify(memberService).applyAll(changes.capture(), any());
+		assertThat(changes.getValue()).containsExactly(
+				OrgUnitMemberService.Change.assign("sub-kim@example.com", hr.getId(), Rank.K));
+		assertThat(changes.getValue()).noneMatch(change -> change.orgUnitId() == null);
+	}
 }
