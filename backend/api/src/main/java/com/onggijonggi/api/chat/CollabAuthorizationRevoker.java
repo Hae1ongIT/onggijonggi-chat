@@ -1,5 +1,8 @@
 package com.onggijonggi.api.chat;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
 import org.springframework.stereotype.Component;
 
 /**
@@ -11,6 +14,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class CollabAuthorizationRevoker {
 
+	/** 비동기 인가 결과가 join/dispatch에 등록되기 전에 회수될 수 있어 subject별 세대와 등록을 직렬화한다.
+	 * 동일한 subject의 다른 String 인스턴스에서도 세대가 유지되도록 key를 강하게 보유한다. */
+	private final Map<String, SubjectGate> subjectGates = new HashMap<>();
+
 	private final RoomSessionRegistry roomSessionRegistry;
 	private final ThreadMessageDispatcher threadMessageDispatcher;
 
@@ -21,7 +28,39 @@ public class CollabAuthorizationRevoker {
 	}
 
 	public void revoke(String subject) {
-		roomSessionRegistry.evictCollabSubscriptions(subject);
-		threadMessageDispatcher.cancelCollabTurnsFrom(subject);
+		SubjectGate gate = gateFor(subject);
+		synchronized (gate) {
+			gate.epoch++;
+			roomSessionRegistry.evictCollabSubscriptions(subject);
+			threadMessageDispatcher.cancelCollabTurnsFrom(subject);
+		}
+	}
+
+	long epoch(String subject) {
+		SubjectGate gate = gateFor(subject);
+		synchronized (gate) {
+			return gate.epoch;
+		}
+	}
+
+	<T> GuardedResult<T> ifCurrent(String subject, long expectedEpoch, Supplier<T> action) {
+		SubjectGate gate = gateFor(subject);
+		synchronized (gate) {
+			if (gate.epoch != expectedEpoch) return new GuardedResult<>(false, null);
+			return new GuardedResult<>(true, action.get());
+		}
+	}
+
+	private SubjectGate gateFor(String subject) {
+		synchronized (subjectGates) {
+			return subjectGates.computeIfAbsent(subject, ignored -> new SubjectGate());
+		}
+	}
+
+	record GuardedResult<T>(boolean current, T value) {
+	}
+
+	private static final class SubjectGate {
+		private long epoch;
 	}
 }

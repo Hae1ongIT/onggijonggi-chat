@@ -189,7 +189,7 @@ public class RbacBootstrapValidator {
 				problems.add(scope + " org_unit " + unit.key() + ": COMMON VIEWER 부여가 선언돼 있지 않다");
 			}
 		}
-		Set<String> rankOnlyTopNodes = validateRankGrants(problems, scope, tenant, units, nodes);
+		Set<String> rankOnlyTopNodes = validateRankGrants(problems, scope, tenant, units, nodes, adminNodes);
 		Set<String> teamGrantedNodes = new HashSet<>();
 		for (RbacBootstrapSpec.GrantSpec grant : tenant.grants()) teamGrantedNodes.add(grant.node());
 		// 최상위(ROOT 직속) 노드마다 ADMIN 부여가 하나 이상 있어야 한다(ROOT에는 부여할 수 없어 관리자가 없다).
@@ -205,7 +205,8 @@ public class RbacBootstrapValidator {
 
 	/** 직급 규칙을 검증하고, 직급 규칙이 걸린 노드(자신 또는 하위)를 가진 최상위 노드 key를 돌려준다. */
 	private Set<String> validateRankGrants(List<String> problems, String scope, RbacBootstrapSpec.TenantSpec tenant,
-			Map<String, RbacBootstrapSpec.OrgUnitSpec> units, Map<String, RbacBootstrapSpec.NodeSpec> nodes) {
+			Map<String, RbacBootstrapSpec.OrgUnitSpec> units, Map<String, RbacBootstrapSpec.NodeSpec> nodes,
+			Set<String> adminNodes) {
 		Set<String> seen = new HashSet<>();
 		Set<String> topNodes = new HashSet<>();
 		for (RbacBootstrapSpec.RankGrantSpec grant : tenant.rankGrants()) {
@@ -230,6 +231,7 @@ public class RbacBootstrapValidator {
 			} else {
 				String top = topAncestor(node, nodes);
 				if (top != null) topNodes.add(top);
+				if (grant.role().equals("ADMIN")) adminNodes.add(node.key());
 			}
 			if (!seen.add(grant.orgUnit() + "|" + grant.rank() + "|" + grant.role() + "|" + grant.node())) {
 				problems.add(grantScope + ": 같은 직급 규칙이 중복이다");

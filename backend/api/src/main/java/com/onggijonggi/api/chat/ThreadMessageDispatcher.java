@@ -452,6 +452,7 @@ public class ThreadMessageDispatcher {
 			// state.active는 비우지 않는다 — advance()가 "끝난 턴이 아직 활성인가"로 경합을 거르므로,
 			// 여기서 비우면 다음 대기 턴이 시작되지 않는다.
 			activeTurn = state.active;
+			if (!activeTurn.claimTerminal()) return;
 		}
 
 		activeTurn.subscription.dispose();
@@ -480,7 +481,8 @@ public class ThreadMessageDispatcher {
 				if (state.closed) {
 					continue;
 				}
-				if (state.active != null && subject.equals(state.active.turn.fromSubject())) {
+				if (state.active != null && subject.equals(state.active.turn.fromSubject())
+						&& state.active.claimTerminal()) {
 					activeTurn = state.active;
 				}
 				for (Iterator<PendingTurn> iterator = state.pending.iterator(); iterator.hasNext();) {
@@ -554,8 +556,11 @@ public class ThreadMessageDispatcher {
 				})
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
-					activeTurn.content.append(delta);
-					broadcastDelta(activeTurn, delta);
+					synchronized (state) {
+						if (state.closed || activeTurn.terminalClaimed.get()) return;
+						activeTurn.content.append(delta);
+						broadcastDelta(activeTurn, delta);
+					}
 				})
 				.concatWith(Flux.defer(() -> activeTurn.hasNonBlankOutput.get()
 						? Flux.empty()
@@ -645,6 +650,7 @@ public class ThreadMessageDispatcher {
 	* closeGeneration()의 CANCELLED 시도를 무시하게 만든다.
 	*/
 	private void handleTurnComplete(RoomKey key, RoomAiState state, ActiveTurn activeTurn, String content) {
+		if (!activeTurn.claimTerminal()) return;
 		try {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
@@ -672,6 +678,7 @@ public class ThreadMessageDispatcher {
 			closeGeneration(key, state, true);
 			return;
 		}
+		if (!activeTurn.claimTerminal()) return;
 
 		String code = error instanceof OpenAIServiceException || error instanceof TurnTimeoutException
 				|| error instanceof EmptyLlmOutputException ? "MODEL_UNAVAILABLE" : "INTERNAL_ERROR";
@@ -738,7 +745,7 @@ public class ThreadMessageDispatcher {
 		state.worker.dispose();
 		if (activeTurn != null) {
 			activeTurn.subscription.dispose();
-			persistAgentCancellation(activeTurn);
+			if (activeTurn.claimTerminal()) persistAgentCancellation(activeTurn);
 		}
 		if (state.kind == ThrKind.DIRECT) {
 			pendingTurns.forEach(turn -> {
@@ -926,6 +933,8 @@ public class ThreadMessageDispatcher {
 
 		private final AtomicBoolean hasNonBlankOutput = new AtomicBoolean();
 
+		private final AtomicBoolean terminalClaimed = new AtomicBoolean();
+
 		private final Deque<String> leadingWhitespace = new ArrayDeque<>();
 
 		/** 지금까지 생성된 답변. 스트림 스레드가 쓰고 취소하는 스레드가 읽어서 StringBuffer다(이슈 #160). */
@@ -946,6 +955,10 @@ public class ThreadMessageDispatcher {
 
 		/** 완료/실패 저장이 이 턴에 대해 이미 한 번 시도됐는지 — 두 번째 시도는 조용히 건너뛴다. */
 		private final AtomicBoolean terminalPersisted;
+
+		boolean claimTerminal() {
+			return terminalClaimed.compareAndSet(false, true);
+		}
 
 		ActiveTurn(PendingTurn turn, SeqBlock seqBlock) {
 			this.turn = turn;

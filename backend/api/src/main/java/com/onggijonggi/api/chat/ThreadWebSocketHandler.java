@@ -72,6 +72,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 
 	private final ThreadMessageDispatcher threadMessageDispatcher;
 
+	private final CollabAuthorizationRevoker collabAuthorizationRevoker;
+
 	private final UserIdentityService userIdentityService;
 
 	private final ThreadMembershipService threadMembershipService;
@@ -88,7 +90,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	private final FixedWindowRateLimiter messageRateLimiter;
 
 	public ThreadWebSocketHandler(ObjectMapper objectMapper, RoomSessionRegistry roomSessionRegistry,
-			ThreadMessageDispatcher threadMessageDispatcher, UserIdentityService userIdentityService,
+			ThreadMessageDispatcher threadMessageDispatcher, CollabAuthorizationRevoker collabAuthorizationRevoker,
+			UserIdentityService userIdentityService,
 			ThreadMembershipService threadMembershipService, DirectChatTurnService directChatTurnService,
 			Clock rateLimitClock,
 			@Value("${app.ratelimit.window-seconds:60}") long rateLimitWindowSeconds,
@@ -96,6 +99,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		this.objectMapper = objectMapper;
 		this.roomSessionRegistry = roomSessionRegistry;
 		this.threadMessageDispatcher = threadMessageDispatcher;
+		this.collabAuthorizationRevoker = collabAuthorizationRevoker;
 		this.userIdentityService = userIdentityService;
 		this.threadMembershipService = threadMembershipService;
 		this.directChatTurnService = directChatTurnService;
@@ -268,6 +272,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 			}
 			return bootstrapDirect(threadId, connection, actor, inbound, traceId);
 		}
+		long authorizationEpoch = collabAuthorizationRevoker.epoch(actor.subject());
 
 		// kind는 dispatcher가 DIRECT·COLLAB을 가르는 데 필요하다(이슈 #162) — 참가자 재확인과
 		// 함께 조회해 왕복을 하나 더 늘리지 않는다.
@@ -314,7 +319,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 					// 구독 뒤에 워크스페이스를 못 보게 된 사람(인사이동 등)도 참가자 재확인과 같은 이유로 여기서 막는다.
 					return threadMembershipService.canEnterWorkspace(threadId, actor.subject())
 							.flatMap(inWorkspace -> inWorkspace
-									? rejectIfLocked(command, roomGeneration.get(), traceId)
+									? rejectIfLocked(command, roomGeneration.get(), traceId, authorizationEpoch)
 									: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
 											"이 방에 메시지를 보낼 권한이 없습니다.", traceId)));
 				})
@@ -549,6 +554,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		if (roomSessionRegistry.generationFor(threadId, connection.id()).isPresent()) {
 			return Mono.empty();
 		}
+		long authorizationEpoch = collabAuthorizationRevoker.epoch(connection.actor().subject());
 		return threadMembershipService.isActiveParticipant(threadId, connection.userId())
 				.flatMap(participant -> participant
 						? threadMembershipService.kindOf(threadId).flatMap(kind -> {
@@ -564,7 +570,16 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 							}
 							return threadMembershipService.canEnterWorkspace(threadId, connection.actor().subject())
 									.flatMap(inWorkspace -> inWorkspace
-											? Mono.<WsFrame>fromRunnable(() -> subscribe(connection, threadId))
+											? Mono.<WsFrame>defer(() -> {
+												boolean current = collabAuthorizationRevoker.ifCurrent(
+														connection.actor().subject(), authorizationEpoch, () -> {
+															subscribe(connection, threadId);
+															return null;
+														}).current();
+												return current ? Mono.empty()
+														: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
+																"이 방에 들어갈 권한이 없습니다.", traceId));
+											})
 											: Mono.just(new ErrorFrame(threadId, "FORBIDDEN", "이 방에 들어갈 권한이 없습니다.",
 													traceId)));
 						})
@@ -600,7 +615,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		}
 
 		Sinks.One<Void> overflow = Sinks.one();
-		Flux<WsFrame> roomFrames = bufferForRoom(membership.frames(), overflow).takeUntilOther(membership.left());
+		Flux<WsFrame> roomFrames = bufferForRoom(membership.frames(), overflow)
+				.takeUntilOther(Mono.firstWithSignal(membership.left(), membership.kicked()));
 		connection.attach(presenceEnabled ? roomFrames.startWith(membership.snapshot()) : roomFrames);
 
 		membership.kicked()
@@ -650,9 +666,14 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 구독으로 방송이 계속 가는 것(받기)은 이슈 #135가 다룬다.
 	*/
 	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, UUID roomGeneration, String traceId) {
+		return rejectIfLocked(command, roomGeneration, traceId, -1);
+	}
+
+	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, UUID roomGeneration, String traceId,
+			long authorizationEpoch) {
 		return threadMembershipService.isOpenForWriting(command.threadId())
 				.flatMap(open -> open
-						? dispatch(command, roomGeneration, traceId)
+						? dispatch(command, roomGeneration, traceId, authorizationEpoch)
 						: Mono.just(new ErrorFrame(command.threadId(), "THREAD_LOCKED",
 								"잠기거나 보관된 방에는 메시지를 보낼 수 없습니다.", traceId)));
 	}
@@ -663,8 +684,19 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 흘려보내면 이 Mono가 합쳐지는 인바운드 처리 전체가 에러로 끝나 연결이 비정상 종료된다 —
 	* "형식 오류는 연결을 유지한다"는 위 설계 의도와 반대가 된다.
 	*/
-	private Mono<WsFrame> dispatch(ChatMessageCommand command, UUID roomGeneration, String traceId) {
+	private Mono<WsFrame> dispatch(ChatMessageCommand command, UUID roomGeneration, String traceId,
+			long authorizationEpoch) {
 		try {
+			if (command.kind() == ThrKind.COLLAB) {
+				CollabAuthorizationRevoker.GuardedResult<Optional<ErrorFrame>> result = collabAuthorizationRevoker.ifCurrent(
+						command.fromSubject(), authorizationEpoch,
+						() -> threadMessageDispatcher.dispatch(command, roomGeneration));
+				if (!result.current()) {
+					return Mono.just(new ErrorFrame(command.threadId(), "FORBIDDEN",
+							"이 방에 메시지를 보낼 권한이 없습니다.", traceId));
+				}
+				return Mono.justOrEmpty(result.value());
+			}
 			return Mono.justOrEmpty(threadMessageDispatcher.dispatch(command, roomGeneration));
 		} catch (RuntimeException error) {
 			log.error("WebSocket room broadcast failed threadId={} traceId={}",

@@ -148,6 +148,23 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 				.isEqualTo("beta-" + tag);
 	}
 
+	@Test
+	void inactiveTenantOrOrgUnitIsReportedAsInvalidAssignment() {
+		String tag = tag();
+		String inactiveTeamSubject = "inactive-team-" + tag;
+		String inactiveTenantSubject = "inactive-tenant-" + tag;
+		assign(inactiveTeamSubject, "team-" + tag);
+		assign(inactiveTenantSubject, "tenant-" + tag);
+		jdbc.update("update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?",
+				teamByTenantKey.get("team-" + tag));
+		jdbc.update("update tnn set status = 'INACTIVE', inactive_at = now() where tnn_key = ?", "tenant-" + tag);
+
+		CutoverValidationResult result = validation.validate(List.of(inactiveTeamSubject, inactiveTenantSubject));
+
+		assertThat(result.invalidTenantSubjects()).containsExactly(inactiveTeamSubject, inactiveTenantSubject);
+		assertThat(jdbc.queryForObject("select count(*) from stg_user_cur_tnn", Integer.class)).isZero();
+	}
+
 	private static String tag() {
 		return "t" + UUID.randomUUID().toString().substring(0, 8);
 	}

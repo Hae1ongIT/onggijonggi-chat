@@ -111,6 +111,23 @@ class MemberImportServiceTest {
 	}
 
 	@Test
+	void crossTenantMoveIsReportedAsAProblemBeforeApply() {
+		when(members.findBySubject("sub-lee@example.com"))
+				.thenReturn(List.of(new OrgUnitMember(UUID.randomUUID(), hr.getId(), "sub-lee@example.com", Rank.K)));
+		String csv = "email,team,rank\nkim@example.com,hr,TL\nlee@example.com,fin,B";
+
+		for (boolean apply : List.of(false, true)) {
+			MemberImportService.Report report = run(csv, apply);
+			assertThat(report.applied()).isFalse();
+			assertThat(report.problems()).singleElement().satisfies(problem -> {
+				assertThat(problem.line()).isEqualTo(3);
+				assertThat(problem.message()).contains("다른 Tenant");
+			});
+		}
+		verify(memberService, never()).applyAll(anyList(), any());
+	}
+
+	@Test
 	@SuppressWarnings("unchecked")
 	void applySavesEverythingAtOnceAsTheCallingUser() {
 		when(memberService.applyAll(anyList(), any())).thenReturn(List.of(

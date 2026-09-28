@@ -2,10 +2,14 @@ package com.onggijonggi.api.authz;
 
 import com.onggijonggi.common.authz.OrgUnitMember;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
+import com.onggijonggi.common.authz.OrgUnit;
+import com.onggijonggi.common.authz.OrgUnitRepository;
+import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.StagingUserCurrentTenant;
 import com.onggijonggi.common.authz.StagingUserCurrentTenantRepository;
 import com.onggijonggi.common.authz.Tenant;
 import com.onggijonggi.common.authz.TenantRepository;
+import com.onggijonggi.common.authz.TenantStatus;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
 import java.util.ArrayList;
@@ -37,15 +41,18 @@ public class CutoverValidationService {
 
 	private final AppUserRepository appUserRepository;
 	private final OrgUnitMemberRepository memberRepository;
+	private final OrgUnitRepository orgUnitRepository;
 	private final TenantRepository tenantRepository;
 	private final StagingUserCurrentTenantRepository currentTenantRepository;
 	private final JdbcTemplate jdbcTemplate;
 
 	public CutoverValidationService(AppUserRepository appUserRepository, OrgUnitMemberRepository memberRepository,
+			OrgUnitRepository orgUnitRepository,
 			TenantRepository tenantRepository, StagingUserCurrentTenantRepository currentTenantRepository,
 			JdbcTemplate jdbcTemplate) {
 		this.appUserRepository = appUserRepository;
 		this.memberRepository = memberRepository;
+		this.orgUnitRepository = orgUnitRepository;
 		this.tenantRepository = tenantRepository;
 		this.currentTenantRepository = currentTenantRepository;
 		this.jdbcTemplate = jdbcTemplate;
@@ -58,11 +65,20 @@ public class CutoverValidationService {
 	@Transactional
 	public CutoverValidationResult validate(Collection<String> enabledSubjects) {
 		Map<UUID, String> tenantKeyById = new HashMap<>();
-		for (Tenant tenant : tenantRepository.findAll()) tenantKeyById.put(tenant.getId(), tenant.getKey());
+		for (Tenant tenant : tenantRepository.findAll()) {
+			if (tenant.getStatus() == TenantStatus.ACTIVE) tenantKeyById.put(tenant.getId(), tenant.getKey());
+		}
+		Map<UUID, OrgUnit> activeOrgUnits = new HashMap<>();
+		for (OrgUnit unit : orgUnitRepository.findAll()) {
+			if (unit.getStatus() == OrgUnitStatus.ACTIVE) activeOrgUnits.put(unit.getId(), unit);
+		}
 		Map<String, String> assignedTenantKey = new HashMap<>();
 		for (OrgUnitMember member : memberRepository.findAll()) {
 			String key = tenantKeyById.get(member.getTenantId());
-			if (key != null) assignedTenantKey.put(member.getSubject(), key);
+			OrgUnit unit = activeOrgUnits.get(member.getOrgUnitId());
+			if (key != null && unit != null && unit.getTenantId().equals(member.getTenantId())) {
+				assignedTenantKey.put(member.getSubject(), key);
+			}
 		}
 		Map<String, Optional<String>> tenantBySubject = new HashMap<>();
 		for (String subject : enabledSubjects) {
