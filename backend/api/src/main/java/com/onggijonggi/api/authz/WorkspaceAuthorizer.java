@@ -62,8 +62,10 @@ public class WorkspaceAuthorizer {
 		return authorize(subject, workspaceNodeId, CasbinPolicy.MANAGE);
 	}
 
+	/** workspaceNodeId가 null(워크스페이스가 정해지지 않은 방)이면 판정이 켜져 있을 때 어떤 액션이든 거부다. */
 	private Mono<Boolean> authorize(String subject, UUID workspaceNodeId, String action) {
 		if (!rbacProperties.isEnforce()) return Mono.just(true);
+		if (workspaceNodeId == null) return Mono.just(false);
 		return Mono.fromCallable(() -> authorizeBlocking(subject, workspaceNodeId, action)).subscribeOn(Schedulers.boundedElastic());
 	}
 
