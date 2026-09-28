@@ -16,6 +16,7 @@ import com.onggijonggi.common.authz.WorkspaceNodeStatus;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
+import com.onggijonggi.common.user.AppUserStatus;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -112,12 +113,13 @@ public class ThreadWorkspaceService {
 	* 판정이 꺼져 있으면 지금처럼 ACTIVE Tenant가 하나일 때만 그 common이고, 아니면 비워 둔다.
 	*/
 	public Optional<WorkspaceNode> directPlacementBlocking(UUID userId) {
+		AppUser user = appUsers.findById(userId)
+				.filter(found -> found.getStatus() == AppUserStatus.ACTIVE)
+				.orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN));
 		if (!rbacProperties.isEnforce()) {
 			return onlyActiveTenantCommon();
 		}
-		Optional<WorkspaceNode> common = appUsers.findById(userId)
-				.map(AppUser::getKeycloakSubj)
-				.flatMap(subject -> members.findBySubject(subject).stream().findFirst())
+		Optional<WorkspaceNode> common = members.findBySubject(user.getKeycloakSubj()).stream().findFirst()
 				.filter(this::isUsableAssignment)
 				.flatMap(assignment -> nodes.findByTenantIdAndKey(assignment.getTenantId(), COMMON_KEY))
 				.filter(node -> node.getStatus() == WorkspaceNodeStatus.ACTIVE);

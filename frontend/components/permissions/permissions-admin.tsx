@@ -8,7 +8,13 @@
  bff의 casbin 프로필에서만 API가 있다. 꺼져 있으면 404, PLATFORM_ADMIN이 아니면 403을 반환한다.
  *********************************************************/
 
-import { type ChangeEvent, useCallback, useEffect, useState } from 'react';
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 
 import { SidebarToggle } from '@/components/sidebar-toggle';
@@ -264,11 +270,13 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
   const [fileName, setFileName] = useState('');
   const [report, setReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const selection = useRef(0);
 
-  async function run(text: string, apply: boolean) {
+  async function applyCsv(text: string) {
     setBusy(true);
     try {
-      const result = await importMembersCsv(text, apply);
+      const result = await importMembersCsv(text, true);
       setReport(result);
       if (result.applied) {
         await onApplied();
@@ -287,17 +295,34 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
-    const text = await file.text();
-    setCsv(text);
+    const selected = ++selection.current;
+    setCsv(null);
+    setReport(null);
     setFileName(file.name);
-    await run(text, false);
+    setPreviewing(true);
+    try {
+      const text = await file.text();
+      if (selected !== selection.current) return;
+      setCsv(text);
+      const result = await importMembersCsv(text, false);
+      if (selected === selection.current) setReport(result);
+    } catch (error) {
+      if (selected === selection.current) {
+        toast.error(
+          `CSV를 읽지 못했습니다. ${error instanceof Error ? error.message : ''}`,
+        );
+      }
+    } finally {
+      if (selected === selection.current) setPreviewing(false);
+    }
   }
 
   const canApply =
     csv !== null &&
     report !== null &&
     !report.applied &&
-    report.problems.length === 0;
+    report.problems.length === 0 &&
+    !previewing;
 
   return (
     <section className="flex flex-col gap-3">
@@ -323,7 +348,7 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
         )}
         <Button
           disabled={!canApply || busy}
-          onClick={() => csv && run(csv, true)}
+          onClick={() => csv && applyCsv(csv)}
           size="sm"
         >
           저장

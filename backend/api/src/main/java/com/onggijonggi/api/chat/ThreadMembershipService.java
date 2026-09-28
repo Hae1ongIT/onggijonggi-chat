@@ -8,6 +8,8 @@ import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import com.onggijonggi.common.user.AppUserRepository;
+import com.onggijonggi.common.user.AppUserStatus;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -33,13 +35,15 @@ public class ThreadMembershipService {
 	private final WorkspaceAuthorizer workspaceAuthorizer;
 
 	private final RbacProperties rbacProperties;
+	private final AppUserRepository appUsers;
 
 	public ThreadMembershipService(ThrMbrRepository thrMbrRepository, ThrRepository thrRepository,
-			WorkspaceAuthorizer workspaceAuthorizer, RbacProperties rbacProperties) {
+			WorkspaceAuthorizer workspaceAuthorizer, RbacProperties rbacProperties, AppUserRepository appUsers) {
 		this.thrMbrRepository = thrMbrRepository;
 		this.thrRepository = thrRepository;
 		this.workspaceAuthorizer = workspaceAuthorizer;
 		this.rbacProperties = rbacProperties;
+		this.appUsers = appUsers;
 	}
 
 	/**
@@ -50,14 +54,18 @@ public class ThreadMembershipService {
 	* 방이 없으면 참이다 — 없는 방은 참가 판정이 이미 거부한다. 판정이 꺼져 있으면 DB를 보지 않고 참이다.
 	*/
 	public Mono<Boolean> canEnterWorkspace(UUID threadId, String subject) {
-		if (!rbacProperties.isEnforce()) {
-			return Mono.just(true);
-		}
-		return Mono.fromCallable(() -> thrRepository.findById(threadId))
+		return Mono.fromCallable(() -> appUsers.findByKeycloakSubj(subject)
+				.map(user -> user.getStatus() == AppUserStatus.ACTIVE).orElse(true))
 				.subscribeOn(Schedulers.boundedElastic())
-				.flatMap(thread -> thread.isEmpty()
-						? Mono.just(true)
-						: workspaceAuthorizer.canView(subject, thread.get().getWorkspaceNodeId()));
+				.flatMap(active -> {
+					if (!active) return Mono.just(false);
+					if (!rbacProperties.isEnforce()) return Mono.just(true);
+					return Mono.fromCallable(() -> thrRepository.findById(threadId))
+							.subscribeOn(Schedulers.boundedElastic())
+							.flatMap(thread -> thread.isEmpty()
+									? Mono.just(true)
+									: workspaceAuthorizer.canView(subject, thread.get().getWorkspaceNodeId()));
+				});
 	}
 
 	/**

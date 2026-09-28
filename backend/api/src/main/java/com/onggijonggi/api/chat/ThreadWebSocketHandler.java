@@ -123,6 +123,11 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 								new PresenceParticipant(info.subject(), info.displayName())), info.tokenExpiresAt()))
 						.onErrorResume(UserProvisioningFailure.class, error -> {
 							String traceId = newTraceId();
+					if (error.getCause() instanceof ResponseStatusException status
+							&& status.getStatusCode().value() == 403) {
+						return sendErrorAndClose(session, "FORBIDDEN",
+								"이 연결을 사용할 권한이 없습니다.", traceId);
+					}
 							log.error("WebSocket user provisioning failed traceId={}", traceId, error.getCause());
 							return sendErrorAndClose(session, "INTERNAL_ERROR",
 									"WebSocket 세션을 초기화하지 못했습니다.", traceId);

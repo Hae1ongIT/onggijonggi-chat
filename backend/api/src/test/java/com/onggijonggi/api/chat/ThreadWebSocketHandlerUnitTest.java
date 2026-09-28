@@ -24,6 +24,8 @@ import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -110,6 +112,30 @@ class ThreadWebSocketHandlerUnitTest {
 		handler.handle(session).block();
 
 		assertThat(sent.get()).contains("\"type\":\"error\"", "\"code\":\"INTERNAL_ERROR\"", "\"threadId\":null");
+		verify(session).close(CloseStatus.NORMAL);
+	}
+
+	@Test
+	void sendsForbiddenInsteadOfInternalErrorForInactiveUser() {
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		AtomicReference<String> sent = new AtomicReference<>();
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> "inactive-user"));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("inactive-user"))
+				.thenReturn(Mono.error(new ResponseStatusException(HttpStatus.FORBIDDEN)));
+		stubTextMessages(session);
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(
+				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+				.doOnNext(message -> sent.set(message.getPayloadAsText())).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		handler(registry, provisioning).handle(session).block();
+
+		assertThat(sent.get()).contains("\"type\":\"error\"", "\"code\":\"FORBIDDEN\"");
 		verify(session).close(CloseStatus.NORMAL);
 	}
 

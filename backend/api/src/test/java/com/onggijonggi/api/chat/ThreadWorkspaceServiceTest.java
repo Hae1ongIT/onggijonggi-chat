@@ -26,6 +26,7 @@ import com.onggijonggi.common.authz.WorkspaceNodeStatus;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
+import com.onggijonggi.common.user.AppUserStatus;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -163,13 +164,27 @@ class ThreadWorkspaceServiceTest {
 	void withEnforcementOffDirectThreadGoesIntoTheOnlyActiveTenantsCommonOrStaysUnplaced() {
 		rbac.setEnforce(false);
 		UUID userId = UUID.randomUUID();
+		AppUser user = mock(AppUser.class);
+		when(user.getStatus()).thenReturn(AppUserStatus.ACTIVE);
+		when(appUsers.findById(userId)).thenReturn(Optional.of(user));
 		when(tenants.findAll()).thenReturn(List.of(tenant, new Tenant("old", "옛 고객사", TenantStatus.INACTIVE)));
 		when(nodes.findByTenantIdAndKey(tenant.getId(), "common")).thenReturn(Optional.of(common));
 		assertThat(service.directPlacementBlocking(userId)).contains(common);
 
 		when(tenants.findAll()).thenReturn(List.of(tenant, new Tenant("acme", "다른 고객사", TenantStatus.ACTIVE)));
 		assertThat(service.directPlacementBlocking(userId)).isEmpty();
-		verifyNoInteractions(members, appUsers);
+		verifyNoInteractions(members);
+	}
+
+	@Test
+	void inactiveDirectOwnerCannotCreateATurnWithPreservedAssignment() {
+		UUID userId = assignedUser(tenant.getId(), OrgUnitStatus.ACTIVE);
+		AppUser inactive = new AppUser(SUBJECT);
+		inactive.deactivate();
+		when(appUsers.findById(userId)).thenReturn(Optional.of(inactive));
+
+		assertStatus(Mono.fromCallable(() -> service.directPlacementBlocking(userId)), HttpStatus.FORBIDDEN);
+		verifyNoInteractions(tenants);
 	}
 
 	/** SUBJECT로 로그인하는 사람을 만들고, 그 사람을 tenantId의 팀(상태 지정)에 배정한다. */
@@ -186,6 +201,7 @@ class ThreadWorkspaceServiceTest {
 	private static AppUser loginUser() {
 		AppUser user = mock(AppUser.class);
 		when(user.getKeycloakSubj()).thenReturn(SUBJECT);
+		when(user.getStatus()).thenReturn(AppUserStatus.ACTIVE);
 		return user;
 	}
 

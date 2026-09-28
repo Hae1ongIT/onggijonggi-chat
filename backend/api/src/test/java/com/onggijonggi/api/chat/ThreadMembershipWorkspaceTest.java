@@ -10,6 +10,8 @@ import com.onggijonggi.api.authz.WorkspaceAuthorizer;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import com.onggijonggi.common.user.AppUser;
+import com.onggijonggi.common.user.AppUserRepository;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,12 +30,15 @@ class ThreadMembershipWorkspaceTest {
 	private final RbacProperties rbac = new RbacProperties();
 	private final ThrRepository threads = mock(ThrRepository.class);
 	private final WorkspaceAuthorizer authorizer = mock(WorkspaceAuthorizer.class);
+	private final AppUserRepository appUsers = mock(AppUserRepository.class);
+	private final AppUser user = new AppUser(SUBJECT);
 	private final ThreadMembershipService service =
-			new ThreadMembershipService(mock(ThrMbrRepository.class), threads, authorizer, rbac);
+			new ThreadMembershipService(mock(ThrMbrRepository.class), threads, authorizer, rbac, appUsers);
 
 	@BeforeEach
 	void setUp() {
 		rbac.setEnforce(true);
+		when(appUsers.findByKeycloakSubj(SUBJECT)).thenReturn(Optional.of(user));
 	}
 
 	@Test
@@ -91,5 +96,26 @@ class ThreadMembershipWorkspaceTest {
 
 		assertThat(service.canEnterWorkspace(UUID.randomUUID(), SUBJECT).block()).isTrue();
 		verifyNoInteractions(threads, authorizer);
+	}
+
+	@Test
+	void inactiveUserCannotRejoinEvenWhenEnforcementIsOff() {
+		rbac.setEnforce(false);
+		user.deactivate();
+
+		assertThat(service.canEnterWorkspace(UUID.randomUUID(), SUBJECT).block()).isFalse();
+		verifyNoInteractions(threads, authorizer);
+	}
+
+	@Test
+	void notYetProvisionedInviteeCanStillPassWorkspaceEligibility() {
+		UUID nodeId = UUID.randomUUID();
+		Thr thread = Thr.collab(UUID.randomUUID(), "초대할 방");
+		thread.placeIn(UUID.randomUUID(), nodeId);
+		when(threads.findById(thread.getId())).thenReturn(Optional.of(thread));
+		when(appUsers.findByKeycloakSubj("new-invitee")).thenReturn(Optional.empty());
+		when(authorizer.canView("new-invitee", nodeId)).thenReturn(Mono.just(true));
+
+		assertThat(service.canEnterWorkspace(thread.getId(), "new-invitee").block()).isTrue();
 	}
 }
