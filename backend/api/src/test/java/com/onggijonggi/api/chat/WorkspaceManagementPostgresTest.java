@@ -542,6 +542,26 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		assertThat(jdbc.queryForObject("select role from rank_grn where id = ?", String.class, rule)).isEqualTo("ADMIN");
 	}
 
+	@Test
+	void changingDeclaredRankRuleAddsNewTupleWithoutRemovingOldOne() throws Exception {
+		String config = Files.readString(BOOTSTRAP_CONFIG);
+		String viewerConfig = config.replace("    grants:\n",
+				"    rank_grants:\n      - { org_unit: hr, rank: K, role: VIEWER, node: hr }\n    grants:\n");
+		Files.writeString(BOOTSTRAP_CONFIG, viewerConfig);
+		bootstrap.runCurrentConfiguration();
+		assertThat(service.listRankGrants(hrAdmin, hr)).extracting(WorkspaceManagementService.RankGrantView::role)
+				.containsExactly(WorkspaceRole.VIEWER);
+
+		Files.writeString(BOOTSTRAP_CONFIG, viewerConfig.replace("rank: K, role: VIEWER", "rank: K, role: ADMIN"));
+		bootstrap.runCurrentConfiguration();
+
+		assertThat(service.listRankGrants(hrAdmin, hr))
+				.extracting(WorkspaceManagementService.RankGrantView::role)
+				.containsExactlyInAnyOrder(WorkspaceRole.VIEWER, WorkspaceRole.ADMIN);
+		assertThat(jdbc.queryForObject("select count(*) from rank_grn where tnn_id = ? and wrk_node_id = ?",
+				Integer.class, tenantId, hr)).isEqualTo(2);
+	}
+
 	private UUID team(String key) {
 		return jdbc.queryForObject("select id from org_unit where tnn_id = ? and org_unit_key = ?", UUID.class, tenantId, key);
 	}
