@@ -66,7 +66,9 @@ class AuthorizationAuditControllerTest {
 					.expectStatus().isEqualTo(HttpStatus.BAD_REQUEST)
 					.expectBody().jsonPath("$.error.code").exists();
 		}
-		get("/api/workspaces/not-a-uuid/authorization-audits", List.of("USER")).expectStatus().isEqualTo(HttpStatus.BAD_REQUEST);
+		get("/api/workspaces/not-a-uuid/authorization-audits", List.of("USER"))
+				.expectStatus().isEqualTo(HttpStatus.BAD_REQUEST)
+				.expectBody().jsonPath("$.error.code").exists();
 	}
 
 	private RestTestClient.ResponseSpec get(String path, List<String> roles) {

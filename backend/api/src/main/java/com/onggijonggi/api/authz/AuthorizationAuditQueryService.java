@@ -86,7 +86,8 @@ public class AuthorizationAuditQueryService {
 		if (query.actorUserId() != null) condition(sql, params, "act_user_id = :actorUserId", "actorUserId", query.actorUserId());
 		if (query.requestId() != null) condition(sql, params, "req_id = :requestId", "requestId", query.requestId());
 		if (query.cursor() != null) {
-			sql.append(" and (created_at < :cursorAt or (created_at = :cursorAt and id < :cursorId))");
+			// 행 비교로 쓴다 — OR로 풀면 인덱스 (…, created_at desc, id desc)의 순서를 그대로 이어 읽지 못할 수 있다.
+			sql.append(" and (created_at, id) < (:cursorAt, :cursorId)");
 			params.addValue("cursorAt", utc(query.cursor().createdAt())).addValue("cursorId", query.cursor().id());
 		}
 		sql.append(" order by created_at desc, id desc limit :fetch");

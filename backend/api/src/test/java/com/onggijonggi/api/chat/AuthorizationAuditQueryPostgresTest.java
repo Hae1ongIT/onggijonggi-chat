@@ -22,6 +22,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.client.RestTestClient;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Class Name : AuthorizationAuditQueryPostgresTest.java
@@ -208,14 +210,21 @@ class AuthorizationAuditQueryPostgresTest extends PostgresSpringTestBase {
 		audit(tenantId, hr, "POLICY_ADDED", "POLICY", BASE, null, "req-json");
 		Integer before = jdbc.queryForObject("select count(*) from authz_adt", Integer.class);
 
-		workspace(hrAdmin, hr, SINCE_BASE + "&requestId=req-json").expectStatus().isOk()
-				.expectBody()
-				.jsonPath("$.items[0].targetRef.node_key").isEqualTo("hr")
-				.jsonPath("$.items[0].afterJson.role").isEqualTo("ADMIN")
-				.jsonPath("$.items[0].actorRoleJson").isArray()
-				.jsonPath("$.items[0].beforeJson").doesNotExist()
-				.jsonPath("$.items[0].traceId").isEqualTo("trace-" + tag)
-				.jsonPath("$.nextCursor").doesNotExist();
+		String body = workspace(hrAdmin, hr, SINCE_BASE + "&requestId=req-json").expectStatus().isOk()
+				.expectBody(String.class).returnResult().getResponseBody();
+		JsonNode page = new JsonMapper().readTree(body);
+		JsonNode item = page.get("items").get(0);
+
+		assertThat(item.get("targetRef").isObject()).isTrue();
+		assertThat(item.get("targetRef").get("node_key").asString()).isEqualTo("hr");
+		assertThat(item.get("afterJson").get("role").asString()).isEqualTo("ADMIN");
+		assertThat(item.get("actorRoleJson").isArray()).isTrue();
+		assertThat(item.get("traceId").asString()).isEqualTo("trace-" + tag);
+		// 빈 값은 필드를 빼지 않고 null로 내보낸다 — 마지막 페이지의 nextCursor도 같다.
+		assertThat(item.has("beforeJson")).isTrue();
+		assertThat(item.get("beforeJson").isNull()).isTrue();
+		assertThat(page.has("nextCursor")).isTrue();
+		assertThat(page.get("nextCursor").isNull()).isTrue();
 
 		assertThat(jdbc.queryForObject("select count(*) from authz_adt", Integer.class)).isEqualTo(before);
 	}
