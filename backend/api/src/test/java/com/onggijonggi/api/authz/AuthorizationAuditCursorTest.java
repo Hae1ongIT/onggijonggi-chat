@@ -33,7 +33,10 @@ class AuthorizationAuditCursorTest {
 		String badUuid = Base64.getUrlEncoder().encodeToString("2026-09-29T01:02:03Z|nope".getBytes(StandardCharsets.UTF_8));
 		String badTime = Base64.getUrlEncoder().encodeToString(("yesterday|" + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
 
-		for (String value : new String[] { "!!not-base64!!", noSeparator, badUuid, badTime, "" }) {
+		String outOfRange = Base64.getUrlEncoder().encodeToString(("+300000-01-01T00:00:00Z|" + UUID.randomUUID())
+				.getBytes(StandardCharsets.UTF_8));
+
+		for (String value : new String[] { "!!not-base64!!", noSeparator, badUuid, badTime, outOfRange, "" }) {
 			assertThatThrownBy(() -> AuthorizationAuditCursor.decode(value))
 					.isInstanceOfSatisfying(ResponseStatusException.class,
 							error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));

@@ -44,6 +44,14 @@ class AuthorizationAuditQueryTest {
 		assertBadRequest(() -> AuthorizationAuditQuery.parse(null, null, null, null, null, "not-a-uuid", null, null, null));
 		assertBadRequest(() -> AuthorizationAuditQuery.parse(null, null, null, null, null, null, " ", null, null));
 		assertBadRequest(() -> AuthorizationAuditQuery.parse(null, null, null, null, null, null, null, null, "garbage"));
+		// PostgreSQL에 바인딩하면 실패하는 시각과 컬럼보다 긴 requestId는 500이 아니라 400이다.
+		assertBadRequest(() -> AuthorizationAuditQuery.parse("+300000-01-01T00:00:00Z", null, null, null, null, null, null, null,
+				null));
+		assertBadRequest(() -> AuthorizationAuditQuery.parse(null, "-0001-01-01T00:00:00Z", null, null, null, null, null, null,
+				null));
+		assertBadRequest(() -> AuthorizationAuditQuery.parse(null, null, null, null, null, null, "r".repeat(256), null, null));
+		assertThat(AuthorizationAuditQuery.parse(null, null, null, null, null, null, "r".repeat(255), null, null).requestId())
+				.hasSize(255);
 		// 같은 시각도 역전으로 본다 — 기간은 from <= created_at < to라 비어 버린다.
 		assertBadRequest(() -> AuthorizationAuditQuery.parse("2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z", null, null, null, null,
 				null, null, null));
