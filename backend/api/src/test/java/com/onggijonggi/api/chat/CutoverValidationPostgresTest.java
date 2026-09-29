@@ -79,6 +79,106 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 				.contains("THREAD_ACTOR_VIEW_MISSING");
 	}
 
+	@Test
+	void rankRuleWithoutTeamPassesAtTheRankBoundaryAndFailsAboveIt() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+
+		rankGrant(fixture.tenant(), fixture.teamWorkspace(), "K", null, "VIEWER");
+		assertThat(codes(validation.validate(List.of(fixture.subject())))).contains("THREAD_ACTOR_VIEW_MISSING");
+
+		rankGrant(fixture.tenant(), fixture.teamWorkspace(), "S", null, "VIEWER");
+		assertThat(validation.validate(List.of(fixture.subject())).ready()).isTrue();
+	}
+
+	@Test
+	void rankRuleForAnotherTeamDoesNotCount() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+		UUID other = UUID.randomUUID();
+		jdbc.update("insert into org_unit (id, tnn_id, org_unit_key, name) values (?, ?, 'other', 'Other')", other, fixture.tenant());
+
+		rankGrant(fixture.tenant(), fixture.teamWorkspace(), "S", other, "VIEWER");
+		assertThat(codes(validation.validate(List.of(fixture.subject())))).contains("THREAD_ACTOR_VIEW_MISSING");
+	}
+
+	@Test
+	void contributorAndAdminGrantsIncludeView() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+
+		grant(fixture.tenant(), fixture.team(), fixture.common());
+		grant(fixture.tenant(), fixture.team(), fixture.teamWorkspace(), "CONTRIBUTOR");
+		assertThat(validation.validate(List.of(fixture.subject())).ready()).isTrue();
+
+		jdbc.update("delete from wrk_grn where wrk_node_id = ?", fixture.teamWorkspace());
+		grant(fixture.tenant(), fixture.team(), fixture.teamWorkspace(), "ADMIN");
+		assertThat(validation.validate(List.of(fixture.subject())).ready()).isTrue();
+	}
+
+	@Test
+	void directThreadPlacedOutsideCommonIsReported() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID direct = thread("DIRECT", owner, fixture.teamWorkspace());
+		member(direct, owner);
+		grant(fixture.tenant(), fixture.team(), fixture.teamWorkspace());
+
+		assertThat(codes(validation.validate(List.of(fixture.subject())))).contains("DIRECT_OUTSIDE_COMMON");
+	}
+
+	@Test
+	void enabledSubjectWithoutAssignmentIsReported() {
+		Fixture fixture = fixture();
+		jdbc.update("delete from org_unit_mbr where subj = ?", fixture.subject());
+
+		CutoverValidationResult result = validation.validate(List.of(fixture.subject()));
+		assertThat(result.failures()).contains(new CutoverValidationResult.Failure("INVALID_ACTIVE_SUBJECT_ASSIGNMENT", null, fixture.subject()));
+	}
+
+	@Test
+	void disabledKeycloakAccountHistoryIsKept() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+
+		// Keycloak에서 비활성인 계정은 권한이 없어도 참여 이력이 절체를 막지 않는다.
+		assertThat(validation.validate(List.of()).ready()).isTrue();
+	}
+
+	@Test
+	void duplicatedFailuresAreReportedOnce() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+		jdbc.update("insert into thr_idm_key (id, thr_id, user_id, idm_key, title) values (?, ?, ?, 'k', 't')", UUID.randomUUID(), collab, owner);
+
+		long sameFailure = validation.validate(List.of(fixture.subject())).failures().stream()
+				.filter(failure -> failure.code().equals("THREAD_ACTOR_VIEW_MISSING")).count();
+		assertThat(sameFailure).isEqualTo(1);
+	}
+
+	private static List<String> codes(CutoverValidationResult result) {
+		return result.failures().stream().map(CutoverValidationResult.Failure::code).toList();
+	}
+
+	private void rankGrant(UUID tenant, UUID workspace, String rank, UUID orgUnit, String role) {
+		jdbc.update("insert into rank_grn (id, tnn_id, wrk_node_id, rank, org_unit_id, role) values (?, ?, ?, ?, ?, ?)",
+				UUID.randomUUID(), tenant, workspace, rank, orgUnit, role);
+	}
+
+	private void grant(UUID tenant, UUID team, UUID workspace, String role) {
+		jdbc.update("insert into wrk_grn (id, tnn_id, org_unit_id, wrk_node_id, role) values (?, ?, ?, ?, ?)", UUID.randomUUID(), tenant, team, workspace, role);
+	}
+
 	private Fixture fixture() {
 		String key = "t" + UUID.randomUUID().toString().substring(0, 8);
 		UUID tenant = UUID.randomUUID();

@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,6 +47,8 @@ public class CutoverValidationService {
 	private final WorkspaceGrantRepository grants;
 	private final RankGrantRepository rankGrants;
 	private final JdbcTemplate jdbc;
+	/** 응답이 끝없이 커지지 않게 하는 상한. 넘으면 FAILURES_TRUNCATED가 붙는다. */
+	private static final int MAX_FAILURES = 500;
 
 	public CutoverValidationService(AppUserRepository users, OrgUnitMemberRepository members,
 			OrgUnitRepository orgUnits, TenantRepository tenants, WorkspaceNodeRepository nodes,
@@ -63,12 +66,13 @@ public class CutoverValidationService {
 	/** Keycloak에서 활성인 subject만 받는다. app_user의 로컬 INACTIVE는 재활성화 가능하므로 제외 근거가 아니다. */
 	@Transactional(readOnly = true)
 	public CutoverValidationResult validate(Collection<String> enabledSubjects) {
-		List<CutoverValidationResult.Failure> failures = new ArrayList<>();
+		// 같은 (코드, Thread, subject)는 한 번만 담는다. 상한을 넘으면 나머지는 버리고 표시만 남긴다.
+		Set<CutoverValidationResult.Failure> failures = new LinkedHashSet<>();
 		List<Tenant> activeTenants = tenants.findAll().stream()
 				.filter(tenant -> tenant.getStatus() == TenantStatus.ACTIVE).toList();
 		if (activeTenants.size() != 1) {
 			failures.add(failure("ACTIVE_TENANT_COUNT", null, null));
-			return new CutoverValidationResult(null, failures);
+			return new CutoverValidationResult(null, List.copyOf(failures));
 		}
 		UUID tenantId = activeTenants.get(0).getId();
 		Map<UUID, WorkspaceNode> nodeById = new HashMap<>();
@@ -114,6 +118,9 @@ public class CutoverValidationService {
 		List<ParticipantRow> participants = jdbc.query(
 				"select thr_id, user_id, role from thr_mbr where status = 'ACTIVE' order by thr_id, user_id",
 				(rows, index) -> new ParticipantRow(rows.getObject(1, UUID.class), rows.getObject(2, UUID.class), rows.getString(3)));
+		Set<String> ownerMemberships = new HashSet<>();
+		for (ParticipantRow participant : participants)
+			if ("OWNER".equals(participant.role())) ownerMemberships.add(participant.threadId() + ":" + participant.userId());
 		for (ThreadRow thread : threads) {
 			if (thread.tenantId() != null && !tenantId.equals(thread.tenantId()))
 				failures.add(failure("THREAD_TENANT_MISMATCH", thread.id(), null));
@@ -127,8 +134,7 @@ public class CutoverValidationService {
 					|| finalNode.getKind() == WorkspaceNodeKind.ROOT)
 				failures.add(failure("INVALID_THREAD_WORKSPACE", thread.id(), null));
 			if ("DIRECT".equals(thread.kind())) {
-				if (participants.stream().noneMatch(member -> member.threadId().equals(thread.id())
-						&& member.userId().equals(thread.directOwner()) && "OWNER".equals(member.role())))
+				if (!ownerMemberships.contains(thread.id() + ":" + thread.directOwner()))
 					failures.add(failure("DIRECT_OWNER_MEMBERSHIP_MISSING", thread.id(), null));
 				checkActor(thread.id(), thread.directOwner(), finalNodeId, tenantId, enabled, subjectByUser,
 						assignmentBySubject, unitById, grantsByNode, ranksByNode, failures);
@@ -156,13 +162,15 @@ public class CutoverValidationService {
 			checkActor(actor.threadId(), actor.userId(), finalNodeId, tenantId, enabled, subjectByUser,
 					assignmentBySubject, unitById, grantsByNode, ranksByNode, failures);
 		}
-		return new CutoverValidationResult(tenantId, List.copyOf(failures));
+		List<CutoverValidationResult.Failure> reported = new ArrayList<>(failures.stream().limit(MAX_FAILURES).toList());
+		if (failures.size() > MAX_FAILURES) reported.add(failure("FAILURES_TRUNCATED", null, null));
+		return new CutoverValidationResult(tenantId, List.copyOf(reported));
 	}
 
 	private static void checkActor(UUID threadId, UUID userId, UUID nodeId, UUID tenantId, Set<String> enabled,
 			Map<UUID, String> subjectByUser, Map<String, OrgUnitMember> assignments, Map<UUID, OrgUnit> units,
 			Map<UUID, List<WorkspaceGrant>> grants, Map<UUID, List<RankGrant>> ranks,
-			List<CutoverValidationResult.Failure> failures) {
+			Set<CutoverValidationResult.Failure> failures) {
 		String subject = subjectByUser.get(userId);
 		if (subject == null) {
 			failures.add(failure("UNKNOWN_THREAD_ACTOR", threadId, null));
