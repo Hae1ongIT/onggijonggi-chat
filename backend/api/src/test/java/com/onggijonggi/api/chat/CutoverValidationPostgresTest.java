@@ -223,6 +223,15 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 		assertThat(validation.validate(List.of(fixture.subject())).ready()).isFalse();
 	}
 
+	@Test
+	void emptyKeycloakListWithLocalUsersIsNotReady() {
+		Fixture fixture = fixture();
+		user(fixture.subject());
+
+		assertThat(codes(validation.validateWithKeycloak(List.of()))).contains("ENABLED_SUBJECTS_EMPTY");
+		assertThat(codes(validation.validateWithKeycloak(List.of(fixture.subject())))).doesNotContain("ENABLED_SUBJECTS_EMPTY");
+	}
+
 	private static List<String> codes(CutoverValidationResult result) {
 		return result.failures().stream().map(CutoverValidationResult.Failure::code).toList();
 	}

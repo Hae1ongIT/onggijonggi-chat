@@ -60,13 +60,13 @@ class RbacSwitchIndependenceTest {
 		CutoverValidationService validation = Mockito.mock(CutoverValidationService.class);
 		CutoverValidationResult result = new CutoverValidationResult(null, List.of());
 		when(keycloak.listEnabledUserSubjects()).thenReturn(Mono.just(List.of("subject")));
-		when(validation.validate(List.of("subject"))).thenReturn(result);
+		when(validation.validateWithKeycloak(List.of("subject"))).thenReturn(result);
 
 		PlatformRbacController controller = new PlatformRbacController(Mockito.mock(RbacBootstrapService.class), keycloak,
 				validation);
 
 		assertThat(controller.validateCutover().block()).isSameAs(result);
-		verify(validation).validate(List.of("subject"));
+		verify(validation).validateWithKeycloak(List.of("subject"));
 	}
 
 	private PlatformRbacController controller(RbacBootstrapService bootstrap) {

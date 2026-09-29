@@ -63,6 +63,19 @@ public class CutoverValidationService {
 		this.jdbc = jdbc;
 	}
 
+	/**
+	 * 운영자 API용: Keycloak 활성 계정 목록이 비었는데 DB에 사용자가 있으면 목록을 못 받은 것으로 본다.
+	 * 목록이 비면 모든 참여 이력이 "비활성 계정"으로 취급돼 계정 검사가 통째로 건너뛰어지므로, 통과로 읽히지 않게 막는다.
+	 */
+	@Transactional(readOnly = true)
+	public CutoverValidationResult validateWithKeycloak(Collection<String> enabledSubjects) {
+		CutoverValidationResult result = validate(enabledSubjects);
+		if (!enabledSubjects.isEmpty() || users.count() == 0) return result;
+		List<CutoverValidationResult.Failure> failures = new ArrayList<>(result.failures());
+		failures.add(failure("ENABLED_SUBJECTS_EMPTY", null, null));
+		return new CutoverValidationResult(result.tenantId(), List.copyOf(failures));
+	}
+
 	/** Keycloak에서 활성인 subject만 받는다. app_user의 로컬 INACTIVE는 재활성화 가능하므로 제외 근거가 아니다. */
 	@Transactional(readOnly = true)
 	public CutoverValidationResult validate(Collection<String> enabledSubjects) {
