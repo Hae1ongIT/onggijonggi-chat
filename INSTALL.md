@@ -247,14 +247,14 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 ## v0.2에서 올릴 때 (대화가 이미 있을 때)
 
-새 버전은 모든 대화를 고객사(Tenant)의 공용 공간에 귀속시키는 스키마 변경을 포함한다. **대화가 이미 있는데 고객사가 아직 없으면** 서버가 뜨면서 실행하는 Flyway가 `thread cutover requires exactly one ACTIVE tenant`로 멈추고 BFF가 기동하지 못한다. 트랜잭션째 되돌려지므로 데이터는 그대로다. 고객사는 BFF가 뜬 뒤에 만들어지니, 다음 순서로 올린다.
+새 버전은 모든 대화를 고객사(Tenant)의 공용 공간에 귀속시키는 스키마 변경을 포함한다. **대화가 이미 있는데 고객사가 아직 없으면** 서버가 뜨면서 실행하는 Flyway가 `thread cutover requires exactly one ACTIVE tenant`로 멈추고 BFF가 기동하지 못한다. 이 migration은 통째로 되돌려져 대화 데이터는 그대로지만, 그 앞의 v0.3 migration은 이미 적용된 상태로 남고 BFF는 뜨지 못한다. 고객사는 BFF가 뜬 뒤에 만들어지니, 다음 순서로 올린다.
 
 **1. 쓰기를 멈춘다.** 올리는 동안 사용자가 대화를 만들지 않게 한다(점검 시간).
 
-**2. Flyway를 끈 채로 새 이미지를 한 번 띄운다.** `infra/.env`에 한 줄을 넣고 BFF만 다시 띄운다.
+**2. 절체 migration 앞까지만 적용해 새 이미지를 한 번 띄운다.** v0.2 DB에는 고객사 테이블이 아직 없으므로 Flyway를 완전히 끄면 안 된다 — 끄면 고객사를 만들 수 없다. `infra/.env`에 한 줄을 넣고 BFF만 다시 띄운다.
 
 ```bash
-SPRING_FLYWAY_ENABLED=false
+SPRING_FLYWAY_TARGET=20260928080757930
 ```
 
 ```bash
@@ -263,7 +263,7 @@ docker compose up -d --build bff
 
 **✅ 성공**: BFF 로그에 `RBAC bootstrap 완료`가 찍히고 처리된 Tenant에 `ogjg`가 보인다. 기본 고객사(`ogjg`)와 공용 공간이 만들어졌다. 대화는 아직 그대로다.
 
-**3. Flyway를 다시 켜고 띄운다.** 2단계에서 넣은 줄을 지우고 다시 띄우면, 이번엔 migration이 기존 대화를 공용 공간에 놓고 스키마를 마무리한다.
+**3. Flyway를 다시 켜고 띄운다.** 2단계에서 넣은 줄을 지우고(지우지 않으면 이후 migration이 조용히 적용되지 않는다) 다시 띄우면, 이번엔 migration이 기존 대화를 공용 공간에 놓고 스키마를 마무리한다.
 
 ```bash
 docker compose up -d bff
@@ -272,6 +272,8 @@ docker compose up -d bff
 **✅ 성공**: BFF가 정상 기동한다. 기존 대화가 모두 그대로 열린다.
 
 권한 기능을 켜서 쓰던 배포라면 이미 고객사가 있으므로 이 절차가 필요 없다. 고객사가 둘 이상이면 migration은 어느 쪽에 귀속할지 추측하지 않고 멈춘다.
+
+**되돌릴 수 없다는 점.** migration은 단계별로 따로 커밋되므로 중간 단계가 실패하면 DB가 일부만 바뀐 채 멈출 수 있다. 적용된 migration은 고치지 않고 새 migration으로 앞으로 고친다. 올리기 전에 DB를 백업한다. 이 절차를 마치면 권한 판정을 끈 채(`app.rbac.enforce=false`)로는 이 DB를 띄울 수 없다는 기동 가드가 켜지는 완료 표지가 기록될 수 있으니(운영자가 사후 검증 뒤 기록), 표지를 남긴 뒤에는 `SPRING_PROFILE=prod,casbin`으로만 띄운다.
 
 ---
 

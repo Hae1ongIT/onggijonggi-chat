@@ -1,11 +1,9 @@
 package com.onggijonggi.api.authz;
 
-import java.sql.DatabaseMetaData;
-import java.sql.ResultSet;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,17 +29,13 @@ public class CutoverMarkerGuard implements ApplicationRunner {
 	}
 
 	boolean hasCutoverMarker() {
-		Boolean exists = jdbc.execute((ConnectionCallback<Boolean>) connection -> {
-			DatabaseMetaData metadata = connection.getMetaData();
-			try (ResultSet tables = metadata.getTables(null, null, null, new String[] {"TABLE"})) {
-				while (tables.next()) {
-					if ("ctv".equalsIgnoreCase(tables.getString("TABLE_NAME"))) return true;
-				}
-			}
+		// 앱이 쓰는 schema(search_path)의 ctv만 본다. 테이블이 없으면 표지도 없다.
+		// 권한 오류 같은 다른 조회 실패는 삼키지 않는다 — 표지를 읽지 못한 채 기동하지 않는다(fail-closed).
+		try {
+			Integer count = jdbc.queryForObject("select count(*) from ctv", Integer.class);
+			return count != null && count > 0;
+		} catch (BadSqlGrammarException tableMissing) {
 			return false;
-		});
-		if (!Boolean.TRUE.equals(exists)) return false;
-		Integer count = jdbc.queryForObject("select count(*) from ctv", Integer.class);
-		return count != null && count > 0;
+		}
 	}
 }
