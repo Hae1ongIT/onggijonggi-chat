@@ -19,6 +19,7 @@ import com.onggijonggi.common.authz.WorkspaceNodeKind;
 import com.onggijonggi.common.authz.WorkspaceNodeRepository;
 import com.onggijonggi.common.authz.WorkspaceRole;
 import java.nio.file.Files;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -479,6 +480,29 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 				() -> service.addRankGrant(hrAdmin, project, hrTeam, null, WorkspaceRole.VIEWER));
 		assertStatus(HttpStatus.CONFLICT,
 				() -> service.addRankGrant(hrAdmin, project, UUID.randomUUID(), Rank.K, WorkspaceRole.VIEWER));
+	}
+
+	@Test
+	void rankRuleCreationRollsBackWhenAuditInsertFails() {
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank audit rollback");
+		Actor invalidAuditActor = new Actor(hrAdmin.userId(), hrAdmin.subject(), hrAdmin.roles(), "r".repeat(256));
+		int existingAudits = jdbc.queryForObject(
+				"select count(*) from authz_adt where wrk_node_id = ? and evt_kind = 'POLICY_ADDED'",
+				Integer.class, project);
+		clearInvocations(refresh);
+
+		assertThatThrownBy(() -> service.addRankGrant(invalidAuditActor, project, null, Rank.K, WorkspaceRole.VIEWER))
+				.satisfies(error -> {
+					Throwable cause = error;
+					while (cause.getCause() != null) cause = cause.getCause();
+					assertThat(cause).isInstanceOf(SQLException.class);
+					assertThat(((SQLException) cause).getSQLState()).isEqualTo("22001");
+				});
+		assertThat(jdbc.queryForObject("select count(*) from rank_grn where wrk_node_id = ?", Integer.class, project))
+				.isZero();
+		assertThat(jdbc.queryForObject("select count(*) from authz_adt where wrk_node_id = ? and evt_kind = 'POLICY_ADDED'",
+				Integer.class, project)).isEqualTo(existingAudits);
+		verify(refresh, never()).publish(any(), any(), any());
 	}
 
 	@Test

@@ -139,6 +139,12 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 		String path = "/api/rbac/workspaces/" + project + "/rank-grants";
 		post(opsMember, List.of("USER"), path, Map.of("rank", "S", "role", "VIEWER"))
 				.expectStatus().isEqualTo(HttpStatus.FORBIDDEN);
+		post(hrAdmin, List.of("USER"), path, Map.of("role", "VIEWER"))
+				.expectStatus().isBadRequest();
+		post(hrAdmin, List.of("USER"), path, Map.of("rank", "S"))
+				.expectStatus().isBadRequest();
+		post(hrAdmin, List.of("USER"), path, Map.of("rank", "UNKNOWN", "role", "VIEWER"))
+				.expectStatus().isBadRequest();
 
 		UUID rule = created(post(hrAdmin, List.of("USER"), path, Map.of("rank", "S", "role", "VIEWER")));
 		assertThat(authorizer.canView(opsMember, project).block()).isTrue();
