@@ -52,6 +52,7 @@ public class WorkspaceGrant {
 	public UUID getOrgUnitId() { return orgUnitId; }
 	public UUID getWorkspaceNodeId() { return workspaceNodeId; }
 	public WorkspaceRole getRole() { return role; }
+	public Instant getCreatedAt() { return createdAt; }
 
 	public void changeRole(WorkspaceRole role) {
 		this.role = role;

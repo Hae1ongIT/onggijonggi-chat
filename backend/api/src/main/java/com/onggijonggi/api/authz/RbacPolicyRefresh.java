@@ -67,11 +67,17 @@ public class RbacPolicyRefresh {
 		blocked.put(tenantId, new Retry(sequence.incrementAndGet(), 0, clock.instant()));
 		reloadPending();
 		if (!properties.isEnforce()) return;
-		if (movedThreadId != null) rooms.evictCollabRoom(movedThreadId);
-		for (UUID nodeId : affectedNodes) {
-			for (Thr thread : threads.findByWorkspaceNodeIdAndKind(nodeId, ThrKind.COLLAB)) {
-				rooms.evictCollabRoom(thread.getId());
+		// 변경은 이미 커밋됐다. 구독 해제가 실패해도 요청을 실패로 돌리지 않는다 — 다시 구독하면 최신 권한으로 판정하므로
+		// 남은 구독은 다음 재구독까지의 창일 뿐이다. 로그로 남긴다.
+		try {
+			if (movedThreadId != null) rooms.evictCollabRoom(movedThreadId);
+			for (UUID nodeId : affectedNodes) {
+				for (Thr thread : threads.findByWorkspaceNodeIdAndKind(nodeId, ThrKind.COLLAB)) {
+					rooms.evictCollabRoom(thread.getId());
+				}
 			}
+		} catch (RuntimeException error) {
+			log.error("커밋된 권한 변경 뒤 협업방 구독 해제에 실패했다 — 노드 {}", affectedNodes, error);
 		}
 	}
 

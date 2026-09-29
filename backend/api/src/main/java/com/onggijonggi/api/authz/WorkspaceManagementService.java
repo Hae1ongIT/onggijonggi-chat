@@ -106,7 +106,7 @@ public class WorkspaceManagementService {
 		if (key.equals("root") || key.equals("common")) throw badRequest();
 		validName(name);
 		if (kind != WorkspaceNodeKind.ORG && kind != WorkspaceNodeKind.WORK) throw badRequest();
-		UUID tenantId = tenantIdOf(required(parentId));
+		UUID tenantId = preauthorized(actor, required(parentId), true);
 		UUID result = transactions.execute(status -> {
 			lock(tenantId);
 			WorkspaceNode parent = node(parentId, tenantId);
@@ -134,7 +134,7 @@ public class WorkspaceManagementService {
 
 	public void renameNode(Actor actor, UUID nodeId, String name) {
 		validName(name);
-		UUID tenantId = tenantIdOf(nodeId);
+		UUID tenantId = preauthorized(actor, nodeId, true);
 		transactions.executeWithoutResult(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
@@ -151,7 +151,7 @@ public class WorkspaceManagementService {
 	}
 
 	public void deactivateSubtree(Actor actor, UUID nodeId) {
-		UUID tenantId = tenantIdOf(nodeId);
+		UUID tenantId = preauthorized(actor, nodeId, false);
 		Set<UUID> affected = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode target = node(nodeId, tenantId);
@@ -182,7 +182,7 @@ public class WorkspaceManagementService {
 	}
 
 	public void reactivateNode(Actor actor, UUID nodeId) {
-		UUID tenantId = tenantIdOf(nodeId);
+		UUID tenantId = preauthorized(actor, nodeId, false);
 		transactions.executeWithoutResult(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
@@ -205,12 +205,14 @@ public class WorkspaceManagementService {
 
 	public void reparentLeaf(Actor actor, UUID nodeId, UUID newParentId) {
 		required(newParentId);
-		UUID tenantId = tenantIdOf(nodeId);
+		UUID tenantId = preauthorized(actor, nodeId, true);
 		transactions.executeWithoutResult(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
-			// 권한부터 본다(세 노드 모두 직접 MANAGE). ROOT에는 부여가 없으므로 ROOT가 어느 쪽 부모든 여기서 403이다.
+			// 권한부터 본다(세 노드 모두 직접 MANAGE). ROOT에는 팀 부여가 없어 보통 여기서 403이다.
 			manage.require(actor.subject(), current);
+			// 배포 설정이 ROOT에 직급 규칙을 걸면 권한이 통과할 수 있다 — ROOT는 부모가 없어 옮길 수 없으므로 409로 막는다.
+			if (current.getKind() == WorkspaceNodeKind.ROOT) throw conflict();
 			WorkspaceNode oldParent = node(current.getParentId(), tenantId);
 			WorkspaceNode newParent = node(newParentId, tenantId);
 			manage.require(actor.subject(), oldParent);
@@ -240,11 +242,12 @@ public class WorkspaceManagementService {
 			current.moveTo(newParentId, newParent.getPath());
 			nodes.saveAndFlush(current);
 			for (WorkspaceGrant grant : previous) {
+				// 되살린 부여는 원래 생성 시각을 지킨다 — 이동이 부여를 새로 만든 것처럼 보이지 않게 한다.
 				entityManager.createNativeQuery("insert into wrk_grn (id, tnn_id, org_unit_id, wrk_node_id, role, created_at, updated_at) "
-						+ "values (:id, :tenant, :org, :node, :role, now(), now())")
+						+ "values (:id, :tenant, :org, :node, :role, :createdAt, now())")
 						.setParameter("id", grant.getId()).setParameter("tenant", tenantId)
 						.setParameter("org", grant.getOrgUnitId()).setParameter("node", nodeId)
-						.setParameter("role", grant.getRole().name()).executeUpdate();
+						.setParameter("role", grant.getRole().name()).setParameter("createdAt", grant.getCreatedAt()).executeUpdate();
 			}
 			Map<String, Object> after = nodeSnapshot(current);
 			// 부여는 같은 구성으로 되살렸으므로 전후가 같다 — 이동이 부여를 바꾸지 않았다는 기록이다.
@@ -260,7 +263,7 @@ public class WorkspaceManagementService {
 	public UUID addGrant(Actor actor, UUID nodeId, UUID orgUnitId, WorkspaceRole role) {
 		if (role == null) throw badRequest();
 		required(orgUnitId);
-		UUID tenantId = tenantIdOf(nodeId);
+		UUID tenantId = preauthorized(actor, nodeId, true);
 		UUID id = transactions.execute(status -> {
 			lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
@@ -280,7 +283,7 @@ public class WorkspaceManagementService {
 
 	public void changeGrantRole(Actor actor, UUID grantId, WorkspaceRole role) {
 		if (role == null) throw badRequest();
-		UUID tenantId = tenantIdOfGrant(grantId);
+		UUID tenantId = preauthorizedGrant(actor, grantId);
 		UUID nodeId = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceGrant grant = grant(grantId, tenantId);
@@ -302,7 +305,7 @@ public class WorkspaceManagementService {
 	}
 
 	public void removeGrant(Actor actor, UUID grantId) {
-		UUID tenantId = tenantIdOfGrant(grantId);
+		UUID tenantId = preauthorizedGrant(actor, grantId);
 		UUID nodeId = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceGrant grant = grant(grantId, tenantId);
@@ -325,7 +328,9 @@ public class WorkspaceManagementService {
 		required(destinationId);
 		Thr existing = threads.findById(threadId).orElseThrow(WorkspaceManagementService::notFound);
 		UUID tenantId = existing.getTenantId();
-		if (tenantId == null) throw notFound();
+		// 협업방이 아니거나 Tenant·워크스페이스가 없으면 404다(없는 방과 같게). 그 다음에야 원 노드 권한을 잠금 전에 본다.
+		if (tenantId == null || existing.getKind() != ThrKind.COLLAB || existing.getWorkspaceNodeId() == null) throw notFound();
+		preauthorized(actor, existing.getWorkspaceNodeId(), true);
 		transactions.executeWithoutResult(status -> {
 			lock(tenantId);
 			Thr thread = threads.findById(threadId).orElseThrow(WorkspaceManagementService::notFound);
@@ -403,8 +408,21 @@ public class WorkspaceManagementService {
 		refresh.publish(tenantId, affected, null);
 	}
 
-	private UUID tenantIdOf(UUID nodeId) { return nodes.findById(nodeId).orElseThrow(WorkspaceManagementService::notFound).getTenantId(); }
-	private UUID tenantIdOfGrant(UUID id) { return grants.findById(id).orElseThrow(WorkspaceManagementService::notFound).getTenantId(); }
+	/**
+	 * Tenant 행을 잠그기 전에 읽기만으로 대상 노드의 직접 MANAGE를 먼저 본다. 권한 없는 요청이 잠금을 잡아 같은 Tenant의 관리 쓰기를
+	 * 줄 세우지 못하게 하기 위해서다. 잠금 안에서 같은 판정을 다시 한다(그 사이 부여가 바뀌었을 수 있다). activeOnly가 false면
+	 * 노드 상태와 무관하게 본다(비활성화·재활성화). 돌려주는 값은 그 노드의 Tenant다.
+	 */
+	private UUID preauthorized(Actor actor, UUID nodeId, boolean activeOnly) {
+		WorkspaceNode target = nodes.findById(nodeId).orElseThrow(WorkspaceManagementService::notFound);
+		if (activeOnly) manage.require(actor.subject(), target);
+		else manage.requireIgnoringStatus(actor.subject(), target);
+		return target.getTenantId();
+	}
+	private UUID preauthorizedGrant(Actor actor, UUID grantId) {
+		WorkspaceGrant target = grants.findById(grantId).orElseThrow(WorkspaceManagementService::notFound);
+		return preauthorized(actor, target.getWorkspaceNodeId(), true);
+	}
 	private Tenant lock(UUID tenantId) {
 		Tenant current = tenants.findById(tenantId).orElseThrow(WorkspaceManagementService::notFound);
 		return lock(current.getKey());
@@ -451,9 +469,15 @@ public class WorkspaceManagementService {
 		return grants.findByWorkspaceNodeId(nodeId).stream().anyMatch(grant -> grant.getOrgUnitId().equals(orgUnitId)
 				&& grant.getRole() == role && !grant.getId().equals(except));
 	}
+	/**
+	 * 지우거나 낮출 부여 말고도 ACTIVE org-unit의 직접 ADMIN이 남아 있어야 한다. 비활성 팀의 ADMIN은 판정에 쓰이지 않으므로
+	 * 남은 관리자로 세지 않는다 — 세면 실제로는 아무도 관리하지 못하는 노드가 남는다.
+	 */
 	private void requireRemainingAdmin(UUID nodeId, UUID removedId) {
 		if (grants.findByWorkspaceNodeId(nodeId).stream()
-				.noneMatch(grant -> !grant.getId().equals(removedId) && grant.getRole() == WorkspaceRole.ADMIN)) throw conflict();
+				.noneMatch(grant -> !grant.getId().equals(removedId) && grant.getRole() == WorkspaceRole.ADMIN
+						&& orgUnits.findById(grant.getOrgUnitId()).filter(unit -> unit.getStatus() == OrgUnitStatus.ACTIVE)
+								.isPresent())) throw conflict();
 	}
 	private boolean requiredCommonGrant(WorkspaceNode node, WorkspaceGrant grant) {
 		return node.getKind() == WorkspaceNodeKind.COMMON && grant.getRole() == WorkspaceRole.VIEWER;

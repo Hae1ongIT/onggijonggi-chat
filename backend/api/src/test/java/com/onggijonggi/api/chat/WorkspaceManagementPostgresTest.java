@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -126,9 +127,13 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
 		service.addGrant(hrAdmin, leaf, opsTeam, WorkspaceRole.VIEWER);
 		List<String> before = grants(leaf);
+		List<String> createdBefore = grantCreatedAt(leaf);
 		int auditsBefore = events().size();
 
 		service.reparentLeaf(hrAdmin, leaf, target);
+
+		// 지웠다 되살린 부여도 원래 생성 시각을 지킨다.
+		assertThat(grantCreatedAt(leaf)).containsExactlyElementsOf(createdBefore);
 
 		assertThat(parentOf(leaf)).isEqualTo(target);
 		assertThat(jdbc.queryForObject("select path[array_length(path, 1) - 1] from wrk_node where id = ?", UUID.class, leaf))
@@ -251,6 +256,82 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	}
 
 	@Test
+	void subtreeDeactivationPublishesExactlyTheDeactivatedNodes() {
+		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		UUID grandchild = service.createNode(hrAdmin, child, "g-" + tag, WorkspaceNodeKind.WORK, "손자");
+		UUID sibling = service.createNode(hrAdmin, hr, "s-" + tag, WorkspaceNodeKind.WORK, "형제");
+		clearInvocations(refresh);
+
+		service.deactivateSubtree(hrAdmin, parent);
+
+		// 구독 해제 범위는 비활성화된 하위 트리 전체이고, 옆 노드는 들어가지 않는다.
+		verify(refresh).publish(eq(tenantId), eq(Set.of(parent, child, grandchild)), any());
+		assertThat(status(sibling)).isEqualTo("ACTIVE");
+	}
+
+	@Test
+	void reparentNeedsManageOnTheLeafItself() {
+		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		// leaf의 관리를 운영팀에 넘긴다 — 인사팀은 두 부모에는 MANAGE가 있지만 leaf에는 없다.
+		service.addGrant(hrAdmin, leaf, opsTeam, WorkspaceRole.ADMIN);
+		service.removeGrant(hrAdmin, grantId(leaf, hrTeam));
+		List<String> before = grants(leaf);
+		int auditsBefore = events().size();
+
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, leaf, target));
+
+		assertThat(parentOf(leaf)).isEqualTo(hr);
+		assertThat(grants(leaf)).containsExactlyElementsOf(before);
+		assertThat(events()).hasSize(auditsBefore);
+	}
+
+	@Test
+	void aNodeComesBackOnlyUnderAnActiveParent() {
+		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		service.deactivateSubtree(hrAdmin, parent);
+
+		assertStatus(HttpStatus.CONFLICT, () -> service.reactivateNode(hrAdmin, child));
+		assertThat(status(child)).isEqualTo("INACTIVE");
+
+		service.reactivateNode(hrAdmin, parent);
+		service.reactivateNode(hrAdmin, child);
+		assertThat(status(child)).isEqualTo("ACTIVE");
+	}
+
+	@Test
+	void outsidersGetTheSameForbiddenWhateverTheNodesState() {
+		UUID root = nodes.findByTenantIdAndKey(tenantId, "root").orElseThrow().getId();
+		UUID closed = service.createNode(hrAdmin, hr, "closed-" + tag, WorkspaceNodeKind.WORK, "닫힌 방");
+		service.deactivateSubtree(hrAdmin, closed);
+		UUID withRoom = service.createNode(hrAdmin, hr, "room-" + tag, WorkspaceNodeKind.WORK, "방이 남은 곳");
+		collabRoom(withRoom);
+
+		// 권한 없는 사람은 노드가 비활성이든, 방이 남았든, ROOT든 같은 403만 받는다 — 상태를 알 수 없다.
+		for (UUID node : List.of(closed, withRoom, root)) {
+			assertThatThrownBy(() -> service.deactivateSubtree(opsAdmin, node))
+					.isInstanceOfSatisfying(ResponseStatusException.class, error -> {
+						assertThat(error.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+						assertThat(error.getReason()).isNull();
+					});
+		}
+	}
+
+	@Test
+	void anAdminGrantOfAnInactiveTeamDoesNotCountAsTheRemainingAdmin() {
+		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "old-" + tag, "곧 닫을 팀");
+		service.addGrant(hrAdmin, project, unit, WorkspaceRole.ADMIN);
+		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
+
+		// 남은 ADMIN이 비활성 팀뿐이면 실제로 관리할 사람이 없으므로 인사팀 ADMIN을 뺄 수 없다.
+		assertStatus(HttpStatus.CONFLICT, () -> service.removeGrant(hrAdmin, grantId(project, hrTeam)));
+		assertThat(grants(project)).contains(hrTeam + ":ADMIN");
+	}
+
+	@Test
 	void inputsThatTheDatabaseWouldRejectAreRefusedBeforeReachingIt() {
 		// 아래는 모두 DB 제약(깊이 11, 부여 유일, 자기 순환, 이름 NOT NULL)이 거부해 500이 되던 경우다 — 먼저 409·400으로 막는다.
 		UUID deepest = hr;
@@ -354,6 +435,10 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	private List<String> grants(UUID node) {
 		return jdbc.queryForList("select org_unit_id || ':' || role from wrk_grn where wrk_node_id = ? order by org_unit_id, role",
 				String.class, node);
+	}
+
+	private List<String> grantCreatedAt(UUID node) {
+		return jdbc.queryForList("select id || ':' || created_at from wrk_grn where wrk_node_id = ? order by id", String.class, node);
 	}
 
 	private UUID grantId(UUID node, UUID orgUnit) {
