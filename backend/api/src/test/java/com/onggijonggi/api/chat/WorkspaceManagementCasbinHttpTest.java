@@ -133,6 +133,30 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 	}
 
 	@Test
+	void auditRowsCarryTheResponseTraceIdAndTheBootstrapKeyShape() {
+		String traceId = post(hrAdmin, List.of("USER"), "/api/rbac/workspaces",
+				Map.of("parentId", hr.toString(), "key", "trace-" + tag, "kind", "WORK", "name", "추적"))
+				.expectStatus().isCreated().returnResult(String.class).getResponseHeaders().getFirst("X-Trace-Id");
+
+		// 한 요청의 두 행(NODE_CREATED·POLICY_ADDED)은 응답의 X-Trace-Id로 찾을 수 있고 같은 req_id로 묶인다.
+		assertThat(traceId).isNotBlank();
+		assertThat(jdbc.queryForList("select evt_kind from authz_adt where trc_id = ?", String.class, traceId))
+				.containsExactlyInAnyOrder("NODE_CREATED", "POLICY_ADDED");
+		assertThat(jdbc.queryForObject("select count(distinct req_id) from authz_adt where trc_id = ?", Integer.class, traceId))
+				.isEqualTo(1);
+		// 대상 참조는 bootstrap의 SYSTEM 행과 같은 키를 쓴다 — 감사 조회가 행위자와 무관하게 같은 키로 읽는다.
+		assertThat(jdbc.queryForObject("""
+				select trg_ref::text from authz_adt where trc_id = ? and evt_kind = 'NODE_CREATED'""", String.class, traceId))
+				.contains("\"wrk_node_id\"", "\"node_key\": \"trace-" + tag + "\"");
+		assertThat(jdbc.queryForObject("""
+				select trg_ref::text from authz_adt where trc_id = ? and evt_kind = 'POLICY_ADDED'""", String.class, traceId))
+				.contains("\"wrk_grn_id\"", "\"org_unit_key\": \"hr\"", "\"role\": \"ADMIN\"", "\"wrk_node_id\"");
+		assertThat(jdbc.queryForObject("""
+				select aft_json::text from authz_adt where trc_id = ? and evt_kind = 'NODE_CREATED'""", String.class, traceId))
+				.contains("\"node_key\"", "\"prn_id\"", "\"inactive_at\"");
+	}
+
+	@Test
 	void writesWithoutDirectManageAndControlPlaneCallsByUsersAreForbidden() {
 		post(opsMember, List.of("USER"), "/api/rbac/workspaces",
 				Map.of("parentId", hr.toString(), "key", "x-" + tag, "kind", "WORK", "name", "남의 방"))

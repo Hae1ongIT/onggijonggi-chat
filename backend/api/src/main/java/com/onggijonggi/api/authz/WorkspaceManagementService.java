@@ -24,15 +24,17 @@ import com.onggijonggi.common.chat.persistence.ThrRepository;
 import com.onggijonggi.common.user.AppUserRepository;
 import com.onggijonggi.common.user.AppUserStatus;
 import jakarta.persistence.EntityManager;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -50,6 +52,8 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class WorkspaceManagementService {
 	private static final Pattern KEY = Pattern.compile("[a-z][a-z0-9-]{0,62}");
+	/** wrk_node_guard의 깊이 제한(path 원소 수 11 이하)과 같다. 넘기면 DB가 거부해 500이 되므로 먼저 409로 막는다. */
+	private static final int MAX_DEPTH = 11;
 	private final TenantRepository tenants;
 	private final WorkspaceNodeRepository nodes;
 	private final WorkspaceGrantRepository grants;
@@ -65,8 +69,16 @@ public class WorkspaceManagementService {
 	private final ObjectMapper json;
 	private final TransactionTemplate transactions;
 
-	public record Actor(UUID userId, String subject, List<String> roles, String requestId) { }
-	public record Change(UUID tenantId, Set<UUID> affectedNodes, UUID movedThreadId) { }
+	/**
+	 * 관리 연산의 행위자. requestId는 한 요청이 남긴 감사 행을 묶고, traceId는 응답의 X-Trace-Id와 같아 오류·로그와 감사를
+	 * 이어 준다(TraceIdWebFilter가 발급한다).
+	 */
+	public record Actor(UUID userId, String subject, List<String> roles, String requestId, String traceId) {
+		/** 요청 밖(테스트 등)에서 부를 때. 추적 ID는 없다. */
+		public Actor(UUID userId, String subject, List<String> roles, String requestId) {
+			this(userId, subject, roles, requestId, null);
+		}
+	}
 
 	public WorkspaceManagementService(TenantRepository tenants, WorkspaceNodeRepository nodes,
 			WorkspaceGrantRepository grants, OrgUnitRepository orgUnits, OrgUnitMemberRepository members,
@@ -96,12 +108,12 @@ public class WorkspaceManagementService {
 		if (kind != WorkspaceNodeKind.ORG && kind != WorkspaceNodeKind.WORK) throw badRequest();
 		UUID tenantId = tenantIdOf(required(parentId));
 		UUID result = transactions.execute(status -> {
-			Tenant tenant = lock(tenantId);
+			lock(tenantId);
 			WorkspaceNode parent = node(parentId, tenantId);
 			manage.require(actor.subject(), parent);
-			if (parent.getKind() == WorkspaceNodeKind.COMMON) throw conflict();
+			if (parent.getKind() == WorkspaceNodeKind.COMMON || parent.getPath().length + 1 > MAX_DEPTH) throw conflict();
 			if (nodes.findByTenantIdAndKey(tenantId, key).isPresent()) throw conflict();
-			uniqueSiblingName(tenantId, parentId, name, null);
+			uniqueSiblingName(parentId, name, null);
 			WorkspaceNode created = nodes.saveAndFlush(WorkspaceNode.child(tenantId, parentId, parent.getPath(), key,
 					kind, name, WorkspaceNodeStatus.ACTIVE));
 			UUID actorOrgUnit = members.findBySubject(actor.subject()).stream()
@@ -111,9 +123,9 @@ public class WorkspaceManagementService {
 					.findFirst().orElseThrow(WorkspaceManagementService::forbidden);
 			WorkspaceGrant initial = grants.saveAndFlush(new WorkspaceGrant(tenantId, actorOrgUnit, created.getId(), WorkspaceRole.ADMIN));
 			audit(actor, tenantId, AuthorizationAuditEventKind.NODE_CREATED, AuthorizationAuditTargetKind.WORKSPACE,
-					Map.of("wrk_node_id", created.getId()), created.getId(), null, nodeSnapshot(created));
+					nodeRef(created), created.getId(), null, nodeSnapshot(created));
 			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_ADDED, AuthorizationAuditTargetKind.POLICY,
-					Map.of("wrk_grn_id", initial.getId()), created.getId(), null, grantSnapshot(initial));
+					policyRef(initial), created.getId(), null, grantSnapshot(initial));
 			return created.getId();
 		});
 		refresh.publish(tenantId, Set.of(result), null);
@@ -127,13 +139,13 @@ public class WorkspaceManagementService {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
 			manage.require(actor.subject(), current);
-			undeclaredNode(tenant, current);
-			uniqueSiblingName(tenantId, current.getParentId(), name, nodeId);
+			undeclaredNode(declared(tenant), current);
+			uniqueSiblingName(current.getParentId(), name, nodeId);
 			Map<String, Object> before = nodeSnapshot(current);
 			current.rename(name);
 			nodes.saveAndFlush(current);
 			audit(actor, tenantId, AuthorizationAuditEventKind.NODE_RENAMED, AuthorizationAuditTargetKind.WORKSPACE,
-					Map.of("wrk_node_id", nodeId), nodeId, before, nodeSnapshot(current));
+					nodeRef(current), nodeId, before, nodeSnapshot(current));
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
 	}
@@ -151,9 +163,10 @@ public class WorkspaceManagementService {
 					.filter(candidate -> candidate.getStatus() == WorkspaceNodeStatus.ACTIVE
 							&& Arrays.asList(candidate.getPath()).contains(nodeId))
 					.sorted(Comparator.comparingInt((WorkspaceNode candidate) -> candidate.getPath().length).reversed()).toList();
+			Optional<RbacBootstrapSpec.TenantSpec> declared = declared(tenant);
 			for (WorkspaceNode current : subtree) {
 				manage.require(actor.subject(), current);
-				undeclaredNode(tenant, current);
+				undeclaredNode(declared, current);
 				if (threads.existsByWorkspaceNodeId(current.getId())) throw conflict();
 			}
 			for (WorkspaceNode current : subtree) {
@@ -161,9 +174,9 @@ public class WorkspaceManagementService {
 				current.reconcileStatus(WorkspaceNodeStatus.INACTIVE);
 				nodes.saveAndFlush(current);
 				audit(actor, tenantId, AuthorizationAuditEventKind.NODE_DEACTIVATED, AuthorizationAuditTargetKind.WORKSPACE,
-						Map.of("wrk_node_id", current.getId()), current.getId(), before, nodeSnapshot(current));
+						nodeRef(current), current.getId(), before, nodeSnapshot(current));
 			}
-			return subtree.stream().map(WorkspaceNode::getId).collect(java.util.stream.Collectors.toSet());
+			return subtree.stream().map(WorkspaceNode::getId).collect(Collectors.toSet());
 		});
 		refresh.publish(tenantId, affected, null);
 	}
@@ -179,13 +192,13 @@ public class WorkspaceManagementService {
 					|| current.getKind() == WorkspaceNodeKind.ROOT || current.getKind() == WorkspaceNodeKind.COMMON) throw conflict();
 			WorkspaceNode parent = node(current.getParentId(), tenantId);
 			if (parent.getStatus() != WorkspaceNodeStatus.ACTIVE) throw conflict();
-			undeclaredNode(tenant, current);
-			uniqueSiblingName(tenantId, parent.getId(), current.getName(), nodeId);
+			undeclaredNode(declared(tenant), current);
+			uniqueSiblingName(parent.getId(), current.getName(), nodeId);
 			Map<String, Object> before = nodeSnapshot(current);
 			current.reconcileStatus(WorkspaceNodeStatus.ACTIVE);
 			nodes.saveAndFlush(current);
 			audit(actor, tenantId, AuthorizationAuditEventKind.NODE_REACTIVATED, AuthorizationAuditTargetKind.WORKSPACE,
-					Map.of("wrk_node_id", nodeId), nodeId, before, nodeSnapshot(current));
+					nodeRef(current), nodeId, before, nodeSnapshot(current));
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
 	}
@@ -205,14 +218,14 @@ public class WorkspaceManagementService {
 			if (oldParent.getKind() == WorkspaceNodeKind.ROOT || newParent.getKind() == WorkspaceNodeKind.ROOT
 					|| newParent.getKind() == WorkspaceNodeKind.COMMON || current.getStatus() != WorkspaceNodeStatus.ACTIVE
 					|| newParent.getStatus() != WorkspaceNodeStatus.ACTIVE || oldParent.getId().equals(newParentId)
-					|| nodes.findByTenantId(tenantId).stream().anyMatch(candidate -> nodeId.equals(candidate.getParentId()))
-					|| threads.existsByWorkspaceNodeId(nodeId)) throw conflict();
-			undeclaredNode(tenant, current);
-			uniqueSiblingName(tenantId, newParentId, current.getName(), nodeId);
-			List<WorkspaceGrant> previous = grants.findByTenantId(tenantId).stream()
-					.filter(grant -> grant.getWorkspaceNodeId().equals(nodeId)).toList();
+					|| nodeId.equals(newParentId) || newParent.getPath().length + 1 > MAX_DEPTH
+					|| nodes.existsByParentId(nodeId) || threads.existsByWorkspaceNodeId(nodeId)) throw conflict();
+			Optional<RbacBootstrapSpec.TenantSpec> declared = declared(tenant);
+			undeclaredNode(declared, current);
+			uniqueSiblingName(newParentId, current.getName(), nodeId);
+			List<WorkspaceGrant> previous = grants.findByWorkspaceNodeId(nodeId);
 			for (WorkspaceGrant grant : previous) {
-				undeclaredGrant(tenant, grant);
+				undeclaredGrant(declared, tenantId, grant);
 				if (orgUnits.findById(grant.getOrgUnitId())
 						.filter(unit -> unit.getStatus() == OrgUnitStatus.ACTIVE).isEmpty()) throw conflict();
 			}
@@ -234,10 +247,12 @@ public class WorkspaceManagementService {
 						.setParameter("role", grant.getRole().name()).executeUpdate();
 			}
 			Map<String, Object> after = nodeSnapshot(current);
-			before.put("grants", previous.stream().map(WorkspaceManagementService::grantSnapshot).toList());
-			after.put("grants", previous.stream().map(WorkspaceManagementService::grantSnapshot).toList());
+			// 부여는 같은 구성으로 되살렸으므로 전후가 같다 — 이동이 부여를 바꾸지 않았다는 기록이다.
+			List<Map<String, Object>> restoredGrants = previous.stream().map(WorkspaceManagementService::grantSnapshot).toList();
+			before.put("grants", restoredGrants);
+			after.put("grants", restoredGrants);
 			audit(actor, tenantId, AuthorizationAuditEventKind.NODE_REPARENTED, AuthorizationAuditTargetKind.WORKSPACE,
-					Map.of("wrk_node_id", nodeId), nodeId, before, after);
+					nodeRef(current), nodeId, before, after);
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
 	}
@@ -247,15 +262,16 @@ public class WorkspaceManagementService {
 		required(orgUnitId);
 		UUID tenantId = tenantIdOf(nodeId);
 		UUID id = transactions.execute(status -> {
-			Tenant tenant = lock(tenantId);
+			lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
 			manage.require(actor.subject(), current);
-			if (current.getKind() == WorkspaceNodeKind.ROOT || role == null) throw badRequest();
-			OrgUnit unit = orgUnits.findById(orgUnitId).filter(value -> tenantId.equals(value.getTenantId())
-					&& value.getStatus() == OrgUnitStatus.ACTIVE).orElseThrow(WorkspaceManagementService::conflict);
+			if (current.getKind() == WorkspaceNodeKind.ROOT) throw badRequest();
+			if (orgUnits.findById(orgUnitId).filter(value -> tenantId.equals(value.getTenantId())
+					&& value.getStatus() == OrgUnitStatus.ACTIVE).isEmpty()) throw conflict();
+			if (hasGrant(nodeId, orgUnitId, role, null)) throw conflict();
 			WorkspaceGrant grant = grants.saveAndFlush(new WorkspaceGrant(tenantId, orgUnitId, nodeId, role));
 			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_ADDED, AuthorizationAuditTargetKind.POLICY,
-					Map.of("wrk_grn_id", grant.getId()), nodeId, null, grantSnapshot(grant));
+					policyRef(grant), nodeId, null, grantSnapshot(grant));
 			return grant.getId();
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
@@ -270,15 +286,16 @@ public class WorkspaceManagementService {
 			WorkspaceGrant grant = grant(grantId, tenantId);
 			WorkspaceNode node = node(grant.getWorkspaceNodeId(), tenantId);
 			manage.require(actor.subject(), node);
-			undeclaredGrant(tenant, grant);
+			undeclaredGrant(declared(tenant), tenantId, grant);
 			if (requiredCommonGrant(node, grant)) throw conflict();
 			if (grant.getRole() == role) return node.getId();
-			if (grant.getRole() == WorkspaceRole.ADMIN && role != WorkspaceRole.ADMIN) requireRemainingAdmin(tenantId, node.getId(), grantId);
+			if (hasGrant(node.getId(), grant.getOrgUnitId(), role, grantId)) throw conflict();
+			if (grant.getRole() == WorkspaceRole.ADMIN && role != WorkspaceRole.ADMIN) requireRemainingAdmin(node.getId(), grantId);
 			Map<String, Object> before = grantSnapshot(grant);
 			grant.changeRole(role);
 			grants.saveAndFlush(grant);
 			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_REPLACED, AuthorizationAuditTargetKind.POLICY,
-					Map.of("wrk_grn_id", grantId), node.getId(), before, grantSnapshot(grant));
+					policyRef(grant), node.getId(), before, grantSnapshot(grant));
 			return node.getId();
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
@@ -291,14 +308,14 @@ public class WorkspaceManagementService {
 			WorkspaceGrant grant = grant(grantId, tenantId);
 			WorkspaceNode node = node(grant.getWorkspaceNodeId(), tenantId);
 			manage.require(actor.subject(), node);
-			undeclaredGrant(tenant, grant);
+			undeclaredGrant(declared(tenant), tenantId, grant);
 			if (requiredCommonGrant(node, grant)) throw conflict();
-			if (grant.getRole() == WorkspaceRole.ADMIN) requireRemainingAdmin(tenantId, node.getId(), grantId);
+			if (grant.getRole() == WorkspaceRole.ADMIN) requireRemainingAdmin(node.getId(), grantId);
 			Map<String, Object> before = grantSnapshot(grant);
 			grants.delete(grant);
 			grants.flush();
 			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_REMOVED, AuthorizationAuditTargetKind.POLICY,
-					Map.of("wrk_grn_id", grantId), node.getId(), before, null);
+					policyRef(grant), node.getId(), before, null);
 			return node.getId();
 		});
 		refresh.publish(tenantId, Set.of(nodeId), null);
@@ -337,7 +354,7 @@ public class WorkspaceManagementService {
 		UUID tenantId = tenants.findByKey(tenantKey).orElseThrow(WorkspaceManagementService::notFound).getId();
 		UUID orgUnitId = transactions.execute(status -> {
 			Tenant tenant = lock(tenantKey);
-			undeclaredOrgUnit(tenant, key);
+			undeclaredOrgUnit(declared(tenant), key);
 			if (orgUnits.findByTenantIdAndKey(tenant.getId(), key).isPresent()) throw conflict();
 			OrgUnit unit = orgUnits.saveAndFlush(new OrgUnit(tenant.getId(), key, name, OrgUnitStatus.ACTIVE));
 			WorkspaceNode common = nodes.findByTenantIdAndKey(tenant.getId(), "common")
@@ -345,9 +362,9 @@ public class WorkspaceManagementService {
 			WorkspaceGrant grant = grants.saveAndFlush(new WorkspaceGrant(tenant.getId(), unit.getId(),
 					common.getId(), WorkspaceRole.VIEWER));
 			audit(actor, tenant.getId(), AuthorizationAuditEventKind.ORG_UNIT_CREATED, AuthorizationAuditTargetKind.ORG_UNIT,
-					Map.of("org_unit_id", unit.getId()), null, null, orgSnapshot(unit));
+					orgUnitRef(unit), null, null, orgSnapshot(unit));
 			audit(actor, tenant.getId(), AuthorizationAuditEventKind.POLICY_ADDED, AuthorizationAuditTargetKind.POLICY,
-					Map.of("wrk_grn_id", grant.getId()), common.getId(), null, grantSnapshot(grant));
+					policyRef(grant), common.getId(), null, grantSnapshot(grant));
 			return unit.getId();
 		});
 		refresh.publish(tenantId, Set.of(), null);
@@ -355,12 +372,14 @@ public class WorkspaceManagementService {
 	}
 
 	public void changeOrgUnit(Actor actor, String tenantKey, UUID orgUnitId, String name, OrgUnitStatus targetStatus) {
-		if (name != null) validName(name);
-		Change change = transactions.execute(status -> {
+		// 상태 변경이 아니면 이름 변경이다 — 이름이 비면 400이다(그대로 두면 NOT NULL 위반이 500이 된다).
+		if (targetStatus == null || name != null) validName(name);
+		UUID tenantId = tenants.findByKey(tenantKey).orElseThrow(WorkspaceManagementService::notFound).getId();
+		Set<UUID> affected = transactions.execute(status -> {
 			Tenant tenant = lock(tenantKey);
 			OrgUnit unit = orgUnits.findById(orgUnitId).filter(value -> value.getTenantId().equals(tenant.getId()))
 					.orElseThrow(WorkspaceManagementService::notFound);
-			undeclaredOrgUnit(tenant, unit.getKey());
+			undeclaredOrgUnit(declared(tenant), unit.getKey());
 			// app_user가 없는 배정(아직 로그인하지 않은 사람)도 배정된 사용자로 센다 — 비활성화하면 그 사람이 막힌다.
 			if (targetStatus == OrgUnitStatus.INACTIVE && members.findByOrgUnitId(unit.getId()).stream()
 					.anyMatch(member -> users.findByKeycloakSubj(member.getSubject())
@@ -378,13 +397,10 @@ public class WorkspaceManagementService {
 			}
 			orgUnits.saveAndFlush(unit);
 			audit(actor, tenant.getId(), event, AuthorizationAuditTargetKind.ORG_UNIT,
-					Map.of("org_unit_id", orgUnitId), null, before, orgSnapshot(unit));
-			Set<UUID> affected = grants.findByTenantId(tenant.getId()).stream()
-					.filter(grant -> grant.getOrgUnitId().equals(orgUnitId)).map(WorkspaceGrant::getWorkspaceNodeId)
-					.collect(java.util.stream.Collectors.toSet());
-			return new Change(tenant.getId(), affected, null);
+					orgUnitRef(unit), null, before, orgSnapshot(unit));
+			return grants.findByOrgUnitId(orgUnitId).stream().map(WorkspaceGrant::getWorkspaceNodeId).collect(Collectors.toSet());
 		});
-		refresh.publish(change.tenantId(), change.affectedNodes(), null);
+		refresh.publish(tenantId, affected, null);
 	}
 
 	private UUID tenantIdOf(UUID nodeId) { return nodes.findById(nodeId).orElseThrow(WorkspaceManagementService::notFound).getTenantId(); }
@@ -405,55 +421,104 @@ public class WorkspaceManagementService {
 		return grants.findById(id).filter(value -> value.getTenantId().equals(tenantId))
 				.orElseThrow(WorkspaceManagementService::notFound);
 	}
-	private void undeclaredNode(Tenant tenant, WorkspaceNode node) {
-		if (config.loadWithFingerprint().stream().flatMap(loaded -> loaded.spec().tenants().stream())
-				.filter(spec -> spec.key().equals(tenant.getKey()))
-				.anyMatch(spec -> spec.nodes().stream().anyMatch(declared -> declared.key().equals(node.getKey())))) throw conflict();
+	/**
+	 * 배포 설정이 이 Tenant에 선언한 내용. 설정 파일을 읽고 파싱하므로 연산마다 한 번만 부르고 결과를 넘긴다 — 한 요청 안에서
+	 * 파일이 바뀌어 판정이 갈리지도 않는다. 설정이 없거나 이 Tenant를 선언하지 않았으면 비어 있다.
+	 */
+	private Optional<RbacBootstrapSpec.TenantSpec> declared(Tenant tenant) {
+		return config.loadWithFingerprint().stream().flatMap(loaded -> loaded.spec().tenants().stream())
+				.filter(spec -> spec.key().equals(tenant.getKey())).findFirst();
 	}
-	private void undeclaredOrgUnit(Tenant tenant, String key) {
-		if (config.loadWithFingerprint().stream().flatMap(loaded -> loaded.spec().tenants().stream())
-				.filter(spec -> spec.key().equals(tenant.getKey()))
-				.anyMatch(spec -> spec.orgUnits().stream().anyMatch(declared -> declared.key().equals(key)))) throw conflict();
+	private static void undeclaredNode(Optional<RbacBootstrapSpec.TenantSpec> declared, WorkspaceNode node) {
+		if (declared.stream().flatMap(spec -> spec.nodes().stream()).anyMatch(spec -> spec.key().equals(node.getKey()))) {
+			throw conflict();
+		}
 	}
-	private void undeclaredGrant(Tenant tenant, WorkspaceGrant grant) {
-		String nodeKey = node(grant.getWorkspaceNodeId(), tenant.getId()).getKey();
+	private static void undeclaredOrgUnit(Optional<RbacBootstrapSpec.TenantSpec> declared, String key) {
+		if (declared.stream().flatMap(spec -> spec.orgUnits().stream()).anyMatch(spec -> spec.key().equals(key))) {
+			throw conflict();
+		}
+	}
+	private void undeclaredGrant(Optional<RbacBootstrapSpec.TenantSpec> declared, UUID tenantId, WorkspaceGrant grant) {
+		if (declared.isEmpty()) return;
+		String nodeKey = node(grant.getWorkspaceNodeId(), tenantId).getKey();
 		String orgKey = orgUnits.findById(grant.getOrgUnitId()).orElseThrow(WorkspaceManagementService::conflict).getKey();
-		if (config.loadWithFingerprint().stream().flatMap(loaded -> loaded.spec().tenants().stream())
-				.filter(spec -> spec.key().equals(tenant.getKey()))
-				.anyMatch(spec -> spec.grants().stream().anyMatch(declared -> declared.node().equals(nodeKey)
-						&& declared.orgUnit().equals(orgKey) && declared.role().equals(grant.getRole().name())))) throw conflict();
+		if (declared.get().grants().stream().anyMatch(spec -> spec.node().equals(nodeKey) && spec.orgUnit().equals(orgKey)
+				&& spec.role().equals(grant.getRole().name()))) throw conflict();
 	}
-	private void requireRemainingAdmin(UUID tenantId, UUID nodeId, UUID removedId) {
-		if (grants.findByTenantId(tenantId).stream().noneMatch(grant -> grant.getWorkspaceNodeId().equals(nodeId)
-				&& !grant.getId().equals(removedId) && grant.getRole() == WorkspaceRole.ADMIN)) throw conflict();
+	/** 같은 노드·org-unit·역할의 부여가 이미 있나(except는 자기 자신). 있으면 uq_wrk_grn_policy 위반이 500이 되므로 먼저 409로 막는다. */
+	private boolean hasGrant(UUID nodeId, UUID orgUnitId, WorkspaceRole role, UUID except) {
+		return grants.findByWorkspaceNodeId(nodeId).stream().anyMatch(grant -> grant.getOrgUnitId().equals(orgUnitId)
+				&& grant.getRole() == role && !grant.getId().equals(except));
+	}
+	private void requireRemainingAdmin(UUID nodeId, UUID removedId) {
+		if (grants.findByWorkspaceNodeId(nodeId).stream()
+				.noneMatch(grant -> !grant.getId().equals(removedId) && grant.getRole() == WorkspaceRole.ADMIN)) throw conflict();
 	}
 	private boolean requiredCommonGrant(WorkspaceNode node, WorkspaceGrant grant) {
 		return node.getKind() == WorkspaceNodeKind.COMMON && grant.getRole() == WorkspaceRole.VIEWER;
 	}
-	private void uniqueSiblingName(UUID tenantId, UUID parentId, String name, UUID except) {
-		if (nodes.findByTenantId(tenantId).stream().anyMatch(candidate -> candidate.getStatus() == WorkspaceNodeStatus.ACTIVE
-				&& java.util.Objects.equals(parentId, candidate.getParentId())
-				&& !candidate.getId().equals(except) && candidate.getName().equalsIgnoreCase(name))) throw conflict();
+	/** ACTIVE 형제끼리 이름이 대소문자 무시로 유일해야 한다(DB의 lower(name) 부분 유일 인덱스와 같다). */
+	private void uniqueSiblingName(UUID parentId, String name, UUID except) {
+		if (nodes.findByParentId(parentId).stream().anyMatch(candidate -> candidate.getStatus() == WorkspaceNodeStatus.ACTIVE
+				&& !Objects.equals(candidate.getId(), except) && candidate.getName().equalsIgnoreCase(name))) throw conflict();
 	}
 	private void audit(Actor actor, UUID tenantId, AuthorizationAuditEventKind event, AuthorizationAuditTargetKind target,
 			Map<String, Object> ref, UUID nodeId, Map<String, Object> before, Map<String, Object> after) {
 		audits.save(AuthorizationAudit.managed(tenantId, actor.userId(), json.writeValueAsString(actor.roles()), event,
 				target, json.writeValueAsString(ref), nodeId, before == null ? null : json.writeValueAsString(before),
-				after == null ? null : json.writeValueAsString(after), actor.requestId(), null));
+				after == null ? null : json.writeValueAsString(after), actor.requestId(), actor.traceId()));
+	}
+	// 대상 참조와 스냅샷은 bootstrap(RbacBootstrapService)이 남기는 SYSTEM 행과 같은 키·모양으로 쓴다 — 감사 조회(#259)를 읽는
+	// 쪽이 행위자가 SYSTEM이든 USER이든 같은 키로 읽게 하고, id만으로는 사람이 읽을 수 없어 key를 함께 남긴다.
+	private static Map<String, Object> nodeRef(WorkspaceNode node) {
+		Map<String, Object> ref = new LinkedHashMap<>();
+		ref.put("wrk_node_id", node.getId());
+		ref.put("node_key", node.getKey());
+		return ref;
+	}
+	private Map<String, Object> policyRef(WorkspaceGrant grant) {
+		Map<String, Object> ref = new LinkedHashMap<>();
+		ref.put("wrk_grn_id", grant.getId());
+		ref.put("org_unit_key", orgUnits.findById(grant.getOrgUnitId()).map(OrgUnit::getKey).orElse(null));
+		ref.put("role", grant.getRole().name());
+		ref.put("wrk_node_id", grant.getWorkspaceNodeId());
+		return ref;
+	}
+	private static Map<String, Object> orgUnitRef(OrgUnit unit) {
+		Map<String, Object> ref = new LinkedHashMap<>();
+		ref.put("org_unit_key", unit.getKey());
+		return ref;
 	}
 	private static Map<String, Object> nodeSnapshot(WorkspaceNode node) {
-		Map<String, Object> value = new LinkedHashMap<>();
-		value.put("id", node.getId()); value.put("key", node.getKey()); value.put("name", node.getName());
-		value.put("kind", node.getKind()); value.put("parentId", node.getParentId());
-		value.put("path", Arrays.stream(node.getPath()).map(UUID::toString).toList()); value.put("status", node.getStatus());
-		return value;
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("id", node.getId());
+		snapshot.put("node_key", node.getKey());
+		snapshot.put("kind", node.getKind().name());
+		snapshot.put("prn_id", node.getParentId());
+		snapshot.put("name", node.getName());
+		snapshot.put("status", node.getStatus().name());
+		snapshot.put("path", Arrays.stream(node.getPath()).map(UUID::toString).toList());
+		snapshot.put("inactive_at", node.getInactiveAt());
+		return snapshot;
 	}
 	private static Map<String, Object> grantSnapshot(WorkspaceGrant grant) {
-		return Map.of("id", grant.getId(), "orgUnitId", grant.getOrgUnitId(), "workspaceNodeId", grant.getWorkspaceNodeId(),
-				"role", grant.getRole());
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("id", grant.getId());
+		snapshot.put("tnn_id", grant.getTenantId());
+		snapshot.put("org_unit_id", grant.getOrgUnitId());
+		snapshot.put("role", grant.getRole().name());
+		snapshot.put("wrk_node_id", grant.getWorkspaceNodeId());
+		return snapshot;
 	}
 	private static Map<String, Object> orgSnapshot(OrgUnit unit) {
-		return Map.of("id", unit.getId(), "key", unit.getKey(), "name", unit.getName(), "status", unit.getStatus());
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("id", unit.getId());
+		snapshot.put("org_unit_key", unit.getKey());
+		snapshot.put("name", unit.getName());
+		snapshot.put("status", unit.getStatus().name());
+		snapshot.put("inactive_at", unit.getInactiveAt());
+		return snapshot;
 	}
 	private static void validKey(String value) {
 		if (value == null || !KEY.matcher(value).matches()) throw badRequest();

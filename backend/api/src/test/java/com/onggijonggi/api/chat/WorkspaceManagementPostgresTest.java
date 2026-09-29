@@ -251,6 +251,29 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	}
 
 	@Test
+	void inputsThatTheDatabaseWouldRejectAreRefusedBeforeReachingIt() {
+		// 아래는 모두 DB 제약(깊이 11, 부여 유일, 자기 순환, 이름 NOT NULL)이 거부해 500이 되던 경우다 — 먼저 409·400으로 막는다.
+		UUID deepest = hr;
+		for (int depth = 3; depth <= 11; depth++) {
+			deepest = service.createNode(hrAdmin, deepest, "d" + depth + "-" + tag, WorkspaceNodeKind.WORK, "깊이 " + depth);
+		}
+		UUID leafAtLimit = deepest;
+		assertStatus(HttpStatus.CONFLICT, () -> service.createNode(hrAdmin, leafAtLimit, "too-deep-" + tag, WorkspaceNodeKind.WORK, "너무 깊음"));
+		UUID mover = service.createNode(hrAdmin, hr, "mover-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, mover, leafAtLimit));
+		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, mover, mover));
+
+		UUID viewer = service.addGrant(hrAdmin, mover, opsTeam, WorkspaceRole.VIEWER);
+		assertStatus(HttpStatus.CONFLICT, () -> service.addGrant(hrAdmin, mover, opsTeam, WorkspaceRole.VIEWER));
+		service.addGrant(hrAdmin, mover, opsTeam, WorkspaceRole.CONTRIBUTOR);
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeGrantRole(hrAdmin, viewer, WorkspaceRole.CONTRIBUTOR));
+
+		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "rename-" + tag, "이름 바꿀 팀");
+		assertStatus(HttpStatus.BAD_REQUEST, () -> service.changeOrgUnit(hrAdmin, tenantKey, unit, null, null));
+		assertThat(parentOf(mover)).isEqualTo(hr);
+	}
+
+	@Test
 	void reparentIsRefusedWhenAGrantCannotBeRestored() {
 		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
 		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");

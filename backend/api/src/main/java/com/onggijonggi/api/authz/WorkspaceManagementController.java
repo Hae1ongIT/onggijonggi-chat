@@ -1,6 +1,7 @@
 package com.onggijonggi.api.authz;
 
 import com.onggijonggi.api.auth.CurrentActorProvider;
+import com.onggijonggi.api.common.TraceIdWebFilter;
 import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.WorkspaceNodeKind;
 import com.onggijonggi.common.authz.WorkspaceRole;
@@ -123,15 +124,19 @@ public class WorkspaceManagementController {
 	}
 
 	private <T> Mono<T> withActor(java.util.function.Function<WorkspaceManagementService.Actor, T> operation) {
-		return Mono.zip(actors.currentActor(), ReactiveSecurityContextHolder.getContext()
+		// 응답의 X-Trace-Id와 같은 값을 감사 행에 남긴다(TraceIdWebFilter가 Reactor Context에 넣는다).
+		Mono<String> traceId = Mono.deferContextual(context -> Mono.just(
+				context.getOrDefault(TraceIdWebFilter.TRACE_ID_ATTR, "")));
+		return Mono.zip(actors.currentActor(), traceId, ReactiveSecurityContextHolder.getContext()
 				.map(context -> context.getAuthentication())
 				.filter(JwtAuthenticationToken.class::isInstance).cast(JwtAuthenticationToken.class)
 				.switchIfEmpty(Mono.error(() -> new ResponseStatusException(HttpStatus.FORBIDDEN))))
 				.flatMap(tuple -> Mono.fromCallable(() -> {
-					List<String> roles = tuple.getT2().getAuthorities().stream().map(authority -> authority.getAuthority())
+					List<String> roles = tuple.getT3().getAuthorities().stream().map(authority -> authority.getAuthority())
 							.filter(value -> value.startsWith("ROLE_")).map(value -> value.substring(5)).toList();
 					return operation.apply(new WorkspaceManagementService.Actor(tuple.getT1().userId(),
-							tuple.getT1().subject(), roles, UUID.randomUUID().toString()));
+							tuple.getT1().subject(), roles, UUID.randomUUID().toString(),
+							tuple.getT2().isEmpty() ? null : tuple.getT2()));
 				}).subscribeOn(Schedulers.boundedElastic()));
 	}
 }
