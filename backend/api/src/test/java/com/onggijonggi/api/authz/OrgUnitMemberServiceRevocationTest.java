@@ -2,6 +2,7 @@ package com.onggijonggi.api.authz;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -107,6 +108,27 @@ class OrgUnitMemberServiceRevocationTest {
 		assertThatThrownBy(() -> service.apply(Change.assign(SUBJECT, elsewhere.getId(), Rank.K), Actor.system("import:move")))
 				.isInstanceOf(OrgUnitMemberService.InvalidChangeException.class);
 		verify(revoker, never()).revoke(any());
+	}
+
+	@Test
+	void aFailedRevocationDoesNotSkipLaterSubjectsAndIsReportedAfterCommit() {
+		assigned(hr, Rank.K);
+		String otherSubject = "sub-lee";
+		when(members.findBySubject(otherSubject)).thenReturn(List.of(
+				new OrgUnitMember(tenantId, hr.getId(), otherSubject, Rank.K)));
+		doThrow(new IllegalStateException("eviction failed")).when(revoker).revoke(SUBJECT);
+
+		assertThatThrownBy(() -> service.applyAll(List.of(
+				Change.assign(SUBJECT, finance.getId(), Rank.K),
+				Change.assign(otherSubject, finance.getId(), Rank.K)), Actor.system("import:batch")))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining(SUBJECT)
+				.hasMessageContaining("저장됐지만");
+
+		InOrder order = inOrder(transactions, revoker);
+		order.verify(transactions).commit(any());
+		order.verify(revoker).revoke(SUBJECT);
+		order.verify(revoker).revoke(otherSubject);
 	}
 
 	private void assigned(OrgUnit unit, Rank rank) {

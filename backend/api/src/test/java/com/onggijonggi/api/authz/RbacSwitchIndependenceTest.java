@@ -5,9 +5,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
-import com.onggijonggi.api.auth.keycloak.KeycloakTenantUser;
 import java.util.List;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
@@ -60,9 +58,8 @@ class RbacSwitchIndependenceTest {
 		// Keycloak에서는 누가 로그인할 수 있는지만 쓴다. tenant 속성은 넘기지 않는다 — 현재 Tenant는 DB 배정이 정한다(#299).
 		KeycloakAdminClient keycloak = Mockito.mock(KeycloakAdminClient.class);
 		CutoverValidationService validation = Mockito.mock(CutoverValidationService.class);
-		List<KeycloakTenantUser> users = List.of(new KeycloakTenantUser("subject", Optional.of("stale-attribute")));
 		CutoverValidationResult result = new CutoverValidationResult(List.of(), List.of(), List.of(), List.of());
-		when(keycloak.listEnabledTenantUsers()).thenReturn(Mono.just(users));
+		when(keycloak.listEnabledUserSubjects()).thenReturn(Mono.just(List.of("subject")));
 		when(validation.validate(List.of("subject"))).thenReturn(result);
 
 		PlatformRbacController controller = new PlatformRbacController(Mockito.mock(RbacBootstrapService.class), keycloak,

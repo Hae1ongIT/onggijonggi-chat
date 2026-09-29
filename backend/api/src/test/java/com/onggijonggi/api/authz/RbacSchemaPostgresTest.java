@@ -590,7 +590,7 @@ class RbacSchemaPostgresTest {
 	}
 
 	@Test
-	void rankGrantsRequireActiveNonRootNodesAndAllowOnlyRankChanges() throws SQLException {
+	void rankGrantsRequireActiveNonRootNodesAndAllowRankOrRoleChanges() throws SQLException {
 		try (Connection c = connect()) {
 			UUID tenant = tenant(c, "ranks");
 			UUID root = root(c, tenant);
@@ -604,11 +604,16 @@ class RbacSchemaPostgresTest {
 			rankGrant(c, tenant, exec, "B");
 			assertRejected("23505", "uq_rank_grn_policy", () -> rankGrant(c, tenant, exec, "K"));
 			assertRejected("23514", "rank_grn_rank_value", () -> rankGrant(c, tenant, exec, "X"));
+			assertRejected("23514", "rank_grn_role_value", () -> rankGrant(c, tenant, exec, "D", "UNKNOWN"));
 			assertRejected("P0001", "active non-ROOT node", () -> rankGrant(c, tenant, root, "K"));
 			assertRejected("P0001", "active non-ROOT node", () -> rankGrant(c, tenant, retired, "K"));
 
 			execute(c, "update rank_grn set rank = 'C' where id = ?", rule);
 			assertThat(query(c, "select updated_at > created_at from rank_grn where id = ?", rule)).isEqualTo(true);
+			execute(c, "update rank_grn set role = 'CONTRIBUTOR' where id = ?", rule);
+			assertThat(query(c, "select role from rank_grn where id = ?", rule)).isEqualTo("CONTRIBUTOR");
+			assertRejected("23514", "rank_grn_role_value",
+					() -> execute(c, "update rank_grn set role = 'UNKNOWN' where id = ?", rule));
 			assertRejected("P0001", "only the rank or role of a rank grant can change",
 					() -> execute(c, "update rank_grn set wrk_node_id = ? where id = ?", other, rule));
 		}

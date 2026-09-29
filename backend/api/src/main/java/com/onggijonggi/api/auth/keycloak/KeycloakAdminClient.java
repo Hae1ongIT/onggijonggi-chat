@@ -210,12 +210,12 @@ public class KeycloakAdminClient {
 	}
 
 	/**
-	 * 절체 사전 검증용으로, Keycloak에서 **활성인** 사용자와 그 tenant 사용자 속성을 페이지 단위로 모두 읽는다(v0.3 일회성).
-	 * 로컬 사용자를 만들거나 token claim을 바꾸지 않는다. tenant 속성이 없거나 복수값이면 비어 있는 값으로 돌려준다(추측하지 않는다).
+	 * 절체 사전 검증용으로 Keycloak에서 활성 사용자 subject를 페이지 단위로 모두 읽는다.
+	 * Tenant는 DB 소속에서 판정하며, 로컬 사용자를 만들거나 token claim을 바꾸지 않는다.
 	 */
-	public Mono<List<KeycloakTenantUser>> listEnabledTenantUsers() {
+	public Mono<List<String>> listEnabledUserSubjects() {
 		return adminToken().flatMapMany(token -> enabledUsers(token, 0))
-				.map(user -> new KeycloakTenantUser(user.id(), tenantAttribute(user.attributes())))
+				.map(AdminUserRepresentation::id)
 				.collectList();
 	}
 
@@ -223,7 +223,7 @@ public class KeycloakAdminClient {
 		return webClient.get()
 				.uri(builder -> builder.path("/admin/realms/{realm}/users")
 						.queryParam("enabled", true)
-						.queryParam("briefRepresentation", false)
+						.queryParam("briefRepresentation", true)
 						.queryParam("first", first)
 						.queryParam("max", 100)
 						.build(realm))
@@ -234,15 +234,6 @@ public class KeycloakAdminClient {
 				.flatMapMany(page -> page.size() == 100
 						? reactor.core.publisher.Flux.fromIterable(page).concatWith(enabledUsers(token, first + 100))
 						: reactor.core.publisher.Flux.fromIterable(page));
-	}
-
-	private Optional<String> tenantAttribute(Map<String, List<String>> attributes) {
-		if (attributes == null) return Optional.empty();
-		List<String> values = attributes.get("tenant");
-		if (values == null || values.size() != 1 || values.get(0) == null || values.get(0).isBlank()) {
-			return Optional.empty();
-		}
-		return Optional.of(values.get(0));
 	}
 
 	private Mono<Optional<String>> lookupUser(String subject, String token) {
@@ -305,8 +296,8 @@ public class KeycloakAdminClient {
 	private record SearchedUser(String id, String username) {
 	}
 
-	/** PLATFORM_ADMIN 절체 사전 검증만 쓰는 전체 표현(사용자 속성이 필요해서 brief가 아닌 표현을 조회한다). */
-	private record AdminUserRepresentation(String id, Map<String, List<String>> attributes) {
+	/** PLATFORM_ADMIN 절체 사전 검증에서 활성 사용자 subject만 읽는 간략 표현. */
+	private record AdminUserRepresentation(String id) {
 	}
 
 }

@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -33,6 +35,7 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Service
 public class OrgUnitMemberService {
+	private static final Logger log = LoggerFactory.getLogger(OrgUnitMemberService.class);
 
 	private final OrgUnitMemberRepository members;
 	private final OrgUnitRepository orgUnits;
@@ -108,10 +111,24 @@ public class OrgUnitMemberService {
 			for (Change change : changes) applied.add(applyOne(change, actor));
 			return applied;
 		});
-		results.stream()
-				.filter(result -> result.outcome() == Outcome.CHANGED || result.outcome() == Outcome.UNASSIGNED)
-				.map(Result::subject)
-				.forEach(collabAuthorizationRevoker::revoke);
+		List<String> failedSubjects = new ArrayList<>();
+		List<RuntimeException> failures = new ArrayList<>();
+		for (Result result : results) {
+			if (result.outcome() != Outcome.CHANGED && result.outcome() != Outcome.UNASSIGNED) continue;
+			try {
+				collabAuthorizationRevoker.revoke(result.subject());
+			} catch (RuntimeException error) {
+				failedSubjects.add(result.subject());
+				failures.add(error);
+				log.error("커밋된 소속 변경의 협업 권한 회수 실패: subject={}", result.subject(), error);
+			}
+		}
+		if (!failures.isEmpty()) {
+			IllegalStateException error = new IllegalStateException("소속 변경은 저장됐지만 협업 권한 회수에 실패했습니다: "
+					+ String.join(", ", failedSubjects), failures.get(0));
+			for (int index = 1; index < failures.size(); index++) error.addSuppressed(failures.get(index));
+			throw error;
+		}
 		return results;
 	}
 
