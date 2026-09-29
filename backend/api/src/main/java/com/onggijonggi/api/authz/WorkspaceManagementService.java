@@ -29,6 +29,7 @@ import com.onggijonggi.common.user.AppUserStatus;
 import jakarta.persistence.EntityManager;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -340,9 +341,16 @@ public class WorkspaceManagementService {
 		Tenant tenant = tenants.findById(tenantId).orElseThrow(WorkspaceManagementService::notFound);
 		Optional<RbacBootstrapSpec.TenantSpec> specification = declared(tenant);
 		WorkspaceNode node = node(nodeId, tenantId);
-		return rankGrants.findByWorkspaceNodeId(nodeId).stream()
+		List<RankGrant> rules = rankGrants.findByWorkspaceNodeId(nodeId);
+		Map<UUID, String> orgKeys = new HashMap<>();
+		if (specification.isPresent()) {
+			List<UUID> orgIds = rules.stream().map(RankGrant::getOrgUnitId).filter(Objects::nonNull).distinct().toList();
+			for (OrgUnit unit : orgUnits.findAllById(orgIds)) orgKeys.put(unit.getId(), unit.getKey());
+		}
+		return rules.stream()
 				.map(grant -> new RankGrantView(grant.getId(), grant.getOrgUnitId(), grant.getRank(), grant.getRole(),
-						isDeclaredRankGrant(specification, node, grant)))
+						specification.isPresent() && isDeclaredRankGrant(specification, node, grant,
+								grant.getOrgUnitId() == null ? null : orgKey(orgKeys, grant.getOrgUnitId()))))
 				.sorted(Comparator.comparingInt((RankGrantView view) -> view.rank().order()).thenComparing(RankGrantView::id))
 				.toList();
 	}
@@ -584,9 +592,18 @@ public class WorkspaceManagementService {
 		if (declared.isEmpty()) return false;
 		String orgKey = grant.getOrgUnitId() == null ? null : orgUnits.findById(grant.getOrgUnitId())
 				.orElseThrow(WorkspaceManagementService::conflict).getKey();
+		return isDeclaredRankGrant(declared, node, grant, orgKey);
+	}
+	private static boolean isDeclaredRankGrant(Optional<RbacBootstrapSpec.TenantSpec> declared, WorkspaceNode node,
+			RankGrant grant, String orgKey) {
 		return declared.get().rankGrants().stream().anyMatch(spec -> spec.node().equals(node.getKey())
 				&& Objects.equals(spec.orgUnit(), orgKey) && spec.rank().equals(grant.getRank().name())
 				&& spec.role().equals(grant.getRole().name()));
+	}
+	private static String orgKey(Map<UUID, String> orgKeys, UUID orgUnitId) {
+		String key = orgKeys.get(orgUnitId);
+		if (key == null) throw conflict();
+		return key;
 	}
 	private boolean hasRankGrant(UUID nodeId, UUID orgUnitId, Rank rank, WorkspaceRole role, UUID except) {
 		return rankGrants.findByWorkspaceNodeId(nodeId).stream().anyMatch(grant ->

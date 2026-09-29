@@ -10,8 +10,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.onggijonggi.common.authz.AuthorizationAuditRepository;
+import com.onggijonggi.common.authz.OrgUnit;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
 import com.onggijonggi.common.authz.OrgUnitRepository;
+import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.Rank;
 import com.onggijonggi.common.authz.RankGrant;
 import com.onggijonggi.common.authz.RankGrantRepository;
@@ -138,5 +140,26 @@ class WorkspaceManagementServiceTest {
 						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
 		verify(rankGrants, never()).saveAndFlush(any());
 		verify(audits, never()).save(any());
+	}
+
+	@Test
+	void rankRuleListResolvesDeclaredOrgUnitsInOneBatch() {
+		OrgUnit sales = new OrgUnit(tenant.getId(), "sales", "Sales", OrgUnitStatus.ACTIVE);
+		OrgUnit finance = new OrgUnit(tenant.getId(), "finance", "Finance", OrgUnitStatus.ACTIVE);
+		RankGrant declaredRule = new RankGrant(tenant.getId(), child.getId(), sales.getId(), Rank.K, WorkspaceRole.VIEWER);
+		RankGrant otherRule = new RankGrant(tenant.getId(), child.getId(), finance.getId(), Rank.B, WorkspaceRole.ADMIN);
+		RbacBootstrapSpec.TenantSpec tenantSpec = new RbacBootstrapSpec.TenantSpec("acme", "Acme", "ACTIVE",
+				List.of(), List.of(), List.of(),
+				List.of(new RbacBootstrapSpec.RankGrantSpec("sales", "K", "VIEWER", "child")));
+		when(config.loadWithFingerprint()).thenReturn(Optional.of(new RbacBootstrapConfigReader.LoadedBootstrapSpec(
+				new RbacBootstrapSpec(new RbacBootstrapSpec.Reconcile(false, null), List.of(tenantSpec)), "fingerprint")));
+		when(rankGrants.findByWorkspaceNodeId(child.getId())).thenReturn(List.of(declaredRule, otherRule));
+		when(units.findAllById(any())).thenReturn(List.of(sales, finance));
+
+		List<WorkspaceManagementService.RankGrantView> result = service.listRankGrants(actor, child.getId());
+
+		assertThat(result).extracting(WorkspaceManagementService.RankGrantView::declared).containsExactly(false, true);
+		verify(units).findAllById(any());
+		verify(units, never()).findById(any());
 	}
 }
