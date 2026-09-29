@@ -2,6 +2,9 @@
 -- 앞 migration에서 미귀속·교차 Tenant 행이 있으면 이 파일까지 도달하지 못한다.
 -- 부모·메시지 참조의 새 복합 FK를 먼저 검증한 후 옛 단일 FK를 제거한다.
 
+-- 앱이 살아 있어 잠금을 오래 못 잡으면 대기열을 만들지 않고 빨리 실패하게 한다(점검창에서는 바로 잡힌다).
+set local lock_timeout = '10s';
+
 alter table thr alter column tnn_id set not null, alter column wrk_node_id set not null;
 alter table thr_mbr alter column tnn_id set not null;
 alter table msg alter column tnn_id set not null;
