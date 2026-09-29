@@ -215,15 +215,14 @@ docker compose up -d --build
 
 > 이 저장소를 이미 한 번 띄웠다면 Keycloak realm은 처음 만들 때만 가져오므로 `PLATFORM_ADMIN` 역할이 없다. Keycloak 관리 콘솔에서 realm 역할 `PLATFORM_ADMIN`을 만들어 `APP_USER`에 붙이거나, 계정·대화가 지워져도 되면 `docker compose down -v` 뒤 다시 띄운다.
 
-**1. `infra/.env`에 세 줄을 넣고 다시 띄운다.**
+**1. `infra/.env`에 두 줄을 넣고 다시 띄운다.**
 
 ```bash
 SPRING_PROFILE=prod,casbin
 COMPOSE_PROFILES=casbin
-WORKSPACE_SETUP_FILE=./config/workspace-setup.yml
 ```
 
-세 번째 줄이 팀·워크스페이스·규칙이 있는 조직 구조 파일을 고른다. 넣지 않으면 기본 배포처럼 고객사 하나(`ogjg`)만 만들어 팀도 워크스페이스도 없다. 두 파일은 같은 고객사(`ogjg`)를 가리키므로 바꿔도 고객사가 둘로 늘지 않는다.
+`casbin`을 `prod` **뒤에** 적어야 한다 — 그러면 기본 조직 구조(고객사 `ogjg` 하나) 대신 팀·워크스페이스·규칙이 있는 `workspace-setup.yml`을 읽는다. 두 파일이 같은 고객사(`ogjg`)를 가리키므로 바꿔도 고객사가 둘로 늘지 않는다.
 
 ```bash
 docker compose up -d --build
@@ -242,7 +241,37 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 **3. 화면에서 확인한다.** `APP_USER`로 로그인하면 사이드바에 **권한 관리**가 생긴다(`demo` 계정은 일반 사용자라 메뉴가 없다)(<http://localhost:3010/admin/permissions>). 사람마다 팀·직급을 바꾸면 "누가 무엇을 보나" 표가 실제 판정 결과로 바뀐다.
 
-끄려면 세 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다.
+끄려면 두 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다.
+
+---
+
+## v0.2에서 올릴 때 (대화가 이미 있을 때)
+
+새 버전은 모든 대화를 고객사(Tenant)의 공용 공간에 귀속시키는 스키마 변경을 포함한다. **대화가 이미 있는데 고객사가 아직 없으면** 서버가 뜨면서 실행하는 Flyway가 `thread cutover requires exactly one ACTIVE tenant`로 멈추고 BFF가 기동하지 못한다. 트랜잭션째 되돌려지므로 데이터는 그대로다. 고객사는 BFF가 뜬 뒤에 만들어지니, 다음 순서로 올린다.
+
+**1. 쓰기를 멈춘다.** 올리는 동안 사용자가 대화를 만들지 않게 한다(점검 시간).
+
+**2. Flyway를 끈 채로 새 이미지를 한 번 띄운다.** `infra/.env`에 한 줄을 넣고 BFF만 다시 띄운다.
+
+```bash
+SPRING_FLYWAY_ENABLED=false
+```
+
+```bash
+docker compose up -d --build bff
+```
+
+**✅ 성공**: BFF 로그에 `RBAC bootstrap 완료`가 찍히고 처리된 Tenant에 `ogjg`가 보인다. 기본 고객사(`ogjg`)와 공용 공간이 만들어졌다. 대화는 아직 그대로다.
+
+**3. Flyway를 다시 켜고 띄운다.** 2단계에서 넣은 줄을 지우고 다시 띄우면, 이번엔 migration이 기존 대화를 공용 공간에 놓고 스키마를 마무리한다.
+
+```bash
+docker compose up -d bff
+```
+
+**✅ 성공**: BFF가 정상 기동한다. 기존 대화가 모두 그대로 열린다.
+
+권한 기능을 켜서 쓰던 배포라면 이미 고객사가 있으므로 이 절차가 필요 없다. 고객사가 둘 이상이면 migration은 어느 쪽에 귀속할지 추측하지 않고 멈춘다.
 
 ---
 
