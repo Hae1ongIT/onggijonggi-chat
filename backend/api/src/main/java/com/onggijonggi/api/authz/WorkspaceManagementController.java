@@ -3,6 +3,7 @@ package com.onggijonggi.api.authz;
 import com.onggijonggi.api.auth.CurrentActorProvider;
 import com.onggijonggi.api.common.TraceIdWebFilter;
 import com.onggijonggi.common.authz.OrgUnitStatus;
+import com.onggijonggi.common.authz.Rank;
 import com.onggijonggi.common.authz.WorkspaceNodeKind;
 import com.onggijonggi.common.authz.WorkspaceRole;
 import java.util.List;
@@ -14,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -48,6 +50,8 @@ public class WorkspaceManagementController {
 	public record Reparent(UUID parentId) { }
 	public record CreateGrant(UUID orgUnitId, WorkspaceRole role) { }
 	public record Role(WorkspaceRole role) { }
+	public record CreateRankGrant(UUID orgUnitId, Rank rank, WorkspaceRole role) { }
+	public record RankValue(Rank rank) { }
 	public record MoveThread(UUID workspaceId) { }
 	public record CreateOrgUnit(String key, String name) { }
 
@@ -91,6 +95,35 @@ public class WorkspaceManagementController {
 	@DeleteMapping("/api/rbac/grants/{grantId}")
 	public Mono<ResponseEntity<Void>> removeGrant(@PathVariable UUID grantId) {
 		return withActor(actor -> { service.removeGrant(actor, grantId); return ResponseEntity.noContent().build(); });
+	}
+
+	@GetMapping("/api/rbac/workspaces/{nodeId}/rank-grants")
+	public Mono<List<WorkspaceManagementService.RankGrantView>> listRankGrants(@PathVariable UUID nodeId) {
+		return withActor(actor -> service.listRankGrants(actor, nodeId));
+	}
+
+	@PostMapping("/api/rbac/workspaces/{nodeId}/rank-grants")
+	public Mono<ResponseEntity<Map<String, UUID>>> addRankGrant(@PathVariable UUID nodeId,
+			@RequestBody CreateRankGrant request) {
+		return withActor(actor -> ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id",
+				service.addRankGrant(actor, nodeId, request.orgUnitId(), request.rank(), request.role()))));
+	}
+
+	@PatchMapping("/api/rbac/rank-grants/{grantId}/rank")
+	public Mono<ResponseEntity<Void>> changeRankGrantRank(@PathVariable UUID grantId, @RequestBody RankValue request) {
+		return withActor(actor -> { service.changeRankGrantRank(actor, grantId, request.rank());
+			return ResponseEntity.noContent().build(); });
+	}
+
+	@PatchMapping("/api/rbac/rank-grants/{grantId}/role")
+	public Mono<ResponseEntity<Void>> changeRankGrantRole(@PathVariable UUID grantId, @RequestBody Role request) {
+		return withActor(actor -> { service.changeRankGrantRole(actor, grantId, request.role());
+			return ResponseEntity.noContent().build(); });
+	}
+
+	@DeleteMapping("/api/rbac/rank-grants/{grantId}")
+	public Mono<ResponseEntity<Void>> removeRankGrant(@PathVariable UUID grantId) {
+		return withActor(actor -> { service.removeRankGrant(actor, grantId); return ResponseEntity.noContent().build(); });
 	}
 
 	@PatchMapping("/api/collab/threads/{threadId}/workspace")

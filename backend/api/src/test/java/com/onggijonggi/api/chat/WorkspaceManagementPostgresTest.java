@@ -13,6 +13,7 @@ import com.onggijonggi.api.authz.RbacPolicyRefresh;
 import com.onggijonggi.api.authz.WorkspaceManagementService;
 import com.onggijonggi.api.authz.WorkspaceManagementService.Actor;
 import com.onggijonggi.common.authz.OrgUnitStatus;
+import com.onggijonggi.common.authz.Rank;
 import com.onggijonggi.common.authz.TenantRepository;
 import com.onggijonggi.common.authz.WorkspaceNodeKind;
 import com.onggijonggi.common.authz.WorkspaceNodeRepository;
@@ -440,6 +441,82 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	}
 
 	// ------------------------------------------------------------------ 도우미
+
+	@Test
+	void rankRulesSupportAllOrganizationsChangesAndIndividualAuditEvents() {
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank project");
+		UUID rule = service.addRankGrant(hrAdmin, project, null, Rank.K, WorkspaceRole.VIEWER);
+		assertThat(service.listRankGrants(hrAdmin, project)).containsExactly(
+				new WorkspaceManagementService.RankGrantView(rule, null, Rank.K, WorkspaceRole.VIEWER, false));
+		assertStatus(HttpStatus.CONFLICT,
+				() -> service.addRankGrant(hrAdmin, project, null, Rank.K, WorkspaceRole.VIEWER));
+
+		service.changeRankGrantRole(hrAdmin, rule, WorkspaceRole.CONTRIBUTOR);
+		service.changeRankGrantRank(hrAdmin, rule, Rank.B);
+		assertThat(jdbc.queryForMap("select rank, role from rank_grn where id = ?", rule))
+				.containsEntry("rank", "B").containsEntry("role", "CONTRIBUTOR");
+		assertThat(jdbc.queryForList("""
+				select evt_kind from authz_adt where tnn_id = ? and trg_ref ->> 'rank_grn_id' = ?
+				order by created_at, id
+				""", String.class, tenantId, rule.toString()))
+				.containsExactly("POLICY_ADDED", "POLICY_REPLACED", "POLICY_REPLACED");
+
+		service.removeRankGrant(hrAdmin, rule);
+		assertThat(service.listRankGrants(hrAdmin, project)).isEmpty();
+		assertThat(jdbc.queryForObject("select count(*) from rank_grn where id = ?", Integer.class, rule)).isZero();
+	}
+
+	@Test
+	void rankRuleDuplicateChangesAreRejectedAndListUsesRankOrder() {
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank order project");
+		UUID lower = service.addRankGrant(hrAdmin, project, hrTeam, Rank.K, WorkspaceRole.VIEWER);
+		UUID higher = service.addRankGrant(hrAdmin, project, hrTeam, Rank.B, WorkspaceRole.VIEWER);
+		assertThat(service.listRankGrants(hrAdmin, project)).extracting(WorkspaceManagementService.RankGrantView::id)
+				.containsExactly(higher, lower);
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeRankGrantRank(hrAdmin, lower, Rank.B));
+		assertThat(jdbc.queryForObject("select rank from rank_grn where id = ?", String.class, lower)).isEqualTo("K");
+		assertStatus(HttpStatus.BAD_REQUEST,
+				() -> service.addRankGrant(hrAdmin, project, hrTeam, null, WorkspaceRole.VIEWER));
+		assertStatus(HttpStatus.CONFLICT,
+				() -> service.addRankGrant(hrAdmin, project, UUID.randomUUID(), Rank.K, WorkspaceRole.VIEWER));
+	}
+
+	@Test
+	void leafMovementKeepsTheSameRankRule() {
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank leaf");
+		UUID target = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank parent");
+		UUID rule = service.addRankGrant(hrAdmin, leaf, hrTeam, Rank.K, WorkspaceRole.VIEWER);
+
+		service.reparentLeaf(hrAdmin, leaf, target);
+		assertThat(jdbc.queryForObject("select wrk_node_id from rank_grn where id = ?", UUID.class, rule))
+				.isEqualTo(leaf);
+	}
+
+	@Test
+	void rankDerivedManageCanRemoveItsOwnPermissionButCannotManageAgain() {
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "Rank owned project");
+		UUID rule = service.addRankGrant(hrAdmin, project, opsTeam, Rank.S, WorkspaceRole.ADMIN);
+		assertThat(service.listRankGrants(opsAdmin, project)).hasSize(1);
+
+		service.removeRankGrant(opsAdmin, rule);
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.listRankGrants(opsAdmin, project));
+	}
+
+	@Test
+	void declaredRankRuleCannotBeChangedUntilItsDeclarationIsRemoved() throws Exception {
+		UUID rule = service.addRankGrant(hrAdmin, hr, hrTeam, Rank.K, WorkspaceRole.VIEWER);
+		String config = Files.readString(BOOTSTRAP_CONFIG);
+		Files.writeString(BOOTSTRAP_CONFIG, config.replace("    grants:\n",
+				"    rank_grants:\n      - { org_unit: hr, rank: K, role: VIEWER, node: hr }\n    grants:\n"));
+		assertThat(service.listRankGrants(hrAdmin, hr)).contains(
+				new WorkspaceManagementService.RankGrantView(rule, hrTeam, Rank.K, WorkspaceRole.VIEWER, true));
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeRankGrantRole(hrAdmin, rule, WorkspaceRole.ADMIN));
+		assertStatus(HttpStatus.CONFLICT, () -> service.removeRankGrant(hrAdmin, rule));
+
+		Files.writeString(BOOTSTRAP_CONFIG, config);
+		service.changeRankGrantRole(hrAdmin, rule, WorkspaceRole.ADMIN);
+		assertThat(jdbc.queryForObject("select role from rank_grn where id = ?", String.class, rule)).isEqualTo("ADMIN");
+	}
 
 	private UUID team(String key) {
 		return jdbc.queryForObject("select id from org_unit where tnn_id = ? and org_unit_key = ?", UUID.class, tenantId, key);

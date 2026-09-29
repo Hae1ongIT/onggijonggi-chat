@@ -68,4 +68,14 @@ public class RankGrant {
 	public UUID getOrgUnitId() { return orgUnitId; }
 	public Rank getRank() { return rank; }
 	public WorkspaceRole getRole() { return role; }
+
+	public void changeRank(Rank rank) {
+		this.rank = rank;
+		this.updatedAt = Instant.now();
+	}
+
+	public void changeRole(WorkspaceRole role) {
+		this.role = role;
+		this.updatedAt = Instant.now();
+	}
 }
