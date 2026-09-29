@@ -39,7 +39,7 @@ import org.springframework.web.server.ResponseStatusException;
  * Description : 직접 MANAGE 판정(#259 감사 조회, #260 관리 쓰기)을 검증한다 — 스위치와 무관하게 DB 부여로 계산하고, ADMIN
  *               역할만 MANAGE를 준다, 팀 규칙은 내 팀만, 직급 규칙은 팀이 없거나 내 팀이면서 서열이 닿을 때만, 부모의 부여는
  *               보지 않는다, 노드·Tenant·팀이 비활성이거나 배정이 없거나 다른 Tenant면 거부한다. 쓰기는 비활성 계정과
- *               Casbin 반영이 막힌 Tenant(판정이 켜진 동안)도 거부하고, 재활성화는 비활성 노드 자체의 보존된 부여로 판정한다.
+ *               Casbin 반영이 막힌 Tenant(판정이 켜진 동안)도 거부하고, 상태 무관 판정은 비활성 노드 자체의 보존된 부여로 본다.
  */
 class DirectManageAuthorizerTest {
 
@@ -208,12 +208,11 @@ class DirectManageAuthorizerTest {
 				WorkspaceNodeStatus.INACTIVE);
 		// 부모 hr의 ADMIN만으로는 되살릴 수 없다.
 		grant(hr, team.getId(), WorkspaceRole.ADMIN);
-		assertForbidden(() -> authorizer.requireToReactivate(SUBJECT, closed));
+		assertForbidden(() -> authorizer.requireIgnoringStatus(SUBJECT, closed));
 
 		grant(closed, team.getId(), WorkspaceRole.ADMIN);
-		assertThatCode(() -> authorizer.requireToReactivate(SUBJECT, closed)).doesNotThrowAnyException();
-		// 활성 노드에는 재활성화 판정을 쓰지 않고, 비활성 노드에는 일반 쓰기 판정을 쓰지 않는다.
-		assertForbidden(() -> authorizer.requireToReactivate(SUBJECT, hr));
+		assertThatCode(() -> authorizer.requireIgnoringStatus(SUBJECT, closed)).doesNotThrowAnyException();
+		// 일반 쓰기 판정은 비활성 노드를 받지 않는다.
 		assertForbidden(() -> authorizer.require(SUBJECT, closed));
 	}
 

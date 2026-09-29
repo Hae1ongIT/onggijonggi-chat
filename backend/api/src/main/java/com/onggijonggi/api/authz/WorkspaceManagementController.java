@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -26,6 +27,8 @@ import reactor.core.scheduler.Schedulers;
  * Description : Workspace·부여 관리(#260). 일반 ADMIN 경로는 대상 노드의 직접 MANAGE를 스위치와 무관하게 요구한다.
  *               org-unit 관리는 control plane(`/api/platform/**`, PLATFORM_ADMIN)이다. 조직 트리와 Casbin 서버가 있는
  *               casbin 프로필에서만 켜진다. 서비스가 블로킹이라 boundedElastic에서 부른다.
+ *               경로를 `/api/rbac/**`로 따로 묶은 것은 채팅 화면이 읽는 `/api/workspaces`(목록·감사 조회)와 관리 쓰기를 가르기
+ *               위해서다. 협업방 이동만 방 리소스라 `/api/collab/threads/{id}/workspace`에 둔다.
  */
 @RestController
 @Profile("casbin")
@@ -121,7 +124,9 @@ public class WorkspaceManagementController {
 
 	private <T> Mono<T> withActor(java.util.function.Function<WorkspaceManagementService.Actor, T> operation) {
 		return Mono.zip(actors.currentActor(), ReactiveSecurityContextHolder.getContext()
-				.map(context -> (JwtAuthenticationToken) context.getAuthentication()))
+				.map(context -> context.getAuthentication())
+				.filter(JwtAuthenticationToken.class::isInstance).cast(JwtAuthenticationToken.class)
+				.switchIfEmpty(Mono.error(() -> new ResponseStatusException(HttpStatus.FORBIDDEN))))
 				.flatMap(tuple -> Mono.fromCallable(() -> {
 					List<String> roles = tuple.getT2().getAuthorities().stream().map(authority -> authority.getAuthority())
 							.filter(value -> value.startsWith("ROLE_")).map(value -> value.substring(5)).toList();

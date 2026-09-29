@@ -70,11 +70,11 @@ public class DirectManageAuthorizer {
 	}
 
 	/**
-	 * 비활성 노드 재활성화용. 비활성 노드에는 require를 쓸 수 없어, 보존된 그 노드 자체의 직접 부여와 요청자의 현재 ACTIVE 배정으로
-	 * 판정한다. 부모 노드의 권한으로 대신하지 않는다(상속 없음).
+	 * 노드 상태와 무관하게 그 노드 자체의 직접 부여로 판정한다. 비활성 노드 재활성화(보존된 부여로 판정)와, 상태를 보기 전에 권한부터
+	 * 확인해야 하는 연산(비활성화)이 쓴다 — 상태를 먼저 보면 권한 없는 사람도 409/403 차이로 노드 상태를 알 수 있다.
+	 * 부모 노드의 권한으로 대신하지 않는다(상속 없음).
 	 */
-	public void requireToReactivate(String subject, WorkspaceNode node) {
-		if (node.getStatus() != WorkspaceNodeStatus.INACTIVE) throw forbidden();
+	public void requireIgnoringStatus(String subject, WorkspaceNode node) {
 		requireWriter(subject, node);
 	}
 

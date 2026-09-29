@@ -1,5 +1,6 @@
 package com.onggijonggi.api.authz;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -79,7 +80,8 @@ class WorkspaceManagementServiceTest {
 		when(nodes.findByTenantId(tenant.getId())).thenReturn(List.of(root, parent, child));
 		doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN)).when(manage).require("actor", child);
 		assertThatThrownBy(() -> service.deactivateSubtree(actor, parent.getId()))
-				.isInstanceOf(ResponseStatusException.class);
+				.isInstanceOfSatisfying(ResponseStatusException.class,
+						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
 		verify(nodes, never()).saveAndFlush(any(WorkspaceNode.class));
 		verify(audits, never()).save(any());
 		verify(refresh, never()).publish(any(), any(), any());
@@ -90,7 +92,9 @@ class WorkspaceManagementServiceTest {
 		WorkspaceGrant grant = new WorkspaceGrant(tenant.getId(), UUID.randomUUID(), child.getId(), WorkspaceRole.ADMIN);
 		when(grants.findById(grant.getId())).thenReturn(Optional.of(grant));
 		when(grants.findByTenantId(tenant.getId())).thenReturn(List.of(grant));
-		assertThatThrownBy(() -> service.removeGrant(actor, grant.getId())).isInstanceOf(ResponseStatusException.class);
+		assertThatThrownBy(() -> service.removeGrant(actor, grant.getId()))
+				.isInstanceOfSatisfying(RbacStateConflictException.class,
+						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
 		verify(grants, never()).delete(grant);
 		verify(audits, never()).save(any());
 	}

@@ -94,7 +94,7 @@ public class WorkspaceManagementService {
 		if (key.equals("root") || key.equals("common")) throw badRequest();
 		validName(name);
 		if (kind != WorkspaceNodeKind.ORG && kind != WorkspaceNodeKind.WORK) throw badRequest();
-		UUID tenantId = tenantIdOf(parentId);
+		UUID tenantId = tenantIdOf(required(parentId));
 		UUID result = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode parent = node(parentId, tenantId);
@@ -143,6 +143,8 @@ public class WorkspaceManagementService {
 		Set<UUID> affected = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode target = node(nodeId, tenantId);
+			// 권한부터 본다 — 상태·종류를 먼저 보면 권한 없는 사람도 409/403 차이로 노드 상태를 알 수 있다.
+			manage.requireIgnoringStatus(actor.subject(), target);
 			if (target.getKind() == WorkspaceNodeKind.ROOT || target.getKind() == WorkspaceNodeKind.COMMON
 					|| target.getStatus() != WorkspaceNodeStatus.ACTIVE) throw conflict();
 			List<WorkspaceNode> subtree = nodes.findByTenantId(tenantId).stream()
@@ -171,10 +173,10 @@ public class WorkspaceManagementService {
 		transactions.executeWithoutResult(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
+			// 권한부터 본다. 비활성 노드 자체의 보존된 직접 부여로 판정하고, 부모의 MANAGE로 대신하지 않는다(상속 없음).
+			manage.requireIgnoringStatus(actor.subject(), current);
 			if (current.getStatus() != WorkspaceNodeStatus.INACTIVE
 					|| current.getKind() == WorkspaceNodeKind.ROOT || current.getKind() == WorkspaceNodeKind.COMMON) throw conflict();
-			// 비활성 노드 자체의 보존된 직접 부여로 판정한다. 부모의 MANAGE로 대신하지 않는다(상속 없음).
-			manage.requireToReactivate(actor.subject(), current);
 			WorkspaceNode parent = node(current.getParentId(), tenantId);
 			if (parent.getStatus() != WorkspaceNodeStatus.ACTIVE) throw conflict();
 			undeclaredNode(tenant, current);
@@ -189,20 +191,22 @@ public class WorkspaceManagementService {
 	}
 
 	public void reparentLeaf(Actor actor, UUID nodeId, UUID newParentId) {
+		required(newParentId);
 		UUID tenantId = tenantIdOf(nodeId);
 		transactions.executeWithoutResult(status -> {
 			Tenant tenant = lock(tenantId);
 			WorkspaceNode current = node(nodeId, tenantId);
+			// 권한부터 본다(세 노드 모두 직접 MANAGE). ROOT에는 부여가 없으므로 ROOT가 어느 쪽 부모든 여기서 403이다.
+			manage.require(actor.subject(), current);
 			WorkspaceNode oldParent = node(current.getParentId(), tenantId);
 			WorkspaceNode newParent = node(newParentId, tenantId);
+			manage.require(actor.subject(), oldParent);
+			manage.require(actor.subject(), newParent);
 			if (oldParent.getKind() == WorkspaceNodeKind.ROOT || newParent.getKind() == WorkspaceNodeKind.ROOT
 					|| newParent.getKind() == WorkspaceNodeKind.COMMON || current.getStatus() != WorkspaceNodeStatus.ACTIVE
 					|| newParent.getStatus() != WorkspaceNodeStatus.ACTIVE || oldParent.getId().equals(newParentId)
 					|| nodes.findByTenantId(tenantId).stream().anyMatch(candidate -> nodeId.equals(candidate.getParentId()))
 					|| threads.existsByWorkspaceNodeId(nodeId)) throw conflict();
-			manage.require(actor.subject(), current);
-			manage.require(actor.subject(), oldParent);
-			manage.require(actor.subject(), newParent);
 			undeclaredNode(tenant, current);
 			uniqueSiblingName(tenantId, newParentId, current.getName(), nodeId);
 			List<WorkspaceGrant> previous = grants.findByTenantId(tenantId).stream()
@@ -239,6 +243,8 @@ public class WorkspaceManagementService {
 	}
 
 	public UUID addGrant(Actor actor, UUID nodeId, UUID orgUnitId, WorkspaceRole role) {
+		if (role == null) throw badRequest();
+		required(orgUnitId);
 		UUID tenantId = tenantIdOf(nodeId);
 		UUID id = transactions.execute(status -> {
 			Tenant tenant = lock(tenantId);
@@ -299,6 +305,7 @@ public class WorkspaceManagementService {
 	}
 
 	public void moveCollabThread(Actor actor, UUID threadId, UUID destinationId) {
+		required(destinationId);
 		Thr existing = threads.findById(threadId).orElseThrow(WorkspaceManagementService::notFound);
 		UUID tenantId = existing.getTenantId();
 		if (tenantId == null) throw notFound();
@@ -354,9 +361,9 @@ public class WorkspaceManagementService {
 			OrgUnit unit = orgUnits.findById(orgUnitId).filter(value -> value.getTenantId().equals(tenant.getId()))
 					.orElseThrow(WorkspaceManagementService::notFound);
 			undeclaredOrgUnit(tenant, unit.getKey());
-			if (targetStatus == OrgUnitStatus.INACTIVE && members.findAll().stream()
-					.anyMatch(member -> unit.getId().equals(member.getOrgUnitId())
-							&& users.findByKeycloakSubj(member.getSubject())
+			// app_user가 없는 배정(아직 로그인하지 않은 사람)도 배정된 사용자로 센다 — 비활성화하면 그 사람이 막힌다.
+			if (targetStatus == OrgUnitStatus.INACTIVE && members.findByOrgUnitId(unit.getId()).stream()
+					.anyMatch(member -> users.findByKeycloakSubj(member.getSubject())
 									.map(user -> user.getStatus() == AppUserStatus.ACTIVE).orElse(true))) throw conflict();
 			Map<String, Object> before = orgSnapshot(unit);
 			AuthorizationAuditEventKind event;
@@ -458,5 +465,10 @@ public class WorkspaceManagementService {
 	private static ResponseStatusException badRequest() { return new ResponseStatusException(HttpStatus.BAD_REQUEST); }
 	private static ResponseStatusException notFound() { return new ResponseStatusException(HttpStatus.NOT_FOUND); }
 	private static ResponseStatusException forbidden() { return new ResponseStatusException(HttpStatus.FORBIDDEN); }
-	private static ResponseStatusException conflict() { return new ResponseStatusException(HttpStatus.CONFLICT); }
+	private static ResponseStatusException conflict() { return new RbacStateConflictException(); }
+	/** 요청 본문의 필수 id가 비었으면 400이다 — 그대로 조회에 넘기면 IllegalArgumentException이 500이 된다. */
+	private static UUID required(UUID id) {
+		if (id == null) throw badRequest();
+		return id;
+	}
 }

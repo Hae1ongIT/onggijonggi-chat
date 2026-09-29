@@ -198,14 +198,16 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	void rootAndCommonAreNotManagedAndRootCannotBeAReparentEnd() {
 		UUID root = nodes.findByTenantIdAndKey(tenantId, "root").orElseThrow().getId();
 		UUID common = nodes.findByTenantIdAndKey(tenantId, "common").orElseThrow().getId();
-		// ROOT·COMMON의 상태는 Tenant lifecycle만 따른다.
-		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, root));
-		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, common));
-		assertStatus(HttpStatus.CONFLICT, () -> service.reactivateNode(hrAdmin, common));
-		// ROOT에는 직접 부여가 없어 ROOT가 어느 쪽 부모든 일반 ADMIN은 옮길 수 없다. hr은 ROOT 바로 아래다.
+		// ROOT·COMMON의 상태는 Tenant lifecycle만 따른다. 권한부터 보므로 ADMIN 부여가 없는 두 노드는 403이다.
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.deactivateSubtree(hrAdmin, root));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.deactivateSubtree(hrAdmin, common));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.reactivateNode(hrAdmin, common));
+		assertThat(status(root)).isEqualTo("ACTIVE");
+		assertThat(status(common)).isEqualTo("ACTIVE");
+		// ROOT에는 직접 부여가 없어 ROOT가 어느 쪽 부모든 일반 ADMIN은 옮길 수 없다(권한부터 보므로 403). hr은 ROOT 바로 아래다.
 		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
-		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, leaf, root));
-		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, hr, ops));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, leaf, root));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, hr, ops));
 		assertThat(parentOf(leaf)).isEqualTo(hr);
 		assertThat(parentOf(hr)).isEqualTo(root);
 	}
@@ -221,6 +223,62 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		assertStatus(HttpStatus.CONFLICT, () -> service.changeGrantRole(hrAdmin, onlyAdmin, WorkspaceRole.VIEWER));
 
 		assertThat(grants(project)).containsExactly(hrTeam + ":ADMIN");
+	}
+
+	@Test
+	void protectedGrantsAndInvalidTargetsAreRefusedWithoutChanges() {
+		UUID root = nodes.findByTenantIdAndKey(tenantId, "root").orElseThrow().getId();
+		int auditsBefore = events().size();
+		// 선언된 부여(hr 팀의 hr ADMIN)는 지우지도 바꾸지도 못한다.
+		UUID declared = grantId(hr, hrTeam);
+		assertStatus(HttpStatus.CONFLICT, () -> service.removeGrant(hrAdmin, declared));
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeGrantRole(hrAdmin, declared, WorkspaceRole.VIEWER));
+		// ROOT에는 부여할 권한 자체가 없고, 필수 입력이 비면 400이다.
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.addGrant(hrAdmin, root, opsTeam, WorkspaceRole.VIEWER));
+		assertStatus(HttpStatus.BAD_REQUEST, () -> service.addGrant(hrAdmin, hr, null, WorkspaceRole.VIEWER));
+		assertStatus(HttpStatus.BAD_REQUEST, () -> service.createNode(hrAdmin, null, "n-" + tag, WorkspaceNodeKind.WORK, "이름"));
+		// 비활성 org-unit에는 부여할 수 없다.
+		UUID closedUnit = service.createOrgUnit(hrAdmin, tenantKey, "closed-" + tag, "닫힌 팀");
+		service.changeOrgUnit(hrAdmin, tenantKey, closedUnit, null, OrgUnitStatus.INACTIVE);
+		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		assertStatus(HttpStatus.CONFLICT, () -> service.addGrant(hrAdmin, project, closedUnit, WorkspaceRole.VIEWER));
+		// 같은 key의 org-unit은 다시 만들 수 없다.
+		assertStatus(HttpStatus.CONFLICT, () -> service.createOrgUnit(hrAdmin, tenantKey, "closed-" + tag, "또 닫힌 팀"));
+		assertThat(grants(project)).containsExactly(hrTeam + ":ADMIN");
+		// 거부된 연산은 감사를 남기지 않는다(org-unit 생성·비활성화·노드 생성의 성공분만 남는다).
+		assertThat(events().subList(auditsBefore, events().size()))
+				.containsExactlyInAnyOrder("ORG_UNIT_CREATED", "POLICY_ADDED", "ORG_UNIT_DEACTIVATED", "NODE_CREATED", "POLICY_ADDED");
+	}
+
+	@Test
+	void reparentIsRefusedWhenAGrantCannotBeRestored() {
+		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "gone-" + tag, "곧 닫을 팀");
+		service.addGrant(hrAdmin, leaf, unit, WorkspaceRole.VIEWER);
+		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
+		List<String> before = grants(leaf);
+
+		// 비활성 org-unit의 부여는 DB가 다시 넣지 못하므로 이동 전에 거부하고 원래 부모·부여를 지킨다.
+		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, leaf, target));
+
+		assertThat(parentOf(leaf)).isEqualTo(hr);
+		assertThat(grants(leaf)).containsExactlyElementsOf(before);
+	}
+
+	@Test
+	void onlyCollabRoomsMoveAndOnlyToManagedNodes() {
+		UUID direct = UUID.randomUUID();
+		UUID common = nodes.findByTenantIdAndKey(tenantId, "common").orElseThrow().getId();
+		jdbc.update("""
+				insert into thr (id, kind, created_user_id, drc_own_user_id, title, tnn_id, wrk_node_id)
+				values (?, 'DIRECT', ?, ?, 't', ?, ?)""", direct, hrAdmin.userId(), hrAdmin.userId(), tenantId, common);
+		UUID room = collabRoom(hr);
+
+		assertStatus(HttpStatus.NOT_FOUND, () -> service.moveCollabThread(hrAdmin, direct, hr));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.moveCollabThread(hrAdmin, room, ops));
+		assertStatus(HttpStatus.BAD_REQUEST, () -> service.moveCollabThread(hrAdmin, room, null));
+		assertThat(jdbc.queryForObject("select wrk_node_id from thr where id = ?", UUID.class, room)).isEqualTo(hr);
 	}
 
 	// ------------------------------------------------------------------ org-unit(control plane)
