@@ -166,6 +166,63 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 		assertThat(sameFailure).isEqualTo(1);
 	}
 
+	@Test
+	void twoActiveTenantsStopTheValidation() {
+		fixture();
+		fixture();
+
+		CutoverValidationResult result = validation.validate(List.of());
+		assertThat(result.ready()).isFalse();
+		assertThat(result.tenantId()).isNull();
+		assertThat(codes(result)).containsExactly("ACTIVE_TENANT_COUNT");
+	}
+
+	@Test
+	void collabInAnInactiveWorkspaceIsReported() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+		jdbc.update("update wrk_node set status = 'INACTIVE', inactive_at = now() where id = ?", fixture.teamWorkspace());
+
+		assertThat(codes(validation.validate(List.of()))).contains("INVALID_THREAD_WORKSPACE");
+	}
+
+	@Test
+	void directThreadWithoutItsOwnerMembershipIsReported() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID direct = thread("DIRECT", owner, null);
+		grant(fixture.tenant(), fixture.team(), fixture.common());
+
+		CutoverValidationResult result = validation.validate(List.of(fixture.subject()));
+		assertThat(result.failures()).contains(new CutoverValidationResult.Failure("DIRECT_OWNER_MEMBERSHIP_MISSING", direct, null));
+	}
+
+	@Test
+	void locallyInactiveButKeycloakEnabledOwnerPassesWhenTheGrantExists() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		jdbc.update("update app_user set status = 'INACTIVE', inactive_at = now() where id = ?", owner);
+		UUID direct = thread("DIRECT", owner, null);
+		member(direct, owner);
+		grant(fixture.tenant(), fixture.team(), fixture.common());
+
+		// 위 실패 테스트의 양성 대조: 권한을 주면 같은 계정이 통과한다.
+		assertThat(validation.validate(List.of(fixture.subject())).ready()).isTrue();
+	}
+
+	@Test
+	void sameHistoryFailsOnlyWhileTheAccountIsEnabledInKeycloak() {
+		Fixture fixture = fixture();
+		UUID owner = user(fixture.subject());
+		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
+		member(collab, owner);
+
+		assertThat(validation.validate(List.of()).ready()).isTrue();
+		assertThat(validation.validate(List.of(fixture.subject())).ready()).isFalse();
+	}
+
 	private static List<String> codes(CutoverValidationResult result) {
 		return result.failures().stream().map(CutoverValidationResult.Failure::code).toList();
 	}
