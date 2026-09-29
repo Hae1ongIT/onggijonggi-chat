@@ -211,16 +211,19 @@ docker compose up -d --build
 
 ## 권한 기능 켜기
 
-팀·직급에 따라 볼 수 있는 워크스페이스가 갈리는 권한 기능(Casbin)은 **기본으로 꺼져 있다.** 켜지 않으면 지금 설명한 그대로 돈다. 팀·직급 배정과 CSV 임포트는 Keycloak `PLATFORM_ADMIN` 역할이 있는 계정만 할 수 있고, `.env`의 `APP_USER` 계정이 이 역할을 가진다.
+팀·직급에 따라 볼 수 있는 워크스페이스가 갈리는 권한 기능(Casbin)은 **기본으로 꺼져 있다.** 켜지 않으면 지금 설명한 그대로 돈다. 꺼져 있어도 모든 대화는 기본 고객사 하나의 공용 공간에 놓인다(`infra/config/workspace-setup.default.yml`을 BFF가 뜰 때 읽는다). 팀·직급 배정과 CSV 임포트는 Keycloak `PLATFORM_ADMIN` 역할이 있는 계정만 할 수 있고, `.env`의 `APP_USER` 계정이 이 역할을 가진다.
 
 > 이 저장소를 이미 한 번 띄웠다면 Keycloak realm은 처음 만들 때만 가져오므로 `PLATFORM_ADMIN` 역할이 없다. Keycloak 관리 콘솔에서 realm 역할 `PLATFORM_ADMIN`을 만들어 `APP_USER`에 붙이거나, 계정·대화가 지워져도 되면 `docker compose down -v` 뒤 다시 띄운다.
 
-**1. `infra/.env`에 두 줄을 넣고 다시 띄운다.**
+**1. `infra/.env`에 세 줄을 넣고 다시 띄운다.**
 
 ```bash
 SPRING_PROFILE=prod,casbin
 COMPOSE_PROFILES=casbin
+WORKSPACE_SETUP_FILE=./config/workspace-setup.yml
 ```
+
+세 번째 줄이 팀·워크스페이스·규칙이 있는 조직 구조 파일을 고른다. 넣지 않으면 기본 배포처럼 고객사 하나(`ogjg`)만 만들어 팀도 워크스페이스도 없다. 두 파일은 같은 고객사(`ogjg`)를 가리키므로 바꿔도 고객사가 둘로 늘지 않는다.
 
 ```bash
 docker compose up -d --build
@@ -239,7 +242,7 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 **3. 화면에서 확인한다.** `APP_USER`로 로그인하면 사이드바에 **권한 관리**가 생긴다(`demo` 계정은 일반 사용자라 메뉴가 없다)(<http://localhost:3010/admin/permissions>). 사람마다 팀·직급을 바꾸면 "누가 무엇을 보나" 표가 실제 판정 결과로 바뀐다.
 
-끄려면 두 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다.
+끄려면 세 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다.
 
 ---
 

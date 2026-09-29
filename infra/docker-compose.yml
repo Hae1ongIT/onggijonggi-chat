@@ -219,8 +219,9 @@ services:
       APP_LLM_GATEWAY_URL:                  http://litellm:4000
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_FRONTEND_URL:-http://localhost:3010}
     volumes:
-      # 조직 구조 설정. SPRING_PROFILE에 casbin이 있을 때만 읽는다(application-casbin.properties).
-      - ./config/workspace-setup.yml:/config/workspace-setup.yml:ro
+      # 조직 구조 설정. 기본은 Tenant 하나만 만드는 파일이다 — 모든 대화가 놓일 곳이 있어야 대화를 만들 수 있다.
+      # 권한 기능(casbin)을 켤 때는 .env에 WORKSPACE_SETUP_FILE=./config/workspace-setup.yml 을 넣어 팀·규칙이 있는 파일로 바꾼다.
+      - ${WORKSPACE_SETUP_FILE:-./config/workspace-setup.default.yml}:/config/workspace-setup.yml:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8090/actuator/health"]
       interval: 20s

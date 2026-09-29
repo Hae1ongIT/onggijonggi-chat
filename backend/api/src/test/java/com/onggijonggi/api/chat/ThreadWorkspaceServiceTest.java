@@ -102,10 +102,21 @@ class ThreadWorkspaceServiceTest {
 	}
 
 	@Test
-	void workspaceIsOptionalWhenEnforcementIsOff() {
+	void withoutAWorkspaceTheRoomGoesIntoTheOnlyActiveTenantsCommonWhenEnforcementIsOff() {
 		rbac.setEnforce(false);
+		when(tenants.findAll()).thenReturn(List.of(tenant));
+		when(nodes.findByTenantIdAndKey(tenant.getId(), "common")).thenReturn(Optional.of(common));
 
-		assertThat(service.collabPlacement(SUBJECT, null).block()).isEmpty();
+		assertThat(service.collabPlacement(SUBJECT, null).block()).contains(common);
+	}
+
+	/** 모든 Thread는 워크스페이스에 놓여야 한다(절체 뒤 NOT NULL) — common을 정할 수 없으면 제약 위반 500 대신 503이다. */
+	@Test
+	void withoutADefaultCommonTheRoomIsRefusedWith503WhenEnforcementIsOff() {
+		rbac.setEnforce(false);
+		when(tenants.findAll()).thenReturn(List.of());
+
+		assertStatus(service.collabPlacement(SUBJECT, null), HttpStatus.SERVICE_UNAVAILABLE);
 	}
 
 	@Test
@@ -159,9 +170,9 @@ class ThreadWorkspaceServiceTest {
 		assertThatThrownBy(() -> service.directPlacementBlocking(other)).isInstanceOf(ResponseStatusException.class);
 	}
 
-	/** 판정이 꺼져 있으면 지금처럼 ACTIVE Tenant가 하나일 때만 그 common이고, 여럿이면 비워 둔다. */
+	/** 판정이 꺼져 있으면 ACTIVE Tenant가 하나일 때만 그 common이고, 여럿이면 놓을 곳이 없어 503이다. */
 	@Test
-	void withEnforcementOffDirectThreadGoesIntoTheOnlyActiveTenantsCommonOrStaysUnplaced() {
+	void withEnforcementOffDirectThreadGoesIntoTheOnlyActiveTenantsCommonOrIsRefused() {
 		rbac.setEnforce(false);
 		UUID userId = UUID.randomUUID();
 		AppUser user = mock(AppUser.class);
@@ -172,7 +183,9 @@ class ThreadWorkspaceServiceTest {
 		assertThat(service.directPlacementBlocking(userId)).contains(common);
 
 		when(tenants.findAll()).thenReturn(List.of(tenant, new Tenant("acme", "다른 고객사", TenantStatus.ACTIVE)));
-		assertThat(service.directPlacementBlocking(userId)).isEmpty();
+		assertThatThrownBy(() -> service.directPlacementBlocking(userId))
+				.isInstanceOfSatisfying(ResponseStatusException.class,
+						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
 		verifyNoInteractions(members);
 	}
 

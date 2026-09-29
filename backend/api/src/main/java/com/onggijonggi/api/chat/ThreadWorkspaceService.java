@@ -84,7 +84,9 @@ public class ThreadWorkspaceService {
 	}
 
 	/**
-	* 협업방을 둘 노드를 고른다. workspaceId가 없으면 판정이 켜져 있을 때 400, 꺼져 있으면 워크스페이스 없이 만든다.
+	* 협업방을 둘 노드를 고른다. workspaceId가 없으면 판정이 켜져 있을 때 400이다. 꺼져 있으면 유일한 ACTIVE Tenant의 common에 둔다
+	* — 모든 Thread는 Tenant·워크스페이스에 놓여야 하므로(절체 뒤 NOT NULL) 워크스페이스 없이 만들지 않는다. common을 정할 수
+	* 없으면(Tenant가 없거나 둘 이상) 제약 위반(500) 대신 503이다.
 	* 방을 만들려면 그 노드의 THREAD_CREATE가 필요하다(#299) — 보기(VIEWER)만으로는 만들 수 없다.
 	* 없는 노드·비활성 노드·ROOT·권한 없는 노드는 모두 403이다 — 어느 노드가 있는지 떠보지 못하게 이유를 나누지 않는다.
 	*/
@@ -92,7 +94,8 @@ public class ThreadWorkspaceService {
 		if (workspaceId == null) {
 			return rbacProperties.isEnforce()
 					? Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST))
-					: Mono.just(Optional.empty());
+					: Mono.fromCallable(() -> Optional.of(defaultCommonOrUnavailable()))
+							.subscribeOn(Schedulers.boundedElastic());
 		}
 		return Mono.fromCallable(() -> nodes.findById(workspaceId).filter(ThreadWorkspaceService::canHoldThreads))
 				.subscribeOn(Schedulers.boundedElastic())
@@ -110,14 +113,15 @@ public class ThreadWorkspaceService {
 	* 그 Tenant·팀이 비활성이거나, common이 없을 때다. 여기서는 Casbin에 묻지 않는다. 모든 ACTIVE 팀은 common VIEWER
 	* 부여를 가지며 DB가 그 부여의 삭제를 거부하므로, 배정·Tenant·팀이 ACTIVE면 common을 볼 수 있다. 뒤이은 구독·발화는
 	* {@link ThreadMembershipService#canEnterWorkspace}가 실제 판정으로 다시 확인한다.
-	* 판정이 꺼져 있으면 지금처럼 ACTIVE Tenant가 하나일 때만 그 common이고, 아니면 비워 둔다.
+	* 판정이 꺼져 있으면 유일한 ACTIVE Tenant의 common이다. 정할 수 없으면(Tenant가 없거나 둘 이상) 503을 던진다 — 대화는
+	* 워크스페이스 없이 만들 수 없다(절체 뒤 NOT NULL).
 	*/
 	public Optional<WorkspaceNode> directPlacementBlocking(UUID userId) {
 		AppUser user = appUsers.findById(userId)
 				.filter(found -> found.getStatus() == AppUserStatus.ACTIVE)
 				.orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN));
 		if (!rbacProperties.isEnforce()) {
-			return onlyActiveTenantCommon();
+			return Optional.of(defaultCommonOrUnavailable());
 		}
 		Optional<WorkspaceNode> common = members.findBySubject(user.getKeycloakSubj()).stream().findFirst()
 				.filter(this::isUsableAssignment)
@@ -137,6 +141,12 @@ public class ThreadWorkspaceService {
 				.filter(unit -> unit.getTenantId().equals(assignment.getTenantId()) && unit.getStatus() == OrgUnitStatus.ACTIVE)
 				.isPresent();
 		return tenantActive && unitActive;
+	}
+
+	/** 판정이 꺼진 배포에서 새 Thread를 둘 곳. 유일한 ACTIVE Tenant의 common이 없으면 서버가 준비되지 않은 것이라 503이다. */
+	private WorkspaceNode defaultCommonOrUnavailable() {
+		return onlyActiveTenantCommon()
+				.orElseThrow(() -> new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE));
 	}
 
 	private Optional<WorkspaceNode> onlyActiveTenantCommon() {
