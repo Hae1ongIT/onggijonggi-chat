@@ -126,6 +126,12 @@ public class RoomSessionRegistry {
 		return evictedAny;
 	}
 
+	/** 한 협업방의 구독을 모두 해제한다. WebSocket 연결은 끊지 않는다 — 다시 구독하면 최신 권한으로 판정한다. */
+	public boolean evictCollabRoom(UUID threadId) {
+		RoomState room = rooms.get(threadId);
+		return room != null && room.evictAllIfPresenceEnabled();
+	}
+
 	/**
 	 * 현재 방 세대에만 프레임을 방송한다.
 	 *
@@ -388,6 +394,12 @@ public class RoomSessionRegistry {
 
 		synchronized boolean evictIfPresenceEnabled(String subject) {
 			return presenceEnabled && evict(subject);
+		}
+
+		synchronized boolean evictAllIfPresenceEnabled() {
+			if (!presenceEnabled) return false;
+			for (ConnectionEntry entry : connections.values()) entry.kicked().tryEmitEmpty();
+			return !connections.isEmpty();
 		}
 
 		Flux<WsFrame> frames() {

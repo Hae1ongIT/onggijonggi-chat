@@ -46,10 +46,11 @@ public class WorkspaceAuthorizer {
 	private final CasbinRuleLoader loader;
 	private final CasbinClient client;
 	private final ObjectMapper objectMapper;
+	private final RbacPolicyRefresh policyRefresh;
 
 	public WorkspaceAuthorizer(RbacProperties rbacProperties, WorkspaceNodeRepository nodes, OrgUnitMemberRepository members,
 			TenantRepository tenants, OrgUnitRepository orgUnits, CasbinRuleLoader loader, CasbinClient client,
-			ObjectMapper objectMapper) {
+			ObjectMapper objectMapper, RbacPolicyRefresh policyRefresh) {
 		this.rbacProperties = rbacProperties;
 		this.nodes = nodes;
 		this.members = members;
@@ -58,6 +59,7 @@ public class WorkspaceAuthorizer {
 		this.loader = loader;
 		this.client = client;
 		this.objectMapper = objectMapper;
+		this.policyRefresh = policyRefresh;
 	}
 
 	public Mono<Boolean> canView(String subject, UUID workspaceNodeId) {
@@ -84,6 +86,7 @@ public class WorkspaceAuthorizer {
 		Optional<WorkspaceNode> node = nodes.findById(workspaceNodeId);
 		if (node.isEmpty() || node.get().getStatus() != WorkspaceNodeStatus.ACTIVE) return false;
 		UUID tenantId = node.get().getTenantId();
+		if (policyRefresh.isBlocked(tenantId)) return false;
 		if (!isActiveTenant(tenantId)) return false;
 		List<OrgUnitMember> assignments = members.findBySubject(subject).stream()
 				.filter(assignment -> tenantId.equals(assignment.getTenantId()) && isActiveOrgUnit(assignment))

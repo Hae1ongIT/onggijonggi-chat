@@ -1,0 +1,300 @@
+package com.onggijonggi.api.chat;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+import com.onggijonggi.api.authz.RbacBootstrapService;
+import com.onggijonggi.api.authz.RbacPolicyRefresh;
+import com.onggijonggi.api.authz.WorkspaceManagementService;
+import com.onggijonggi.api.authz.WorkspaceManagementService.Actor;
+import com.onggijonggi.common.authz.OrgUnitStatus;
+import com.onggijonggi.common.authz.TenantRepository;
+import com.onggijonggi.common.authz.WorkspaceNodeKind;
+import com.onggijonggi.common.authz.WorkspaceNodeRepository;
+import com.onggijonggi.common.authz.WorkspaceRole;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.web.server.ResponseStatusException;
+
+/**
+ * Class Name : WorkspaceManagementPostgresTest.java
+ * Description : Workspace·부여 관리(#260)를 실제 PostgreSQL의 trigger 위에서 검증한다. 판정 스위치는 기본값(꺼짐)이다 —
+ *               관리 쓰기의 직접 MANAGE는 스위치와 무관하게 엄격해야 한다. 확인하는 것:
+ *               - reparent: DB guard가 요구하는 "이동 순간 부여 0건"을 같은 트랜잭션의 삭제·복원으로 만족하고, 부여 구성을
+ *                 그대로 되살리며, 감사는 NODE_REPARENTED 한 건뿐이다. 권한이 없으면 원래 부모·부여·감사가 그대로다.
+ *               - 하위 트리 비활성화: 하위 노드 하나라도 직접 MANAGE가 없거나 협업방이 남으면 전체를 거부하고 아무것도 남기지 않는다.
+ *               - 재활성화는 대상 노드만, 비활성 자식은 그대로다. 마지막 직접 ADMIN은 지울 수 없다. 선언 노드는 못 바꾼다.
+ *               - org-unit: 만들 때 COMMON VIEWER 부여를 함께 만들고, ACTIVE 사용자 배정이 남으면 비활성화를 거부한다.
+ *               Casbin 반영(RbacPolicyRefresh)은 mock으로 두고 커밋된 변경에만 불리는지 본다. 트리는 bootstrap이 만든다.
+ */
+class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
+
+	@Autowired
+	private WorkspaceManagementService service;
+	@Autowired
+	private RbacBootstrapService bootstrap;
+	@Autowired
+	private TenantRepository tenants;
+	@Autowired
+	private WorkspaceNodeRepository nodes;
+	@Autowired
+	private JdbcTemplate jdbc;
+	@MockitoBean
+	private RbacPolicyRefresh refresh;
+
+	private String tag;
+	private String tenantKey;
+	private UUID tenantId;
+	private UUID hr;
+	private UUID ops;
+	private UUID hrTeam;
+	private UUID opsTeam;
+	private Actor hrAdmin;
+	private Actor opsAdmin;
+
+	@BeforeEach
+	void setUp() throws Exception {
+		tag = "m" + UUID.randomUUID().toString().substring(0, 8);
+		tenantKey = "manage-" + tag;
+		Files.writeString(BOOTSTRAP_CONFIG, """
+				reconcile:
+				  enabled: false
+				tenants:
+				  - tnn_key: %s
+				    name: 관리 시험
+				    status: ACTIVE
+				    org_units:
+				      - { key: hr, name: 인사팀, status: ACTIVE }
+				      - { key: ops, name: 운영팀, status: ACTIVE }
+				    nodes:
+				      - { node_key: hr, kind: ORG, parent: root, name: 인사팀, status: ACTIVE }
+				      - { node_key: ops, kind: ORG, parent: root, name: 운영팀, status: ACTIVE }
+				    grants:
+				      - { org_unit: hr, role: VIEWER, node: common }
+				      - { org_unit: ops, role: VIEWER, node: common }
+				      - { org_unit: hr, role: ADMIN, node: hr }
+				      - { org_unit: ops, role: ADMIN, node: ops }
+				""".formatted(tenantKey));
+		bootstrap.runCurrentConfiguration();
+		tenantId = tenants.findByKey(tenantKey).orElseThrow().getId();
+		hr = nodes.findByTenantIdAndKey(tenantId, "hr").orElseThrow().getId();
+		ops = nodes.findByTenantIdAndKey(tenantId, "ops").orElseThrow().getId();
+		hrTeam = team("hr");
+		opsTeam = team("ops");
+		hrAdmin = actor("hr-admin", hrTeam);
+		opsAdmin = actor("ops-admin", opsTeam);
+	}
+
+	// ------------------------------------------------------------------ 생성·이름
+
+	@Test
+	void createsAChildWithTheCreatorsAdminGrantAndAuditsBoth() {
+		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+
+		assertThat(grants(project)).containsExactly(hrTeam + ":ADMIN");
+		// 한 트랜잭션의 두 행은 시각이 같아 순서를 보지 않는다.
+		assertThat(events()).containsExactlyInAnyOrder("NODE_CREATED", "POLICY_ADDED");
+		assertThat(jdbc.queryForObject("select count(*) from authz_adt where tnn_id = ? and act_kind = 'USER' and act_user_id = ?",
+				Integer.class, tenantId, hrAdmin.userId())).isEqualTo(2);
+		verify(refresh).publish(eq(tenantId), eq(Set.of(project)), any());
+	}
+
+	@Test
+	void declaredNodesCannotBeChangedAndOutsidersCannotCreate() {
+		assertStatus(HttpStatus.CONFLICT, () -> service.renameNode(hrAdmin, hr, "새 이름"));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, "x-" + tag, WorkspaceNodeKind.WORK, "남의 방"));
+		assertThat(events()).isEmpty();
+	}
+
+	// ------------------------------------------------------------------ reparent
+
+	@Test
+	void reparentRestoresTheSameGrantsAndAuditsOnlyTheMove() {
+		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		service.addGrant(hrAdmin, leaf, opsTeam, WorkspaceRole.VIEWER);
+		List<String> before = grants(leaf);
+		int auditsBefore = events().size();
+
+		service.reparentLeaf(hrAdmin, leaf, target);
+
+		assertThat(parentOf(leaf)).isEqualTo(target);
+		assertThat(jdbc.queryForObject("select path[array_length(path, 1) - 1] from wrk_node where id = ?", UUID.class, leaf))
+				.isEqualTo(target);
+		assertThat(grants(leaf)).containsExactlyInAnyOrderElementsOf(before).hasSize(2);
+		assertThat(events().subList(auditsBefore, events().size())).containsExactly("NODE_REPARENTED");
+	}
+
+	@Test
+	void reparentWithoutManageOnTheNewParentChangesNothing() {
+		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		List<String> before = grants(leaf);
+		int auditsBefore = events().size();
+
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, leaf, ops));
+
+		assertThat(parentOf(leaf)).isEqualTo(hr);
+		assertThat(grants(leaf)).containsExactlyElementsOf(before);
+		assertThat(events()).hasSize(auditsBefore);
+	}
+
+	// ------------------------------------------------------------------ 하위 트리 비활성화·재활성화
+
+	@Test
+	void subtreeDeactivationIsAllOrNothingOnManage() {
+		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		// 하위 노드의 관리를 운영팀에 넘기고 인사팀 ADMIN을 뺀다 — 인사팀은 이제 하위에 직접 MANAGE가 없다.
+		service.addGrant(hrAdmin, child, opsTeam, WorkspaceRole.ADMIN);
+		service.removeGrant(hrAdmin, grantId(child, hrTeam));
+		int auditsBefore = events().size();
+
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.deactivateSubtree(hrAdmin, parent));
+
+		assertThat(status(parent)).isEqualTo("ACTIVE");
+		assertThat(status(child)).isEqualTo("ACTIVE");
+		assertThat(events()).hasSize(auditsBefore);
+	}
+
+	@Test
+	void aRemainingCollabRoomBlocksDeactivationUntilItIsMoved() {
+		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		UUID room = collabRoom(child);
+
+		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, parent));
+
+		service.moveCollabThread(hrAdmin, room, hr);
+		assertThat(jdbc.queryForObject("select wrk_node_id from thr where id = ?", UUID.class, room)).isEqualTo(hr);
+		assertThat(jdbc.queryForObject("select count(*) from authz_adt where tnn_id = ? and evt_kind = 'THREAD_MOVED'",
+				Integer.class, tenantId)).isEqualTo(2);
+
+		service.deactivateSubtree(hrAdmin, parent);
+		assertThat(status(parent)).isEqualTo("INACTIVE");
+		assertThat(status(child)).isEqualTo("INACTIVE");
+		// 하위부터 끈 두 노드의 감사는 한 요청 ID로 묶인다.
+		assertThat(jdbc.queryForObject("""
+				select count(distinct req_id) from authz_adt where tnn_id = ? and evt_kind = 'NODE_DEACTIVATED'
+				""", Integer.class, tenantId)).isEqualTo(1);
+
+		service.reactivateNode(hrAdmin, parent);
+		assertThat(status(parent)).isEqualTo("ACTIVE");
+		assertThat(status(child)).as("비활성 자식은 자동으로 되살리지 않는다").isEqualTo("INACTIVE");
+	}
+
+	@Test
+	void rootAndCommonAreNotManagedAndRootCannotBeAReparentEnd() {
+		UUID root = nodes.findByTenantIdAndKey(tenantId, "root").orElseThrow().getId();
+		UUID common = nodes.findByTenantIdAndKey(tenantId, "common").orElseThrow().getId();
+		// ROOT·COMMON의 상태는 Tenant lifecycle만 따른다.
+		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, root));
+		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, common));
+		assertStatus(HttpStatus.CONFLICT, () -> service.reactivateNode(hrAdmin, common));
+		// ROOT에는 직접 부여가 없어 ROOT가 어느 쪽 부모든 일반 ADMIN은 옮길 수 없다. hr은 ROOT 바로 아래다.
+		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, leaf, root));
+		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, hr, ops));
+		assertThat(parentOf(leaf)).isEqualTo(hr);
+		assertThat(parentOf(hr)).isEqualTo(root);
+	}
+
+	// ------------------------------------------------------------------ 부여
+
+	@Test
+	void theLastDirectAdminCannotBeRemovedOrDemoted() {
+		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID onlyAdmin = grantId(project, hrTeam);
+
+		assertStatus(HttpStatus.CONFLICT, () -> service.removeGrant(hrAdmin, onlyAdmin));
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeGrantRole(hrAdmin, onlyAdmin, WorkspaceRole.VIEWER));
+
+		assertThat(grants(project)).containsExactly(hrTeam + ":ADMIN");
+	}
+
+	// ------------------------------------------------------------------ org-unit(control plane)
+
+	@Test
+	void anOrgUnitGetsItsCommonViewerGrantAndCannotCloseWithActiveMembers() {
+		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "tmp-" + tag, "임시팀");
+		UUID common = nodes.findByTenantIdAndKey(tenantId, "common").orElseThrow().getId();
+		assertThat(grants(common)).contains(unit + ":VIEWER");
+
+		Actor member = actor("tmp-member", unit);
+		assertStatus(HttpStatus.CONFLICT,
+				() -> service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE));
+
+		jdbc.update("delete from org_unit_mbr where subj = ?", member.subject());
+		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
+		assertThat(jdbc.queryForObject("select status from org_unit where id = ?", String.class, unit)).isEqualTo("INACTIVE");
+	}
+
+	@Test
+	void aRejectedChangeIsNeverPublished() {
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, "x-" + tag, WorkspaceNodeKind.WORK, "남의 방"));
+
+		verify(refresh, never()).publish(any(), any(), any());
+	}
+
+	// ------------------------------------------------------------------ 도우미
+
+	private UUID team(String key) {
+		return jdbc.queryForObject("select id from org_unit where tnn_id = ? and org_unit_key = ?", UUID.class, tenantId, key);
+	}
+
+	/** app_user와 배정(사원)을 만들고 관리 연산의 행위자로 쓴다. */
+	private Actor actor(String name, UUID orgUnit) {
+		String subject = name + "-" + tag;
+		UUID userId = UUID.randomUUID();
+		jdbc.update("insert into app_user (id, keycloak_subj) values (?, ?)", userId, subject);
+		jdbc.update("insert into org_unit_mbr (id, tnn_id, org_unit_id, subj, rank) values (?, ?, ?, ?, 'S')",
+				UUID.randomUUID(), tenantId, orgUnit, subject);
+		return new Actor(userId, subject, List.of("USER"), "req-" + UUID.randomUUID());
+	}
+
+	private UUID collabRoom(UUID workspace) {
+		UUID id = UUID.randomUUID();
+		jdbc.update("insert into thr (id, kind, created_user_id, title, tnn_id, wrk_node_id) values (?, 'COLLAB', ?, 't', ?, ?)",
+				id, hrAdmin.userId(), tenantId, workspace);
+		return id;
+	}
+
+	private List<String> grants(UUID node) {
+		return jdbc.queryForList("select org_unit_id || ':' || role from wrk_grn where wrk_node_id = ? order by org_unit_id, role",
+				String.class, node);
+	}
+
+	private UUID grantId(UUID node, UUID orgUnit) {
+		return jdbc.queryForObject("select id from wrk_grn where wrk_node_id = ? and org_unit_id = ?", UUID.class, node, orgUnit);
+	}
+
+	private UUID parentOf(UUID node) {
+		return jdbc.queryForObject("select prn_id from wrk_node where id = ?", UUID.class, node);
+	}
+
+	private String status(UUID node) {
+		return jdbc.queryForObject("select status from wrk_node where id = ?", String.class, node);
+	}
+
+	/** 사람(USER)이 남긴 감사 이벤트를 시간순으로. bootstrap이 남긴 SYSTEM 행은 뺀다. */
+	private List<String> events() {
+		return jdbc.queryForList("select evt_kind from authz_adt where tnn_id = ? and act_kind = 'USER' order by created_at, id",
+				String.class, tenantId);
+	}
+
+	private static void assertStatus(HttpStatus expected, Runnable call) {
+		assertThatThrownBy(call::run).isInstanceOfSatisfying(ResponseStatusException.class,
+				error -> assertThat(error.getStatusCode()).isEqualTo(expected));
+	}
+}

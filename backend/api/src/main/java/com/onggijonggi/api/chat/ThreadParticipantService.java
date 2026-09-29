@@ -70,12 +70,14 @@ public class ThreadParticipantService {
 	private final ThreadMembershipService threadMembershipService;
 	private final RankedDisplayNames rankedDisplayNames;
 	private final PeopleSearch peopleSearch;
+	private final OwnerTransferAuditService ownerTransferAuditService;
 
 	public ThreadParticipantService(ThrMbrRepository thrMbrRepository, ThrRepository thrRepository,
 			AppUserRepository appUserRepository, RoomSessionRegistry roomSessionRegistry,
 			KeycloakAdminClient keycloakAdminClient, ThrInvRepository thrInvRepository,
 			InvitationAcceptanceService invitationAcceptanceService, ThreadMembershipService threadMembershipService,
-			RankedDisplayNames rankedDisplayNames, PeopleSearch peopleSearch) {
+			RankedDisplayNames rankedDisplayNames, PeopleSearch peopleSearch,
+			OwnerTransferAuditService ownerTransferAuditService) {
 		this.thrMbrRepository = thrMbrRepository;
 		this.thrRepository = thrRepository;
 		this.appUserRepository = appUserRepository;
@@ -86,6 +88,7 @@ public class ThreadParticipantService {
 		this.threadMembershipService = threadMembershipService;
 		this.rankedDisplayNames = rankedDisplayNames;
 		this.peopleSearch = peopleSearch;
+		this.ownerTransferAuditService = ownerTransferAuditService;
 	}
 
 	/** 참가자면 누구나 볼 수 있다 — 자기 방 구성원을 읽는 것뿐이라 OWNER로 좁히지 않는다. */
@@ -313,9 +316,7 @@ public class ThreadParticipantService {
 					thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, targetUserId,
 									ThrMbrRole.MEMBER, ThrMbrStatus.ACTIVE)
 							.orElseThrow(ThreadParticipantService::notParticipant);
-					if (thrMbrRepository.transferOwnership(threadId, actorUserId, targetUserId) != 2) {
-						throw stateConflict();
-					}
+					ownerTransferAuditService.transfer(threadId, actorUserId, targetUserId);
 					return null;
 				})
 				.subscribeOn(Schedulers.boundedElastic())
