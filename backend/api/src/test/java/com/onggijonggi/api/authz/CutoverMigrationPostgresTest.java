@@ -53,12 +53,25 @@ class CutoverMigrationPostgresTest {
 		UUID direct = UUID.randomUUID();
 		UUID collab = UUID.randomUUID();
 		UUID message = UUID.randomUUID();
+		UUID member = UUID.randomUUID();
+		UUID human = UUID.randomUUID();
+		UUID agent = UUID.randomUUID();
+		UUID threadKey = UUID.randomUUID();
+		UUID messageKey = UUID.randomUUID();
+		UUID invitation = UUID.randomUUID();
 		try (Connection connection = connect()) {
 			seedTenant(connection, tenant, root, common, team);
 			execute(connection, "insert into app_user (id, keycloak_subj) values (?, 'cutover-owner')", owner);
 			execute(connection, "insert into thr (id, kind, drc_own_user_id, created_user_id, title) values (?, 'DIRECT', ?, ?, 'direct')", direct, owner, owner);
 			execute(connection, "insert into thr (id, kind, created_user_id, title, tnn_id, wrk_node_id) values (?, 'COLLAB', ?, 'collab', ?, ?)", collab, owner, tenant, team);
 			execute(connection, "insert into msg (id, thr_id, seq, ath_kind, status, content, completed_at) values (?, ?, 0, 'SYSTEM', 'COMPLETE', 'original', now())", message, direct);
+			execute(connection, "insert into thr_mbr (id, thr_id, user_id, role, created_by_user_id) values (?, ?, ?, 'OWNER', ?)", member, direct, owner, owner);
+			execute(connection, "insert into msg (id, thr_id, seq, ath_kind, thr_mbr_id, status, content, completed_at) values (?, ?, 1, 'HUMAN', ?, 'COMPLETE', 'question', now())", human, direct, member);
+			execute(connection, "insert into msg (id, thr_id, seq, ath_kind, status, content, completed_at) values (?, ?, 2, 'AGENT', 'COMPLETE', 'answer', now())", agent, direct);
+			execute(connection, "insert into thr_idm_key (id, user_id, idm_key, title, thr_id) values (?, ?, 'thread-key', 'collab', ?)", threadKey, owner, collab);
+			execute(connection, "insert into msg_idm_key (id, user_id, idm_key, content, thr_id, hmn_msg_id, hmn_seq, agn_msg_id, agn_seq) values (?, ?, 'message-key', 'question', ?, ?, 1, ?, 2)", messageKey, owner, direct, human, agent);
+			execute(connection, "insert into thr_inv (id, thr_id, subj, created_by_user_id) values (?, ?, 'invitee', ?)", invitation, collab, owner);
+			execute(connection, "insert into thr_risk_crs (thr_id, last_seq) values (?, 0)", collab);
 		}
 		migrateAll();
 		try (Connection connection = connect()) {
@@ -66,13 +79,23 @@ class CutoverMigrationPostgresTest {
 			assertThat(uuid(connection, "select wrk_node_id from thr where id = ?", direct)).isEqualTo(common);
 			assertThat(uuid(connection, "select wrk_node_id from thr where id = ?", collab)).isEqualTo(team);
 			assertThat(uuid(connection, "select tnn_id from msg where id = ?", message)).isEqualTo(tenant);
+			assertThat(uuid(connection, "select tnn_id from thr_mbr where id = ?", member)).isEqualTo(tenant);
+			assertThat(uuid(connection, "select tnn_id from thr_idm_key where id = ?", threadKey)).isEqualTo(tenant);
+			assertThat(uuid(connection, "select tnn_id from msg_idm_key where id = ?", messageKey)).isEqualTo(tenant);
+			assertThat(uuid(connection, "select tnn_id from thr_inv where id = ?", invitation)).isEqualTo(tenant);
+			assertThat(uuid(connection, "select tnn_id from thr_risk_crs where thr_id = ?", collab)).isEqualTo(tenant);
 			assertThat(count(connection, "select count(*) from msg where id = ? and content = 'original'", message)).isEqualTo(1);
 			assertThatThrownBy(() -> execute(connection, "update msg set content = 'changed' where id = ?", message))
 					.isInstanceOf(SQLException.class);
 			assertThat(count(connection, "select count(*) from ctv")).isZero();
-			assertThatThrownBy(() -> execute(connection,
-					"insert into msg (id, thr_id, tnn_id, seq, ath_kind, status, content) values (?, ?, ?, 1, 'SYSTEM', 'COMPLETE', 'wrong tenant')",
-					UUID.randomUUID(), direct, UUID.randomUUID())).isInstanceOf(SQLException.class);
+			UUID pending = UUID.randomUUID();
+			execute(connection, "insert into msg (id, thr_id, seq, ath_kind, status) values (?, ?, 3, 'AGENT', 'PENDING')", pending, direct);
+			assertThatThrownBy(() -> execute(connection, "update msg set tnn_id = ? where id = ?", UUID.randomUUID(), pending))
+					.isInstanceOf(SQLException.class)
+					.satisfies(error -> assertThat(((SQLException) error).getSQLState()).isEqualTo("23503"))
+					.hasMessageContaining("fk_msg_tnn_thr");
+			assertThat(count(connection, "select count(*) from pg_trigger where tgname in ('trg_thr_tnn_immutable', 'trg_ctv_no_update_delete', 'trg_ctv_no_truncate') and tgenabled = 'A'"))
+					.isEqualTo(3);
 			execute(connection, "insert into ctv (id, tnn_id) values (1, ?)", tenant);
 			assertThatThrownBy(() -> execute(connection, "update ctv set completed_at = now() where id = 1"))
 					.isInstanceOf(SQLException.class);

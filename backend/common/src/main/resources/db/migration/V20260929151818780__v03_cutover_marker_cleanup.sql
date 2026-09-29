@@ -21,6 +21,8 @@ create trigger trg_ctv_no_update_delete before update or delete on ctv
 for each row execute function ctv_immutable_guard();
 create trigger trg_ctv_no_truncate before truncate on ctv
 for each statement execute function ctv_immutable_guard();
+alter table ctv enable always trigger trg_ctv_no_update_delete;
+alter table ctv enable always trigger trg_ctv_no_truncate;
 
 drop table stg_user_cur_tnn;
 drop table stg_thr_tnn;

@@ -15,6 +15,7 @@ alter table thr add constraint fk_thr_workspace_tnn
     foreign key (tnn_id, wrk_node_id) references wrk_node (tnn_id, id) on delete restrict;
 create trigger trg_thr_tnn_immutable before update of tnn_id on thr
     for each row execute function immutable_column_guard('tnn_id');
+alter table thr enable always trigger trg_thr_tnn_immutable;
 
 alter table thr_mbr add constraint uq_thr_mbr_tnn_thr_id unique (tnn_id, thr_id, id);
 alter table msg add constraint uq_msg_tnn_thr_id unique (tnn_id, thr_id, id);
