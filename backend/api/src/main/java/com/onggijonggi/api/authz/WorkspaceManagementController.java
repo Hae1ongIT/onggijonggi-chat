@@ -42,7 +42,8 @@ public class WorkspaceManagementController {
 		this.service = service;
 	}
 
-	public record CreateNode(UUID parentId, String key, WorkspaceNodeKind kind, String name) { }
+	/** key는 받지 않는다 — 서버가 만든다(볼 수 없는 노드의 key를 떠보지 못하게). */
+	public record CreateNode(UUID parentId, WorkspaceNodeKind kind, String name) { }
 	public record Name(String name) { }
 	public record Reparent(UUID parentId) { }
 	public record CreateGrant(UUID orgUnitId, WorkspaceRole role) { }
@@ -53,7 +54,7 @@ public class WorkspaceManagementController {
 	@PostMapping("/api/rbac/workspaces")
 	public Mono<ResponseEntity<Map<String, UUID>>> createNode(@RequestBody CreateNode request) {
 		return withActor(actor -> ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id",
-				service.createNode(actor, request.parentId(), request.key(), request.kind(), request.name()))));
+				service.createNode(actor, request.parentId(), request.kind(), request.name()))));
 	}
 
 	@PatchMapping("/api/rbac/workspaces/{nodeId}/name")

@@ -33,6 +33,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
@@ -101,9 +102,12 @@ public class WorkspaceManagementService {
 		this.transactions = new TransactionTemplate(transactionManager);
 	}
 
-	public UUID createNode(Actor actor, UUID parentId, String key, WorkspaceNodeKind kind, String name) {
-		validKey(key);
-		if (key.equals("root") || key.equals("common")) throw badRequest();
+	/**
+	 * key는 요청으로 받지 않고 서버가 만든다. key는 Tenant 전체에서 유일해 요청자가 정하게 하면, 만들어 보고 409가 나는지로
+	 * 볼 수 없는 노드의 key(사람이 지은 이름이라 내용이 드러난다)를 떠볼 수 있다. 사람이 읽는 key가 필요한 것은 배포 설정이
+	 * 선언하는 노드뿐이고, API로 만든 노드는 id로 식별한다.
+	 */
+	public UUID createNode(Actor actor, UUID parentId, WorkspaceNodeKind kind, String name) {
 		validName(name);
 		if (kind != WorkspaceNodeKind.ORG && kind != WorkspaceNodeKind.WORK) throw badRequest();
 		UUID tenantId = preauthorized(actor, required(parentId), true);
@@ -112,10 +116,9 @@ public class WorkspaceManagementService {
 			WorkspaceNode parent = node(parentId, tenantId);
 			manage.require(actor.subject(), parent);
 			if (parent.getKind() == WorkspaceNodeKind.COMMON || parent.getPath().length + 1 > MAX_DEPTH) throw conflict();
-			if (nodes.findByTenantIdAndKey(tenantId, key).isPresent()) throw conflict();
 			uniqueSiblingName(parentId, name, null);
-			WorkspaceNode created = nodes.saveAndFlush(WorkspaceNode.child(tenantId, parentId, parent.getPath(), key,
-					kind, name, WorkspaceNodeStatus.ACTIVE));
+			WorkspaceNode created = nodes.saveAndFlush(WorkspaceNode.child(tenantId, parentId, parent.getPath(),
+					generatedKey(tenantId), kind, name, WorkspaceNodeStatus.ACTIVE));
 			UUID actorOrgUnit = members.findBySubject(actor.subject()).stream()
 					.filter(member -> tenantId.equals(member.getTenantId()))
 					.map(member -> member.getOrgUnitId())
@@ -389,6 +392,12 @@ public class WorkspaceManagementService {
 			if (targetStatus == OrgUnitStatus.INACTIVE && members.findByOrgUnitId(unit.getId()).stream()
 					.anyMatch(member -> users.findByKeycloakSubj(member.getSubject())
 									.map(user -> user.getStatus() == AppUserStatus.ACTIVE).orElse(true))) throw conflict();
+			// 이 팀이 어떤 노드의 마지막 ACTIVE ADMIN이면 비활성화할 수 없다 — 그 노드는 아무도 관리하지 못하게 되고, 노드를
+			// 관리하는 API는 일반 ADMIN에게만 있어 되살릴 길이 없다. 다른 팀에 ADMIN을 먼저 주고 비활성화한다.
+			if (targetStatus == OrgUnitStatus.INACTIVE && grants.findByOrgUnitId(unit.getId()).stream()
+					.filter(grant -> grant.getRole() == WorkspaceRole.ADMIN)
+					.anyMatch(grant -> !activeAdminRemains(grant.getWorkspaceNodeId(),
+							other -> other.getOrgUnitId().equals(unit.getId())))) throw conflict();
 			Map<String, Object> before = orgSnapshot(unit);
 			AuthorizationAuditEventKind event;
 			if (targetStatus != null) {
@@ -474,10 +483,22 @@ public class WorkspaceManagementService {
 	 * 남은 관리자로 세지 않는다 — 세면 실제로는 아무도 관리하지 못하는 노드가 남는다.
 	 */
 	private void requireRemainingAdmin(UUID nodeId, UUID removedId) {
-		if (grants.findByWorkspaceNodeId(nodeId).stream()
-				.noneMatch(grant -> !grant.getId().equals(removedId) && grant.getRole() == WorkspaceRole.ADMIN
+		if (!activeAdminRemains(nodeId, grant -> grant.getId().equals(removedId))) throw conflict();
+	}
+	/** excluded에 해당하는 부여를 빼고도 그 노드에 ACTIVE org-unit의 직접 ADMIN이 남나. */
+	private boolean activeAdminRemains(UUID nodeId, Predicate<WorkspaceGrant> excluded) {
+		return grants.findByWorkspaceNodeId(nodeId).stream()
+				.anyMatch(grant -> !excluded.test(grant) && grant.getRole() == WorkspaceRole.ADMIN
 						&& orgUnits.findById(grant.getOrgUnitId()).filter(unit -> unit.getStatus() == OrgUnitStatus.ACTIVE)
-								.isPresent())) throw conflict();
+								.isPresent());
+	}
+	/** API로 만드는 노드의 key. node_key 형식(소문자로 시작, 64자 이하)을 따르고 Tenant 안에서 겹치지 않게 다시 뽑는다. */
+	private String generatedKey(UUID tenantId) {
+		for (int attempt = 0; attempt < 5; attempt++) {
+			String key = "n-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+			if (nodes.findByTenantIdAndKey(tenantId, key).isEmpty()) return key;
+		}
+		throw conflict();
 	}
 	private boolean requiredCommonGrant(WorkspaceNode node, WorkspaceGrant grant) {
 		return node.getKind() == WorkspaceNodeKind.COMMON && grant.getRole() == WorkspaceRole.VIEWER;

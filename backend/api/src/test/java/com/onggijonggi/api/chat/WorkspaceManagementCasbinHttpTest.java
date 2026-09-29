@@ -114,7 +114,7 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 	@Test
 	void createsANodeAndTheNewGrantIsEnforcedRightAfterCommit() {
 		UUID project = created(post(hrAdmin, List.of("USER"), "/api/rbac/workspaces",
-				Map.of("parentId", hr.toString(), "key", "proj-" + tag, "kind", "WORK", "name", "프로젝트")));
+				Map.of("parentId", hr.toString(), "kind", "WORK", "name", "프로젝트")));
 
 		// 커밋 뒤 전체 적재로 새 노드의 ADMIN 부여가 곧바로 판정에 들어온다.
 		assertThat(authorizer.canView(hrAdmin, project).block()).isTrue();
@@ -135,7 +135,7 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 	@Test
 	void auditRowsCarryTheResponseTraceIdAndTheBootstrapKeyShape() {
 		String traceId = post(hrAdmin, List.of("USER"), "/api/rbac/workspaces",
-				Map.of("parentId", hr.toString(), "key", "trace-" + tag, "kind", "WORK", "name", "추적"))
+				Map.of("parentId", hr.toString(), "kind", "WORK", "name", "추적"))
 				.expectStatus().isCreated().returnResult(String.class).getResponseHeaders().getFirst("X-Trace-Id");
 
 		// 한 요청의 두 행(NODE_CREATED·POLICY_ADDED)은 응답의 X-Trace-Id로 찾을 수 있고 같은 req_id로 묶인다.
@@ -147,7 +147,7 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 		// 대상 참조는 bootstrap의 SYSTEM 행과 같은 키를 쓴다 — 감사 조회가 행위자와 무관하게 같은 키로 읽는다.
 		assertThat(jdbc.queryForObject("""
 				select trg_ref::text from authz_adt where trc_id = ? and evt_kind = 'NODE_CREATED'""", String.class, traceId))
-				.contains("\"wrk_node_id\"", "\"node_key\": \"trace-" + tag + "\"");
+				.contains("\"wrk_node_id\"", "\"node_key\": \"n-");
 		assertThat(jdbc.queryForObject("""
 				select trg_ref::text from authz_adt where trc_id = ? and evt_kind = 'POLICY_ADDED'""", String.class, traceId))
 				.contains("\"wrk_grn_id\"", "\"org_unit_key\": \"hr\"", "\"role\": \"ADMIN\"", "\"wrk_node_id\"");
@@ -159,7 +159,7 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 	@Test
 	void writesWithoutDirectManageAndControlPlaneCallsByUsersAreForbidden() {
 		post(opsMember, List.of("USER"), "/api/rbac/workspaces",
-				Map.of("parentId", hr.toString(), "key", "x-" + tag, "kind", "WORK", "name", "남의 방"))
+				Map.of("parentId", hr.toString(), "kind", "WORK", "name", "남의 방"))
 				.expectStatus().isEqualTo(HttpStatus.FORBIDDEN);
 		post(hrAdmin, List.of("USER"), "/api/platform/rbac/tenants/" + tenantKey + "/org-units",
 				Map.of("key", "tmp-" + tag, "name", "임시팀"))

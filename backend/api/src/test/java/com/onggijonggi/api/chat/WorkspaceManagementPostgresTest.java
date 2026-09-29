@@ -102,7 +102,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void createsAChildWithTheCreatorsAdminGrantAndAuditsBoth() {
-		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "프로젝트");
 
 		assertThat(grants(project)).containsExactly(hrTeam + ":ADMIN");
 		// 한 트랜잭션의 두 행은 시각이 같아 순서를 보지 않는다.
@@ -115,7 +115,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	@Test
 	void declaredNodesCannotBeChangedAndOutsidersCannotCreate() {
 		assertStatus(HttpStatus.CONFLICT, () -> service.renameNode(hrAdmin, hr, "새 이름"));
-		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, "x-" + tag, WorkspaceNodeKind.WORK, "남의 방"));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, WorkspaceNodeKind.WORK, "남의 방"));
 		assertThat(events()).isEmpty();
 	}
 
@@ -123,8 +123,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void reparentRestoresTheSameGrantsAndAuditsOnlyTheMove() {
-		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
-		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "새 부모");
 		service.addGrant(hrAdmin, leaf, opsTeam, WorkspaceRole.VIEWER);
 		List<String> before = grants(leaf);
 		List<String> createdBefore = grantCreatedAt(leaf);
@@ -144,7 +144,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void reparentWithoutManageOnTheNewParentChangesNothing() {
-		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
 		List<String> before = grants(leaf);
 		int auditsBefore = events().size();
 
@@ -159,8 +159,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void subtreeDeactivationIsAllOrNothingOnManage() {
-		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
-		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		UUID parent = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, WorkspaceNodeKind.WORK, "하위");
 		// 하위 노드의 관리를 운영팀에 넘기고 인사팀 ADMIN을 뺀다 — 인사팀은 이제 하위에 직접 MANAGE가 없다.
 		service.addGrant(hrAdmin, child, opsTeam, WorkspaceRole.ADMIN);
 		service.removeGrant(hrAdmin, grantId(child, hrTeam));
@@ -175,8 +175,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void aRemainingCollabRoomBlocksDeactivationUntilItIsMoved() {
-		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
-		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		UUID parent = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, WorkspaceNodeKind.WORK, "하위");
 		UUID room = collabRoom(child);
 
 		assertStatus(HttpStatus.CONFLICT, () -> service.deactivateSubtree(hrAdmin, parent));
@@ -210,7 +210,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		assertThat(status(root)).isEqualTo("ACTIVE");
 		assertThat(status(common)).isEqualTo("ACTIVE");
 		// ROOT에는 직접 부여가 없어 ROOT가 어느 쪽 부모든 일반 ADMIN은 옮길 수 없다(권한부터 보므로 403). hr은 ROOT 바로 아래다.
-		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
 		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, leaf, root));
 		assertStatus(HttpStatus.FORBIDDEN, () -> service.reparentLeaf(hrAdmin, hr, ops));
 		assertThat(parentOf(leaf)).isEqualTo(hr);
@@ -221,7 +221,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void theLastDirectAdminCannotBeRemovedOrDemoted() {
-		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "프로젝트");
 		UUID onlyAdmin = grantId(project, hrTeam);
 
 		assertStatus(HttpStatus.CONFLICT, () -> service.removeGrant(hrAdmin, onlyAdmin));
@@ -241,11 +241,11 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		// ROOT에는 부여할 권한 자체가 없고, 필수 입력이 비면 400이다.
 		assertStatus(HttpStatus.FORBIDDEN, () -> service.addGrant(hrAdmin, root, opsTeam, WorkspaceRole.VIEWER));
 		assertStatus(HttpStatus.BAD_REQUEST, () -> service.addGrant(hrAdmin, hr, null, WorkspaceRole.VIEWER));
-		assertStatus(HttpStatus.BAD_REQUEST, () -> service.createNode(hrAdmin, null, "n-" + tag, WorkspaceNodeKind.WORK, "이름"));
+		assertStatus(HttpStatus.BAD_REQUEST, () -> service.createNode(hrAdmin, null, WorkspaceNodeKind.WORK, "이름"));
 		// 비활성 org-unit에는 부여할 수 없다.
 		UUID closedUnit = service.createOrgUnit(hrAdmin, tenantKey, "closed-" + tag, "닫힌 팀");
 		service.changeOrgUnit(hrAdmin, tenantKey, closedUnit, null, OrgUnitStatus.INACTIVE);
-		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "프로젝트");
 		assertStatus(HttpStatus.CONFLICT, () -> service.addGrant(hrAdmin, project, closedUnit, WorkspaceRole.VIEWER));
 		// 같은 key의 org-unit은 다시 만들 수 없다.
 		assertStatus(HttpStatus.CONFLICT, () -> service.createOrgUnit(hrAdmin, tenantKey, "closed-" + tag, "또 닫힌 팀"));
@@ -257,10 +257,10 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void subtreeDeactivationPublishesExactlyTheDeactivatedNodes() {
-		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
-		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
-		UUID grandchild = service.createNode(hrAdmin, child, "g-" + tag, WorkspaceNodeKind.WORK, "손자");
-		UUID sibling = service.createNode(hrAdmin, hr, "s-" + tag, WorkspaceNodeKind.WORK, "형제");
+		UUID parent = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, WorkspaceNodeKind.WORK, "하위");
+		UUID grandchild = service.createNode(hrAdmin, child, WorkspaceNodeKind.WORK, "손자");
+		UUID sibling = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "형제");
 		clearInvocations(refresh);
 
 		service.deactivateSubtree(hrAdmin, parent);
@@ -272,8 +272,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void reparentNeedsManageOnTheLeafItself() {
-		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
-		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "새 부모");
 		// leaf의 관리를 운영팀에 넘긴다 — 인사팀은 두 부모에는 MANAGE가 있지만 leaf에는 없다.
 		service.addGrant(hrAdmin, leaf, opsTeam, WorkspaceRole.ADMIN);
 		service.removeGrant(hrAdmin, grantId(leaf, hrTeam));
@@ -289,8 +289,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void aNodeComesBackOnlyUnderAnActiveParent() {
-		UUID parent = service.createNode(hrAdmin, hr, "p-" + tag, WorkspaceNodeKind.WORK, "상위");
-		UUID child = service.createNode(hrAdmin, parent, "c-" + tag, WorkspaceNodeKind.WORK, "하위");
+		UUID parent = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "상위");
+		UUID child = service.createNode(hrAdmin, parent, WorkspaceNodeKind.WORK, "하위");
 		service.deactivateSubtree(hrAdmin, parent);
 
 		assertStatus(HttpStatus.CONFLICT, () -> service.reactivateNode(hrAdmin, child));
@@ -304,9 +304,9 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	@Test
 	void outsidersGetTheSameForbiddenWhateverTheNodesState() {
 		UUID root = nodes.findByTenantIdAndKey(tenantId, "root").orElseThrow().getId();
-		UUID closed = service.createNode(hrAdmin, hr, "closed-" + tag, WorkspaceNodeKind.WORK, "닫힌 방");
+		UUID closed = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "닫힌 방");
 		service.deactivateSubtree(hrAdmin, closed);
-		UUID withRoom = service.createNode(hrAdmin, hr, "room-" + tag, WorkspaceNodeKind.WORK, "방이 남은 곳");
+		UUID withRoom = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "방이 남은 곳");
 		collabRoom(withRoom);
 
 		// 권한 없는 사람은 노드가 비활성이든, 방이 남았든, ROOT든 같은 403만 받는다 — 상태를 알 수 없다.
@@ -320,8 +320,38 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 	}
 
 	@Test
+	void anOrgUnitThatIsTheLastAdminOfANodeCannotBeDeactivated() {
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "owner-" + tag, "새 관리팀");
+		service.addGrant(hrAdmin, project, unit, WorkspaceRole.ADMIN);
+		service.removeGrant(hrAdmin, grantId(project, hrTeam));
+
+		// 이 팀이 프로젝트의 유일한 ACTIVE ADMIN이다 — 비활성화하면 아무도 관리하지 못한다.
+		assertStatus(HttpStatus.CONFLICT, () -> service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE));
+		assertThat(jdbc.queryForObject("select status from org_unit where id = ?", String.class, unit)).isEqualTo("ACTIVE");
+
+		// 다른 ACTIVE 팀에 ADMIN을 준 뒤에는 비활성화할 수 있다. 그 부여는 새 관리팀 ADMIN이 준다.
+		Actor newOwner = actor("new-owner", unit);
+		service.addGrant(newOwner, project, opsTeam, WorkspaceRole.ADMIN);
+		jdbc.update("delete from org_unit_mbr where subj = ?", newOwner.subject());
+		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
+		assertThat(jdbc.queryForObject("select status from org_unit where id = ?", String.class, unit)).isEqualTo("INACTIVE");
+	}
+
+	@Test
+	void nodeKeysAreGeneratedByTheServer() {
+		UUID first = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "첫째");
+		UUID second = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "둘째");
+
+		String firstKey = jdbc.queryForObject("select node_key from wrk_node where id = ?", String.class, first);
+		String secondKey = jdbc.queryForObject("select node_key from wrk_node where id = ?", String.class, second);
+		assertThat(firstKey).startsWith("n-").matches("[a-z][a-z0-9-]{0,62}");
+		assertThat(secondKey).startsWith("n-").isNotEqualTo(firstKey);
+	}
+
+	@Test
 	void anAdminGrantOfAnInactiveTeamDoesNotCountAsTheRemainingAdmin() {
-		UUID project = service.createNode(hrAdmin, hr, "proj-" + tag, WorkspaceNodeKind.WORK, "프로젝트");
+		UUID project = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "프로젝트");
 		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "old-" + tag, "곧 닫을 팀");
 		service.addGrant(hrAdmin, project, unit, WorkspaceRole.ADMIN);
 		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
@@ -336,11 +366,11 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 		// 아래는 모두 DB 제약(깊이 11, 부여 유일, 자기 순환, 이름 NOT NULL)이 거부해 500이 되던 경우다 — 먼저 409·400으로 막는다.
 		UUID deepest = hr;
 		for (int depth = 3; depth <= 11; depth++) {
-			deepest = service.createNode(hrAdmin, deepest, "d" + depth + "-" + tag, WorkspaceNodeKind.WORK, "깊이 " + depth);
+			deepest = service.createNode(hrAdmin, deepest, WorkspaceNodeKind.WORK, "깊이 " + depth);
 		}
 		UUID leafAtLimit = deepest;
-		assertStatus(HttpStatus.CONFLICT, () -> service.createNode(hrAdmin, leafAtLimit, "too-deep-" + tag, WorkspaceNodeKind.WORK, "너무 깊음"));
-		UUID mover = service.createNode(hrAdmin, hr, "mover-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
+		assertStatus(HttpStatus.CONFLICT, () -> service.createNode(hrAdmin, leafAtLimit, WorkspaceNodeKind.WORK, "너무 깊음"));
+		UUID mover = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
 		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, mover, leafAtLimit));
 		assertStatus(HttpStatus.CONFLICT, () -> service.reparentLeaf(hrAdmin, mover, mover));
 
@@ -356,8 +386,8 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void reparentIsRefusedWhenAGrantCannotBeRestored() {
-		UUID leaf = service.createNode(hrAdmin, hr, "leaf-" + tag, WorkspaceNodeKind.WORK, "옮길 방");
-		UUID target = service.createNode(hrAdmin, hr, "target-" + tag, WorkspaceNodeKind.WORK, "새 부모");
+		UUID leaf = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "옮길 방");
+		UUID target = service.createNode(hrAdmin, hr, WorkspaceNodeKind.WORK, "새 부모");
 		UUID unit = service.createOrgUnit(hrAdmin, tenantKey, "gone-" + tag, "곧 닫을 팀");
 		service.addGrant(hrAdmin, leaf, unit, WorkspaceRole.VIEWER);
 		service.changeOrgUnit(hrAdmin, tenantKey, unit, null, OrgUnitStatus.INACTIVE);
@@ -404,7 +434,7 @@ class WorkspaceManagementPostgresTest extends PostgresSpringTestBase {
 
 	@Test
 	void aRejectedChangeIsNeverPublished() {
-		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, "x-" + tag, WorkspaceNodeKind.WORK, "남의 방"));
+		assertStatus(HttpStatus.FORBIDDEN, () -> service.createNode(opsAdmin, hr, WorkspaceNodeKind.WORK, "남의 방"));
 
 		verify(refresh, never()).publish(any(), any(), any());
 	}
