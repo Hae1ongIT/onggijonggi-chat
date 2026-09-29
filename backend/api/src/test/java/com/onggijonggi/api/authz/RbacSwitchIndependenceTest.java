@@ -58,7 +58,7 @@ class RbacSwitchIndependenceTest {
 		// Keycloak에서는 누가 로그인할 수 있는지만 쓴다. tenant 속성은 넘기지 않는다 — 현재 Tenant는 DB 배정이 정한다(#299).
 		KeycloakAdminClient keycloak = Mockito.mock(KeycloakAdminClient.class);
 		CutoverValidationService validation = Mockito.mock(CutoverValidationService.class);
-		CutoverValidationResult result = new CutoverValidationResult(List.of(), List.of(), List.of(), List.of());
+		CutoverValidationResult result = new CutoverValidationResult(null, List.of());
 		when(keycloak.listEnabledUserSubjects()).thenReturn(Mono.just(List.of("subject")));
 		when(validation.validate(List.of("subject"))).thenReturn(result);
 

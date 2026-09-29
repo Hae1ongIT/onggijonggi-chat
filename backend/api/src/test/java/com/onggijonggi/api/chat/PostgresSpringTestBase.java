@@ -51,6 +51,9 @@ abstract class PostgresSpringTestBase {
 		registry.add("spring.datasource.password", () -> postgres().getPassword());
 		registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
 		registry.add("spring.flyway.enabled", () -> "true");
+		// 기존 관리·채팅 테스트는 nullable Tenant를 쓰는 절체 전 운영 상태의 회귀다.
+		// #262 이후 스키마 업그레이드는 별도 migration fixture에서 검사한다.
+		registry.add("spring.flyway.target", () -> "20260928080757930");
 		registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
 		registry.add("app.rbac.workspace-setup-path", BOOTSTRAP_CONFIG::toString);
 	}

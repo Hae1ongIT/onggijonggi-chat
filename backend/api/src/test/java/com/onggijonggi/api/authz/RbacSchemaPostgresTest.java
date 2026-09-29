@@ -45,7 +45,7 @@ class RbacSchemaPostgresTest {
 		Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
 				.locations("classpath:db/migration").cleanDisabled(false).load().clean();
 		Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
-				.locations("classpath:db/migration").load().migrate();
+				.locations("classpath:db/migration").target("20260928080757930").load().migrate();
 	}
 
 	// ------------------------------------------------------------------ Workspace 트리
