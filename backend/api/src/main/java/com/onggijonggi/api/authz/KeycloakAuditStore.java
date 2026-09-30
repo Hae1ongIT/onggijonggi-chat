@@ -53,7 +53,7 @@ public class KeycloakAuditStore {
 	private static final int PATH = 1024;
 
 	static KeycloakAuditRow fitted(KeycloakAuditRow row) {
-		Map<String, Object> reference = new java.util.LinkedHashMap<>(row.reference());
+		Map<String, Object> reference = scalars(row.reference(), 0);
 		String role = fit(row.role(), TEXT, "role", reference);
 		String targetPath = fit(row.targetPath(), PATH, "targetPath", reference);
 		String targetSubject = fit(row.targetSubject(), TEXT, "targetSubject", reference);
@@ -61,6 +61,29 @@ public class KeycloakAuditStore {
 		String eventId = fit(row.keycloakEventId(), TEXT, "keycloakEventId", reference);
 		return new KeycloakAuditRow(eventId, row.kind(), row.occurredAt(), actorSubject, row.actor(), targetSubject, role,
 				targetPath, reference);
+	}
+
+	/**
+	 * reference에는 문자열(255자까지)·불리언·숫자와, 그것들을 담은 한두 단계의 목록·맵만 남긴다. 그 밖의 값은 문자열로 바꾼다 —
+	 * 조작된 상세가 깊거나 큰 JSON을 넣어 조회가 파싱에 실패하면 그 행이 든 페이지 전체가 막힌다(지울 수도 없다).
+	 */
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> scalars(Map<String, Object> source, int depth) {
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		source.forEach((key, value) -> result.put(key, scalar(value, depth)));
+		return result;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Object scalar(Object value, int depth) {
+		if (value == null || value instanceof Boolean || value instanceof Number) return value;
+		if (value instanceof String text) return text.length() > TEXT ? text.substring(0, TEXT) : text;
+		if (depth < 2 && value instanceof Map<?, ?> map) return scalars((Map<String, Object>) map, depth + 1);
+		if (depth < 2 && value instanceof List<?> list) {
+			return list.stream().limit(100).map(item -> scalar(item, depth + 1)).toList();
+		}
+		String text = String.valueOf(value);
+		return text.length() > TEXT ? text.substring(0, TEXT) : text;
 	}
 
 	private static String fit(String value, int limit, String name, Map<String, Object> reference) {

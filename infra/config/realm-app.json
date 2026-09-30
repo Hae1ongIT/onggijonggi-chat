@@ -40,7 +40,7 @@
       "enabled": true,
       "serviceAccountClientId": "${KEYCLOAK_CLIENT_ID}",
       "clientRoles": {
-        "realm-management": ["view-users", "view-events", "view-realm", "view-clients"]
+        "realm-management": ["view-users", "view-events", "view-realm"]
       }
     }
   ],

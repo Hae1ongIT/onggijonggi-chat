@@ -200,6 +200,28 @@ class KeycloakAuditClassifierTest {
 	}
 
 	@Test
+	void unreadableDetailsFailTheEventInsteadOfLookingLikeNoRoles() {
+		org.assertj.core.api.Assertions.assertThatThrownBy(
+				() -> classify(event("CREATE", "users/u1/role-mappings/realm", "[{not json")))
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	void referenceValuesAreKeptShallowAndShort() {
+		Map<String, Object> deep = Map.of("a", Map.of("b", Map.of("c", Map.of("d", "e"))), "long", "x".repeat(400),
+				"list", List.of("r1", "r2"));
+		KeycloakAuditRow row = new KeycloakAuditRow("e", KeycloakAuditEventKind.TOKEN_MAPPER_CHANGED, java.time.Instant.EPOCH,
+				null, Map.of(), null, null, "p", deep);
+
+		Map<String, Object> reference = KeycloakAuditStore.fitted(row).reference();
+
+		assertThat((String) reference.get("long")).hasSize(255);
+		assertThat(reference.get("list")).isEqualTo(List.of("r1", "r2"));
+		// 두 단계보다 깊은 값은 문자열로 바뀐다.
+		assertThat(((Map<?, ?>) ((Map<?, ?>) reference.get("a")).get("b")).get("c")).isInstanceOf(String.class);
+	}
+
+	@Test
 	void theActorKeepsRealmAndClientButNeverTheIpAddress() {
 		KeycloakAuditRow row = classify(event("DELETE", "users/u1", null)).get(0);
 

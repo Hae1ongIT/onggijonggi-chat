@@ -61,7 +61,9 @@ public class KeycloakAdminClient {
 			@Value("${app.keycloak.admin.client-id}") String clientId,
 			@Value("${app.keycloak.admin.client-secret}") String clientSecret,
 			@Value("${app.keycloak.admin.display-name-ttl:5m}") Duration displayNameTtl) {
-		this.webClient = webClientBuilder.baseUrl(internalUrl).build();
+		// admin event 상세처럼 큰 응답이 기본 한도(256KB)에 걸려 한 건이 수집 전체를 막지 않게 넉넉히 둔다.
+		this.webClient = webClientBuilder.baseUrl(internalUrl)
+				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)).build();
 		this.realm = realm;
 		this.clientId = clientId;
 		this.clientSecret = clientSecret;
@@ -302,20 +304,6 @@ public class KeycloakAdminClient {
 				.build(realm, role))).collectList();
 	}
 
-	/** 클라이언트 역할을 직접 가진 사용자 id. clientUuid는 클라이언트의 내부 id다. */
-	public Mono<List<String>> clientRoleUserIds(String clientUuid, String role) {
-		return adminToken().flatMapMany(token -> pages(token, AdminUserRepresentation.class, 0, (builder, first) -> builder
-				.path("/admin/realms/{realm}/clients/{client}/roles/{role}/users").queryParam("first", first)
-				.queryParam("max", PAGE).build(realm, clientUuid, role))).map(AdminUserRepresentation::id).collectList();
-	}
-
-	/** 클라이언트 역할을 직접 가진 그룹. */
-	public Mono<List<KeycloakGroup>> clientRoleGroups(String clientUuid, String role) {
-		return adminToken().flatMapMany(token -> pages(token, KeycloakGroup.class, 0, (builder, first) -> builder
-				.path("/admin/realms/{realm}/clients/{client}/roles/{role}/groups").queryParam("first", first)
-				.queryParam("max", PAGE).build(realm, clientUuid, role))).collectList();
-	}
-
 	/** 그룹의 직접 구성원 id. 하위 그룹 구성원은 subGroups로 따로 내려가 모은다. */
 	public Mono<List<String>> groupMemberIds(String groupId) {
 		return adminToken().flatMapMany(token -> pages(token, AdminUserRepresentation.class, 0, (builder, first) -> builder
@@ -347,20 +335,6 @@ public class KeycloakAdminClient {
 				.collectList());
 	}
 
-	/** clientId(예: realm-management)의 내부 id. 없으면 빈 Optional. */
-	public Mono<Optional<String>> clientUuid(String clientIdToFind) {
-		return adminToken().flatMap(token -> webClient.get()
-				.uri(builder -> builder.path("/admin/realms/{realm}/clients").queryParam("clientId", clientIdToFind)
-						.build(realm))
-				.headers(headers -> headers.setBearerAuth(token))
-				.retrieve()
-				.bodyToFlux(ClientRepresentation.class)
-				.filter(client -> clientIdToFind.equals(client.clientId()))
-				.next()
-				.map(client -> Optional.of(client.id()))
-				.defaultIfEmpty(Optional.empty()));
-	}
-
 	/** realm의 모든 계정(서비스 계정 포함)과 활성 여부. 기준선이 실효 보유자와 비활성 계정을 찾을 때 쓴다. */
 	public Mono<List<KeycloakUser>> users() {
 		return adminToken().flatMapMany(token -> pages(token, KeycloakUser.class, 0, (builder, first) -> builder
@@ -372,6 +346,39 @@ public class KeycloakAdminClient {
 	public Mono<List<String>> effectiveRealmRoleNames(String userId) {
 		return adminToken().flatMap(token -> webClient.get()
 				.uri("/admin/realms/{realm}/users/{id}/role-mappings/realm/composite", realm, userId)
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(KeycloakRole.class)
+				.map(KeycloakRole::name)
+				.collectList());
+	}
+
+	/**
+	 * 이 클라이언트 서비스 계정이 가진 realm-management 역할에서 realm-management의 내부 id를 얻는다. 클라이언트 목록 조회
+	 * (view-clients)는 모든 confidential client의 secret까지 읽히는 권한이라 쓰지 않는다. view-users로 된다.
+	 */
+	public Mono<Optional<String>> realmManagementUuid() {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri(builder -> builder.path("/admin/realms/{realm}/users").queryParam("username", "service-account-" + clientId)
+						.queryParam("exact", true).queryParam("briefRepresentation", true).build(realm))
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(AdminUserRepresentation.class)
+				.next()
+				.flatMap(serviceAccount -> webClient.get()
+						.uri("/admin/realms/{realm}/users/{id}/role-mappings", realm, serviceAccount.id())
+						.headers(headers -> headers.setBearerAuth(token))
+						.retrieve()
+						.bodyToMono(RoleMappings.class))
+				.map(mappings -> Optional.ofNullable(mappings.clientMappings())
+						.map(clients -> clients.get("realm-management")).map(ClientMapping::id))
+				.defaultIfEmpty(Optional.empty()));
+	}
+
+	/** 사용자에게 한 클라이언트의 역할이 직접 붙은 것(그룹·복합 경유 제외). */
+	public Mono<List<String>> directClientRoleNames(String userId, String clientUuid) {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri("/admin/realms/{realm}/users/{id}/role-mappings/clients/{client}", realm, userId, clientUuid)
 				.headers(headers -> headers.setBearerAuth(token))
 				.retrieve()
 				.bodyToFlux(KeycloakRole.class)
@@ -430,10 +437,13 @@ public class KeycloakAdminClient {
 	public record KeycloakUser(String id, String username, Boolean enabled) {
 	}
 
-	public record KeycloakRole(String id, String name, Boolean composite, Boolean clientRole, String containerId) {
+	private record RoleMappings(Map<String, ClientMapping> clientMappings) {
 	}
 
-	private record ClientRepresentation(String id, String clientId) {
+	private record ClientMapping(String id, String client) {
+	}
+
+	public record KeycloakRole(String id, String name, Boolean composite, Boolean clientRole, String containerId) {
 	}
 
 	private Mono<Optional<String>> lookupUser(String subject, String token) {

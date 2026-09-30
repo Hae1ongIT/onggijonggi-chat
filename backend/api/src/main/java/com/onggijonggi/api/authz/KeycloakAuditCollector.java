@@ -54,6 +54,8 @@ public class KeycloakAuditCollector {
 	 * 보이므로, 긴 트랜잭션(대량 import 등, Keycloak 기본 트랜잭션 제한 5분)의 이벤트가 더 늦은 이벤트보다 나중에 보일 수 있다.
 	 */
 	private static final Duration REREAD_WINDOW = Duration.ofMinutes(10);
+	/** 커서가 이보다 더 미래면 수집을 실패로 본다(시계 차이는 이 정도까지 허용). */
+	private static final Duration FUTURE_TOLERANCE = Duration.ofMinutes(5);
 
 	static final String PLATFORM_ADMIN = "PLATFORM_ADMIN";
 	/**
@@ -88,9 +90,9 @@ public class KeycloakAuditCollector {
 		try {
 			recordEventsConfig(now, block(keycloak.eventsConfig()));
 			// 권한이 없으면 403이 아니라 빈 목록이 온다. 원인을 바로 알 수 있게 필요한 권한을 적는다.
-			String realmManagement = block(keycloak.clientUuid(KeycloakAuditClassifier.REALM_MANAGEMENT))
+			String realmManagement = block(keycloak.realmManagementUuid())
 					.orElseThrow(() -> new CollectorProblem(
-							"realm-management 클라이언트를 찾을 수 없다(서비스 계정의 view-clients 권한 확인)"));
+							"realm-management 클라이언트를 찾을 수 없다(서비스 계정의 view-users 권한과 realm-management 역할 확인)"));
 			RoleNames roleNames = roleNames();
 			if (!store.baselineRecorded()) {
 				List<KeycloakAuditRow> baseline = baseline(now, realmManagement);
@@ -178,6 +180,11 @@ public class KeycloakAuditCollector {
 
 	private void collectEvents(String realmManagement, RoleNames roleNames) {
 		Optional<Instant> cursor = store.cursor();
+		// 커서가 미래면 그보다 앞선 실제 이벤트가 모두 "이미 처리함"으로 버려져 감사가 조용히 빈다(상태 행 조작이나 Keycloak 시계
+		// 오류). 정상처럼 보이지 않게 실패로 드러낸다.
+		if (cursor.isPresent() && cursor.get().isAfter(Instant.now().plus(FUTURE_TOLERANCE))) {
+			throw new CollectorProblem("수집 커서가 현재 시각보다 미래다(keycloak_adt_crs.evt_at 또는 Keycloak 서버 시계 확인)");
+		}
 		// Keycloak의 기간 필터는 날짜 단위다. 시간대 차이를 넘기려고 하루 앞부터 읽는다.
 		LocalDate from = cursor.map(at -> at.atZone(ZoneOffset.UTC).toLocalDate().minusDays(1)).orElse(null);
 		List<KeycloakAdminEvent> events = new ArrayList<>(keycloak.adminEvents(from).block(EVENTS_TIMEOUT));
@@ -233,8 +240,9 @@ public class KeycloakAuditCollector {
 
 	/**
 	 * 수집을 처음 켤 때의 보유 상태.
-	 * (1) 경로별: PLATFORM_ADMIN의 직접·그룹(하위 그룹 포함)·realm 복합 역할 경유 보유자, 관리 역할의 직접·그룹 보유자를 경로마다 한 행.
-	 * (2) 실효 보강: 모든 계정의 실효 역할을 읽어, (1)에서 빠진 보유자(기본 역할·클라이언트 복합 역할 경유 등)를 via=effective로 남긴다.
+	 * (1) 경로별: PLATFORM_ADMIN의 직접·그룹(하위 그룹 포함)·realm 복합 역할 경유 보유자를 경로마다 한 행.
+	 * (2) 실효 보강: 모든 계정의 실효 역할을 읽어, (1)에서 빠진 PLATFORM_ADMIN 보유자(클라이언트 복합 역할 경유 등)와 관리 역할
+	 *     보유자를 남긴다. 관리 역할은 직접 붙은 것만 direct, 나머지(그룹·복합)는 effective다.
 	 * (3) 이미 비활성인 계정은 USER_DISABLED로 남긴다 — 나중에 켜는 것이 권한 획득이라 비교 기준이 필요하다.
 	 * 마지막에 BASELINE_RECORDED 표지를 붙인다. PLATFORM_ADMIN 역할이 아직 없는 realm도 보유자 0명으로 기준선을 잡는다.
 	 */
@@ -247,24 +255,24 @@ public class KeycloakAuditCollector {
 					block(keycloak.realmRoleGroups(composite)), "roles/" + composite + "/", Map.of("compositeRole", composite),
 					rows);
 		}
-		for (String role : MANAGEMENT_ROLES) {
-			holders(now, KeycloakAuditClassifier.REALM_MANAGEMENT + "/" + role,
-					orNone(keycloak.clientRoleUserIds(realmManagement, role)),
-					orNone(keycloak.clientRoleGroups(realmManagement, role)), "", Map.of(), rows);
-		}
 		Set<String> covered = new HashSet<>();
 		for (KeycloakAuditRow row : rows) covered.add(row.targetSubject() + "|" + row.role());
 		for (KeycloakUser user : block(keycloak.users())) {
 			List<String> held = new ArrayList<>();
 			// 기준선을 잡는 사이 지워진 계정(404)은 건너뛴다 — 한 명 때문에 기준선 전체를 버리지 않는다.
 			if (orNone(keycloak.effectiveRealmRoleNames(user.id())).contains(PLATFORM_ADMIN)) held.add(PLATFORM_ADMIN);
-			for (String role : orNone(keycloak.effectiveClientRoleNames(user.id(), realmManagement))) {
-				if (MANAGEMENT_ROLES.contains(role)) held.add(KeycloakAuditClassifier.REALM_MANAGEMENT + "/" + role);
-			}
+			List<String> management = orNone(keycloak.effectiveClientRoleNames(user.id(), realmManagement)).stream()
+					.filter(MANAGEMENT_ROLES::contains).toList();
+			for (String role : management) held.add(KeycloakAuditClassifier.REALM_MANAGEMENT + "/" + role);
+			// 관리 역할은 클라이언트 역할 보유자 조회(view-clients)를 쓰지 않고 실효 역할로 판정한다. 직접 붙은 것만 direct로 가른다.
+			List<String> direct = management.isEmpty() ? List.of()
+					: orNone(keycloak.directClientRoleNames(user.id(), realmManagement)).stream()
+							.map(role -> KeycloakAuditClassifier.REALM_MANAGEMENT + "/" + role).toList();
 			for (String role : held) {
-				if (covered.add(user.id() + "|" + role)) {
-					rows.add(held(now, user.id(), role, "users/" + user.id() + "/effective", Map.of("via", "effective"), null));
-				}
+				if (!covered.add(user.id() + "|" + role)) continue;
+				boolean directly = direct.contains(role);
+				rows.add(held(now, user.id(), role, "users/" + user.id() + (directly ? "" : "/effective"),
+						Map.of("via", directly ? "direct" : "effective"), null));
 			}
 			if (Boolean.FALSE.equals(user.enabled())) {
 				rows.add(new KeycloakAuditRow(null, KeycloakAuditEventKind.USER_DISABLED, now, null,

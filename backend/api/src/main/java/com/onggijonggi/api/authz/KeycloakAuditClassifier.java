@@ -275,11 +275,15 @@ public class KeycloakAuditClassifier {
 		return parsed instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
 	}
 
+	/**
+	 * 상세를 읽지 못하면 예외를 던진다 — 조용히 빈 값으로 두면 역할·그룹이 없는 것으로 보여 아무 행도 남지 않는다.
+	 * 수집기가 이 예외를 받아 그 이벤트를 EVENT_UNREADABLE로 남긴다.
+	 */
 	private Object parse(String json) {
 		try {
 			return objectMapper.readValue(json, Object.class);
 		} catch (JacksonException invalid) {
-			return null;
+			throw new IllegalArgumentException("admin event 상세를 읽을 수 없다");
 		}
 	}
 

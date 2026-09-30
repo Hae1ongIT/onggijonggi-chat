@@ -33,9 +33,10 @@ class KeycloakAuditKeycloakTest {
 
 	private static final String CLIENT = "bff";
 	private static final String SECRET = "bff-secret";
-	/** 수집기가 쓰는 서비스 계정 권한(실측한 최소). view-realm은 역할 목록, view-clients는 realm-management 역할 보유자 조회에 필요하다
-	 * (query-clients로는 부족). 이벤트를 지우는 manage-events는 주지 않는다. */
-	static final List<String> COLLECTOR_ROLES = List.of("view-events", "view-users", "view-realm", "view-clients");
+	/** 수집기가 쓰는 서비스 계정 권한(실측한 최소). view-realm은 역할 목록에 필요하다. view-clients는 모든 confidential client의
+	 * secret까지 읽히는 권한이라 주지 않는다 — realm-management id와 관리 역할 보유자는 view-users로 읽는다.
+	 * 이벤트를 지우는 manage-events도 주지 않는다. */
+	static final List<String> COLLECTOR_ROLES = List.of("view-events", "view-users", "view-realm");
 	private static final AtomicInteger SEQUENCE = new AtomicInteger();
 
 	@Container
@@ -244,6 +245,17 @@ class KeycloakAuditKeycloakTest {
 		KeycloakAuditPage page = setup.queries().page(KeycloakAuditQuery.parse(null, null, null, null, null, null, null, null))
 				.block();
 		assertThat(page.collector().lagging()).isTrue();
+	}
+
+	@Test
+	void aCursorPushedIntoTheFutureIsReportedInsteadOfSilentlySkippingEvents() {
+		Setup setup = setup(COLLECTOR_ROLES);
+		setup.collector().runOnce();
+		setup.jdbc().update("update keycloak_adt_crs set evt_at = now() + interval '1 day' where id = 1");
+
+		setup.collector().runOnce();
+
+		assertThat(setup.state().lastError()).contains("미래");
 	}
 
 	@Test

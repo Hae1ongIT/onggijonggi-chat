@@ -98,8 +98,14 @@ public class KeycloakAuditQueryService {
 				rs.getString("trg_path"), map(rs.getString("trg_ref")), rs.getObject("created_at", OffsetDateTime.class).toInstant());
 	}
 
+	/** 한 행의 JSON을 읽지 못해도 페이지 전체가 실패하지 않게 그 값만 표시로 바꾼다. */
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> map(String json) {
-		return json == null ? null : objectMapper.readValue(json, Map.class);
+		if (json == null) return null;
+		try {
+			return objectMapper.readValue(json, Map.class);
+		} catch (tools.jackson.core.JacksonException unreadable) {
+			return Map.of("unreadable", true);
+		}
 	}
 }
