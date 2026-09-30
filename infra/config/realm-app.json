@@ -1,6 +1,11 @@
 {
   "realm": "${KEYCLOAK_REALM}",
   "enabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "attributes": {
+    "adminEventsExpiration": "31536000"
+  },
   "roles": {
     "realm": [
       {
@@ -35,7 +40,7 @@
       "enabled": true,
       "serviceAccountClientId": "${KEYCLOAK_CLIENT_ID}",
       "clientRoles": {
-        "realm-management": ["view-users"]
+        "realm-management": ["view-users", "view-events", "view-realm", "view-clients"]
       }
     }
   ],

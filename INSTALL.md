@@ -245,6 +245,23 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 ---
 
+## Keycloak 권한 변경 감사
+
+누가 언제 누구에게 `PLATFORM_ADMIN`(권한 관리 화면·API를 여는 역할)을 줬는지, 계정을 언제 끄고 지웠는지를 BFF가 1분마다 Keycloak에서 읽어 DB에 지울 수 없는 기록으로 남긴다. 그룹 가입이나 복합 역할처럼 역할을 직접 붙이지 않고 권한을 얻는 경로와, 역할을 줄 수 있는 관리 권한(`realm-management`)도 함께 남는다. 처음 수집할 때는 그 시점에 이미 권한을 가진 사람을 한 번 기록한다.
+
+**새로 띄우는 환경은 할 일이 없다.** 로그인 설정 파일(`infra/config/realm-app.json`)이 이벤트 저장과 수집 권한을 켠 채로 realm을 만든다.
+
+**이미 띄운 환경은 한 번 켠다.** 이 파일은 realm이 처음 만들어질 때만 적용되기 때문이다. `http://localhost:8081`(관리 콘솔) → `app-realm`에서:
+
+1. **Realm settings → Events → Admin events settings**에서 *Save events*와 *Include representation*을 켜고, *Expiration*을 1년(365일)으로 둔 뒤 저장한다.
+2. **Clients → `ogjg-client`(`KEYCLOAK_CLIENT_ID`) → Service account roles → Assign role**에서 `realm-management`의 `view-events`·`view-realm`·`view-clients`를 추가한다(`view-users`는 이미 있다). 이벤트를 지우는 `manage-events`는 주지 않는다.
+
+**✅ 확인**: 아무 계정에 역할을 붙였다 떼고 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)에 두 행이 보인다. 응답의 `collector`에 `lastError`가 비어 있고 `adminEventsEnabled`가 `true`면 정상이다. 권한을 아직 안 줬으면 BFF는 멈추지 않고 `lastError`(예: `Keycloak 403 …/events/config`)로 알린다.
+
+**운영 규칙**: Keycloak 최상위 관리자(master realm) 계정은 설치 담당자 것만 두고 늘리지 않는다. 이 계정의 변경은 수집하지 않는다(수집하려면 BFF에 master realm 권한을 줘야 해 오히려 권한이 커진다). 일상적인 역할·계정 관리는 `app-realm` 안에서 한다 — 그래야 모두 기록된다.
+
+---
+
 ## v0.2에서 올릴 때 (대화가 이미 있을 때)
 
 새 버전은 모든 대화를 고객사(Tenant)의 공용 공간에 귀속시키는 스키마 변경을 포함한다. **대화가 이미 있는데 고객사가 아직 없으면** 서버가 뜨면서 실행하는 Flyway가 `thread cutover requires exactly one ACTIVE tenant`로 멈추고 BFF가 기동하지 못한다. 이 migration은 통째로 되돌려져 대화 데이터는 그대로지만, 그 앞의 v0.3 migration은 이미 적용된 상태로 남고 BFF는 뜨지 못한다. 고객사는 BFF가 뜬 뒤에 만들어지니, 다음 순서로 올린다.

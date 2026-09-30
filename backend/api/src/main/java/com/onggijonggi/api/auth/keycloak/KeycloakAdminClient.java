@@ -264,6 +264,141 @@ public class KeycloakAdminClient {
 						: reactor.core.publisher.Flux.fromIterable(page));
 	}
 
+	// ------------------------------------------------------------------ 권한 변경 감사 수집(#304)
+	// 아래는 모두 오류를 전파한다 — 수집기가 실패를 수집 상태에 남기고 다음 주기에 다시 시도한다. 삼키면 기록이 조용히 빈다.
+
+	/**
+	 * admin event를 모두 읽는다. dateFrom이 있으면 그 날짜(yyyy-MM-dd)부터다 — Keycloak의 기간 필터가 날짜 단위라
+	 * 호출부가 이미 본 이벤트도 다시 온다(멱등 키로 거른다). 순서는 Keycloak이 정하므로 호출부가 정렬한다.
+	 */
+	public Mono<List<KeycloakAdminEvent>> adminEvents(java.time.LocalDate dateFrom) {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakAdminEvent.class, 0, (builder, first) -> {
+			builder.path("/admin/realms/{realm}/admin-events").queryParam("first", first).queryParam("max", PAGE);
+			if (dateFrom != null) builder.queryParam("dateFrom", dateFrom.toString());
+			return builder.build(realm);
+		})).collectList();
+	}
+
+	/** realm의 이벤트 설정(admin event 저장·상세 여부). `view-events`가 필요하다. */
+	public Mono<KeycloakEventsConfig> eventsConfig() {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri("/admin/realms/{realm}/events/config", realm)
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToMono(KeycloakEventsConfig.class));
+	}
+
+	/** realm 역할을 직접 가진 사용자 id. */
+	public Mono<List<String>> realmRoleUserIds(String role) {
+		return adminToken().flatMapMany(token -> pages(token, AdminUserRepresentation.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/roles/{role}/users").queryParam("first", first).queryParam("max", PAGE)
+				.build(realm, role))).map(AdminUserRepresentation::id).collectList();
+	}
+
+	/** realm 역할을 직접 가진 그룹. */
+	public Mono<List<KeycloakGroup>> realmRoleGroups(String role) {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakGroup.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/roles/{role}/groups").queryParam("first", first).queryParam("max", PAGE)
+				.build(realm, role))).collectList();
+	}
+
+	/** 클라이언트 역할을 직접 가진 사용자 id. clientUuid는 클라이언트의 내부 id다. */
+	public Mono<List<String>> clientRoleUserIds(String clientUuid, String role) {
+		return adminToken().flatMapMany(token -> pages(token, AdminUserRepresentation.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/clients/{client}/roles/{role}/users").queryParam("first", first)
+				.queryParam("max", PAGE).build(realm, clientUuid, role))).map(AdminUserRepresentation::id).collectList();
+	}
+
+	/** 클라이언트 역할을 직접 가진 그룹. */
+	public Mono<List<KeycloakGroup>> clientRoleGroups(String clientUuid, String role) {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakGroup.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/clients/{client}/roles/{role}/groups").queryParam("first", first)
+				.queryParam("max", PAGE).build(realm, clientUuid, role))).collectList();
+	}
+
+	/** 그룹의 직접 구성원 id. 하위 그룹 구성원은 subGroups로 따로 내려가 모은다. */
+	public Mono<List<String>> groupMemberIds(String groupId) {
+		return adminToken().flatMapMany(token -> pages(token, AdminUserRepresentation.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/groups/{group}/members").queryParam("first", first).queryParam("max", PAGE)
+				.queryParam("briefRepresentation", true).build(realm, groupId))).map(AdminUserRepresentation::id).collectList();
+	}
+
+	/** 바로 아래 하위 그룹. 하위 그룹 구성원도 상위 그룹의 역할을 물려받는다. */
+	public Mono<List<KeycloakGroup>> subGroups(String groupId) {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakGroup.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/groups/{group}/children").queryParam("first", first).queryParam("max", PAGE)
+				.build(realm, groupId))).collectList();
+	}
+
+	/** realm 역할 전체(복합 여부 포함). */
+	public Mono<List<KeycloakRole>> realmRoles() {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakRole.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/roles").queryParam("first", first).queryParam("max", PAGE)
+				.queryParam("briefRepresentation", false).build(realm))).collectList();
+	}
+
+	/** 복합 역할이 품은 역할(realm·클라이언트 모두). */
+	public Mono<List<KeycloakRole>> composites(String role) {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri("/admin/realms/{realm}/roles/{role}/composites", realm, role)
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(KeycloakRole.class)
+				.collectList());
+	}
+
+	/** clientId(예: realm-management)의 내부 id. 없으면 빈 Optional. */
+	public Mono<Optional<String>> clientUuid(String clientIdToFind) {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri(builder -> builder.path("/admin/realms/{realm}/clients").queryParam("clientId", clientIdToFind)
+						.build(realm))
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(ClientRepresentation.class)
+				.filter(client -> clientIdToFind.equals(client.clientId()))
+				.next()
+				.map(client -> Optional.of(client.id()))
+				.defaultIfEmpty(Optional.empty()));
+	}
+
+	private static final int PAGE = 100;
+
+	/** first/max로 페이지를 끝까지 읽는다. 한 페이지가 가득 차면 다음 페이지를 더 묻는다. */
+	private <T> Flux<T> pages(String token, Class<T> type, int first,
+			java.util.function.BiFunction<org.springframework.web.util.UriBuilder, Integer, java.net.URI> uri) {
+		return webClient.get()
+				.uri(builder -> uri.apply(builder, first))
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(type)
+				.collectList()
+				.flatMapMany(page -> page.size() == PAGE
+						? Flux.fromIterable(page).concatWith(pages(token, type, first + PAGE, uri))
+						: Flux.fromIterable(page));
+	}
+
+	/** admin event 한 건. representation은 상세가 켜져 있을 때만 오는 JSON 문자열이다. id가 없는 버전이 있을 수 있다. */
+	public record KeycloakAdminEvent(String id, long time, AuthDetails authDetails, String operationType,
+			String resourceType, String resourcePath, String representation) {
+
+		/** 행위자. ipAddress는 받지만 저장하지 않는다. */
+		public record AuthDetails(String realmId, String clientId, String userId, String ipAddress) {
+		}
+	}
+
+	/** realm 이벤트 설정 중 감사에 필요한 값. */
+	public record KeycloakEventsConfig(Boolean adminEventsEnabled, Boolean adminEventsDetailsEnabled) {
+	}
+
+	public record KeycloakGroup(String id, String name, String path) {
+	}
+
+	public record KeycloakRole(String id, String name, Boolean composite, Boolean clientRole, String containerId) {
+	}
+
+	private record ClientRepresentation(String id, String clientId) {
+	}
+
 	private Mono<Optional<String>> lookupUser(String subject, String token) {
 		return webClient.get()
 				.uri("/admin/realms/{realm}/users/{id}", realm, subject)
