@@ -165,6 +165,59 @@ class KeycloakAuditPostgresTest {
 	// ------------------------------------------------------------------ 조회
 
 	@Test
+	void roleNamesAreRewoundBeforeReplayAndLateEventsUseTheHistoricalName() {
+		Instant at = Instant.now().minus(2, ChronoUnit.MINUTES).truncatedTo(ChronoUnit.MILLIS);
+		store.recordRoleNames(Map.of("r1", "OLD"));
+		keycloak.roles = List.of(new KeycloakAdminClient.KeycloakRole("r1", "NEW", false, false, "fake"));
+		KeycloakAdminClient.KeycloakAdminEvent composite = new KeycloakAdminClient.KeycloakAdminEvent("add", at.toEpochMilli(),
+				null, "CREATE", "REALM_ROLE", "roles-by-id/r1/composites", "[{\"name\":\"USER\"}]");
+		keycloak.events.add(composite);
+		keycloak.events.add(new KeycloakAdminClient.KeycloakAdminEvent("rename", at.plusSeconds(1).toEpochMilli(), null,
+				"UPDATE", "REALM_ROLE", "roles-by-id/r1", "{\"name\":\"NEW\"}"));
+		collector.runOnce();
+		assertThat(store.state().lastError()).isNull();
+		assertThat(eventRoles("add")).containsExactly("OLD");
+
+		keycloak.events.add(new KeycloakAdminClient.KeycloakAdminEvent("late", at.minusSeconds(1).toEpochMilli(), null,
+				"CREATE", "REALM_ROLE", "roles-by-id/r1/composites", "[{\"name\":\"USER\"}]"));
+		collector.runOnce();
+		collector.runOnce();
+
+		assertThat(store.state().lastError()).isNull();
+		assertThat(eventRoles("add")).containsExactly("OLD");
+		assertThat(eventRoles("late")).containsExactly("OLD");
+		assertThat(eventRoles("rename")).containsExactly("NEW");
+		assertThat(store.roleNames()).containsEntry("r1", "NEW");
+
+		keycloak.events.removeIf(event -> "rename".equals(event.id()));
+		keycloak.events.add(new KeycloakAdminClient.KeycloakAdminEvent("after", at.plusSeconds(2).toEpochMilli(), null,
+				"CREATE", "REALM_ROLE", "roles-by-id/r1/composites", "[{\"name\":\"USER\"}]"));
+		collector.runOnce();
+		assertThat(store.state().lastError()).isNull();
+		assertThat(eventRoles("after")).containsExactly("NEW");
+	}
+
+	private List<String> eventRoles(String eventId) {
+		return jdbc.query("select role from keycloak_adt where keycloak_evt_id = ?", (rs, rowNum) -> rs.getString(1), eventId);
+	}
+
+	@Test
+	void truncationHashesRemainStoredButAreNotReturnedByTheQuery() {
+		store.insert(List.of(new KeycloakAuditRow("event-" + "e".repeat(255),
+				KeycloakAuditEventKind.ROLE_GRANTED, Instant.now(), "a".repeat(256), Map.of(),
+				"s".repeat(256), "r".repeat(256), "p".repeat(1025), Map.of("operation", "CREATE"))));
+
+		String stored = jdbc.queryForObject("select trg_ref::text from keycloak_adt", String.class);
+		assertThat(stored).contains("keycloakEventIdTruncated", "actorSubjectTruncated", "targetSubjectTruncated",
+				"roleTruncated", "targetPathTruncated");
+		KeycloakAuditPage.Item item = page(KeycloakAuditQuery.parse(null, null, null, null, null, null, null, null))
+				.items().get(0);
+		assertThat(item.reference()).containsExactlyEntriesOf(Map.of("operation", "CREATE"));
+		assertThat(item.role()).hasSize(255);
+		assertThat(item.resourcePath()).hasSize(1024);
+	}
+
+	@Test
 	void cursorPagingOverEqualTimesHasNoGapsOrDuplicates() {
 		Instant same = Instant.parse("2026-09-30T09:00:00Z");
 		List<KeycloakAuditRow> rows = new ArrayList<>();
@@ -268,6 +321,7 @@ class KeycloakAuditPostgresTest {
 		final List<KeycloakAdminEvent> events = new ArrayList<>();
 		final Deque<RuntimeException> eventFailures = new ArrayDeque<>();
 		final AtomicInteger invalidated = new AtomicInteger();
+		List<KeycloakRole> roles = List.of(new KeycloakRole("r1", "PLATFORM_ADMIN", false, false, "fake"));
 
 		FakeKeycloak() {
 			super(WebClient.builder(), "http://unused", "fake", "fake", "fake", Duration.ZERO);
@@ -291,7 +345,7 @@ class KeycloakAuditPostgresTest {
 
 		@Override
 		public Mono<List<KeycloakRole>> realmRoles() {
-			return Mono.just(List.of(new KeycloakRole("r1", "PLATFORM_ADMIN", false, false, "fake")));
+			return Mono.just(roles);
 		}
 
 		@Override

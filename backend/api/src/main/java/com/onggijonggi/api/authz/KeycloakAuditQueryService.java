@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -30,6 +31,8 @@ public class KeycloakAuditQueryService {
 
 	private static final String COLUMNS = "id, evt_kind, evt_at, act_subj, act_json::text as act_json, trg_subj, role,"
 			+ " trg_path, trg_ref::text as trg_ref, created_at";
+	private static final List<String> INTERNAL_REFERENCE_KEYS = List.of("keycloakEventIdTruncated", "actorSubjectTruncated",
+			"targetSubjectTruncated", "roleTruncated", "targetPathTruncated");
 
 	private final NamedParameterJdbcTemplate jdbc;
 	private final KeycloakAuditStore store;
@@ -95,7 +98,15 @@ public class KeycloakAuditQueryService {
 		return new KeycloakAuditPage.Item(rs.getObject("id", UUID.class),
 				KeycloakAuditEventKind.valueOf(rs.getString("evt_kind")), rs.getObject("evt_at", OffsetDateTime.class).toInstant(),
 				rs.getString("act_subj"), map(rs.getString("act_json")), rs.getString("trg_subj"), rs.getString("role"),
-				rs.getString("trg_path"), map(rs.getString("trg_ref")), rs.getObject("created_at", OffsetDateTime.class).toInstant());
+				rs.getString("trg_path"), publicReference(rs.getString("trg_ref")), rs.getObject("created_at", OffsetDateTime.class).toInstant());
+	}
+
+	private Map<String, Object> publicReference(String json) {
+		Map<String, Object> reference = map(json);
+		if (reference == null) return null;
+		Map<String, Object> result = new HashMap<>(reference);
+		INTERNAL_REFERENCE_KEYS.forEach(result::remove);
+		return result;
 	}
 
 	/** 한 행의 JSON을 읽지 못해도 페이지 전체가 실패하지 않게 그 값만 표시로 바꾼다. */

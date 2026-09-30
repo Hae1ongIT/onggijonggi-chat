@@ -144,6 +144,26 @@ public class KeycloakAuditCollector {
 	 */
 	private record RoleNames(Map<String, String> lookup, Map<String, String> current, Map<String, String> previous) {
 
+		void rewind(List<KeycloakAuditStore.RoleRename> renames) {
+			for (KeycloakAuditStore.RoleRename rename : renames) {
+				if (rename.before() == null) continue;
+				String id = rename.roleId() != null ? rename.roleId() : idOf(rename.after());
+				if (id != null) lookup.put(id, rename.before());
+			}
+		}
+
+		void replayBefore(KeycloakAdminEvent event, Deque<KeycloakAuditStore.RoleRename> renames) {
+			Instant at = Instant.ofEpochMilli(event.time());
+			String eventId = KeycloakAuditClassifier.eventId(event);
+			while (!renames.isEmpty()) {
+				KeycloakAuditStore.RoleRename rename = renames.peek();
+				if (rename.at().isAfter(at) || (rename.at().equals(at) && rename.eventId().compareTo(eventId) >= 0)) break;
+				renames.remove();
+				String id = rename.roleId() != null ? rename.roleId() : idOf(rename.before());
+				if (id != null && rename.after() != null) lookup.put(id, rename.after());
+			}
+		}
+
 		/** 분류한 행에서 생성·이름 변경을 읽어 표를 고친다. */
 		void learn(KeycloakAuditRow row) {
 			if (row.kind() != KeycloakAuditEventKind.ROLE_DEFINITION_CHANGED) return;
@@ -190,6 +210,12 @@ public class KeycloakAuditCollector {
 		List<KeycloakAdminEvent> events = new ArrayList<>(keycloak.adminEvents(from).block(EVENTS_TIMEOUT));
 		events.sort(Comparator.comparingLong(KeycloakAdminEvent::time).thenComparing(KeycloakAuditClassifier::eventId));
 		Instant floor = cursor.map(at -> at.minus(REREAD_WINDOW)).orElse(Instant.MIN);
+		// 지난 주기의 최종 이름으로 재독하면 이름 변경 전 이벤트가 다른 role로 다시 저장된다.
+		// 지연 도착한 이벤트도 당시 이름을 사용하도록, 저장된 변경을 역순으로 되돌린 뒤 정순 재생한다.
+		List<KeycloakAuditStore.RoleRename> renames = cursor.isPresent() ? store.roleRenamesSince(floor) : List.of();
+		roleNames.rewind(renames);
+		Deque<KeycloakAuditStore.RoleRename> renameReplay = new ArrayDeque<>();
+		renames.forEach(renameReplay::addFirst);
 		// 이번 배치에서 먼저 나온 활성 상태 변화. 시각 순으로 처리하므로 조회 시점보다 앞선 것만 쓴다.
 		Map<String, List<KeycloakAuditStore.EnabledAt>> enabledInBatch = new HashMap<>();
 		KeycloakAuditClassifier.Context context = new KeycloakAuditClassifier.Context(realmManagement,
@@ -199,6 +225,8 @@ public class KeycloakAuditCollector {
 		KeycloakAdminEvent last = null;
 		for (KeycloakAdminEvent event : events) {
 			if (Instant.ofEpochMilli(event.time()).isBefore(floor)) continue;
+			// Keycloak에서 이미 지운 변경도 DB 사본으로 재생해 지연 이벤트의 당시 이름을 유지한다.
+			roleNames.replayBefore(event, renameReplay);
 			List<KeycloakAuditRow> classified;
 			try {
 				classified = classifier.classify(event, context);

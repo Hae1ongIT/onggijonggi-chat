@@ -161,6 +161,20 @@ public class KeycloakAuditStore {
 		jdbc.update("update keycloak_adt_crs set role_ref_json = ?::jsonb where id = 1", objectMapper.writeValueAsString(names));
 	}
 
+	/** 재독 구간의 역할 이름 변경을 역순으로 읽어, 구간 시작 전 이름 표를 복원한다. */
+	public List<RoleRename> roleRenamesSince(Instant floor) {
+		return jdbc.query("""
+				select trg_ref->>'roleId', trg_ref->>'before', trg_ref->>'after', evt_at, keycloak_evt_id
+				from keycloak_adt
+				where evt_kind = 'ROLE_DEFINITION_CHANGED' and trg_ref->>'operation' = 'RENAME' and evt_at >= ?
+				order by evt_at desc, keycloak_evt_id desc
+				""", (rs, rowNum) -> new RoleRename(rs.getString(1), rs.getString(2), rs.getString(3),
+						rs.getObject(4, OffsetDateTime.class).toInstant(), rs.getString(5)), Timestamp.from(floor));
+	}
+
+	public record RoleRename(String roleId, String before, String after, Instant at, String eventId) {
+	}
+
 	public void recordEventsConfig(Map<String, Object> config) {
 		jdbc.update("update keycloak_adt_crs set evt_cnf_json = ?::jsonb where id = 1", json(config));
 	}
