@@ -8,6 +8,9 @@ import com.onggijonggi.common.authz.OrgUnit;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
 import com.onggijonggi.common.authz.OrgUnitRepository;
 import com.onggijonggi.common.authz.OrgUnitStatus;
+import com.onggijonggi.common.authz.Rank;
+import com.onggijonggi.common.authz.RankGrant;
+import com.onggijonggi.common.authz.RankGrantRepository;
 import com.onggijonggi.common.authz.Tenant;
 import com.onggijonggi.common.authz.TenantRepository;
 import com.onggijonggi.common.authz.TenantStatus;
@@ -26,6 +29,7 @@ import com.onggijonggi.common.user.AppUserStatus;
 import jakarta.persistence.EntityManager;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +62,7 @@ public class WorkspaceManagementService {
 	private final TenantRepository tenants;
 	private final WorkspaceNodeRepository nodes;
 	private final WorkspaceGrantRepository grants;
+	private final RankGrantRepository rankGrants;
 	private final OrgUnitRepository orgUnits;
 	private final OrgUnitMemberRepository members;
 	private final AppUserRepository users;
@@ -81,14 +86,18 @@ public class WorkspaceManagementService {
 		}
 	}
 
+	public record RankGrantView(UUID id, UUID orgUnitId, Rank rank, WorkspaceRole role, boolean declared) { }
+
 	public WorkspaceManagementService(TenantRepository tenants, WorkspaceNodeRepository nodes,
-			WorkspaceGrantRepository grants, OrgUnitRepository orgUnits, OrgUnitMemberRepository members,
+			WorkspaceGrantRepository grants, RankGrantRepository rankGrants, OrgUnitRepository orgUnits,
+			OrgUnitMemberRepository members,
 			AppUserRepository users, ThrRepository threads, AuthorizationAuditRepository audits,
 			DirectManageAuthorizer manage, RbacBootstrapConfigReader config, RbacPolicyRefresh refresh,
 			EntityManager entityManager, ObjectMapper json, PlatformTransactionManager transactionManager) {
 		this.tenants = tenants;
 		this.nodes = nodes;
 		this.grants = grants;
+		this.rankGrants = rankGrants;
 		this.orgUnits = orgUnits;
 		this.members = members;
 		this.users = users;
@@ -327,6 +336,99 @@ public class WorkspaceManagementService {
 		refresh.publish(tenantId, Set.of(nodeId), null);
 	}
 
+	public List<RankGrantView> listRankGrants(Actor actor, UUID nodeId) {
+		UUID tenantId = preauthorized(actor, nodeId, true);
+		Tenant tenant = tenants.findById(tenantId).orElseThrow(WorkspaceManagementService::notFound);
+		Optional<RbacBootstrapSpec.TenantSpec> specification = declared(tenant);
+		WorkspaceNode node = node(nodeId, tenantId);
+		List<RankGrant> rules = rankGrants.findByWorkspaceNodeId(nodeId);
+		Map<UUID, String> orgKeys = new HashMap<>();
+		if (specification.isPresent()) {
+			List<UUID> orgIds = rules.stream().map(RankGrant::getOrgUnitId).filter(Objects::nonNull).distinct().toList();
+			for (OrgUnit unit : orgUnits.findAllById(orgIds)) orgKeys.put(unit.getId(), unit.getKey());
+		}
+		return rules.stream()
+				.map(grant -> new RankGrantView(grant.getId(), grant.getOrgUnitId(), grant.getRank(), grant.getRole(),
+						specification.isPresent() && isDeclaredRankGrant(specification, node, grant,
+								grant.getOrgUnitId() == null ? null : orgKey(orgKeys, grant.getOrgUnitId()))))
+				.sorted(Comparator.comparingInt((RankGrantView view) -> view.rank().order()).thenComparing(RankGrantView::id))
+				.toList();
+	}
+
+	public UUID addRankGrant(Actor actor, UUID nodeId, UUID orgUnitId, Rank rank, WorkspaceRole role) {
+		if (rank == null || role == null) throw badRequest();
+		UUID tenantId = preauthorized(actor, nodeId, true);
+		UUID id = transactions.execute(status -> {
+			lock(tenantId);
+			WorkspaceNode current = node(nodeId, tenantId);
+			manage.require(actor.subject(), current);
+			if (current.getKind() == WorkspaceNodeKind.ROOT) throw badRequest();
+			if (orgUnitId != null && orgUnits.findById(orgUnitId).filter(unit -> tenantId.equals(unit.getTenantId())
+					&& unit.getStatus() == OrgUnitStatus.ACTIVE).isEmpty()) throw conflict();
+			if (hasRankGrant(nodeId, orgUnitId, rank, role, null)) throw conflict();
+			RankGrant grant = rankGrants.saveAndFlush(new RankGrant(tenantId, nodeId, orgUnitId, rank, role));
+			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_ADDED, AuthorizationAuditTargetKind.POLICY,
+					rankPolicyRef(grant), nodeId, null, rankGrantSnapshot(grant));
+			return grant.getId();
+		});
+		refresh.publish(tenantId, Set.of(), null);
+		return id;
+	}
+
+	public void changeRankGrantRank(Actor actor, UUID grantId, Rank rank) {
+		if (rank == null) throw badRequest();
+		changeRankGrant(actor, grantId, rank, null);
+	}
+
+	public void changeRankGrantRole(Actor actor, UUID grantId, WorkspaceRole role) {
+		if (role == null) throw badRequest();
+		changeRankGrant(actor, grantId, null, role);
+	}
+
+	private void changeRankGrant(Actor actor, UUID grantId, Rank rank, WorkspaceRole role) {
+		UUID tenantId = preauthorizedRankGrant(actor, grantId);
+		RankGrantChange change = transactions.execute(status -> {
+			Tenant tenant = lock(tenantId);
+			RankGrant grant = rankGrant(grantId, tenantId);
+			WorkspaceNode node = node(grant.getWorkspaceNodeId(), tenantId);
+			manage.require(actor.subject(), node);
+			undeclaredRankGrant(declared(tenant), node, grant);
+			Rank nextRank = rank == null ? grant.getRank() : rank;
+			WorkspaceRole nextRole = role == null ? grant.getRole() : role;
+			if (nextRank == grant.getRank() && nextRole == grant.getRole()) return null;
+			if (hasRankGrant(node.getId(), grant.getOrgUnitId(), nextRank, nextRole, grantId)) throw conflict();
+			boolean reduced = nextRank.order() < grant.getRank().order() || nextRole.ordinal() < grant.getRole().ordinal();
+			Map<String, Object> before = rankGrantSnapshot(grant);
+			if (rank != null) grant.changeRank(rank);
+			else grant.changeRole(role);
+			rankGrants.saveAndFlush(grant);
+			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_REPLACED, AuthorizationAuditTargetKind.POLICY,
+					rankPolicyRef(grant), node.getId(), before, rankGrantSnapshot(grant));
+			return new RankGrantChange(node.getId(), reduced);
+		});
+		if (change != null) refresh.publish(tenantId, change.reduced() ? Set.of(change.nodeId()) : Set.of(), null);
+	}
+
+	public void removeRankGrant(Actor actor, UUID grantId) {
+		UUID tenantId = preauthorizedRankGrant(actor, grantId);
+		UUID nodeId = transactions.execute(status -> {
+			Tenant tenant = lock(tenantId);
+			RankGrant grant = rankGrant(grantId, tenantId);
+			WorkspaceNode node = node(grant.getWorkspaceNodeId(), tenantId);
+			manage.require(actor.subject(), node);
+			undeclaredRankGrant(declared(tenant), node, grant);
+			Map<String, Object> before = rankGrantSnapshot(grant);
+			rankGrants.delete(grant);
+			rankGrants.flush();
+			audit(actor, tenantId, AuthorizationAuditEventKind.POLICY_REMOVED, AuthorizationAuditTargetKind.POLICY,
+					rankPolicyRef(grant), node.getId(), before, null);
+			return node.getId();
+		});
+		refresh.publish(tenantId, Set.of(nodeId), null);
+	}
+
+	private record RankGrantChange(UUID nodeId, boolean reduced) { }
+
 	public void moveCollabThread(Actor actor, UUID threadId, UUID destinationId) {
 		required(destinationId);
 		Thr existing = threads.findById(threadId).orElseThrow(WorkspaceManagementService::notFound);
@@ -432,6 +534,10 @@ public class WorkspaceManagementService {
 		WorkspaceGrant target = grants.findById(grantId).orElseThrow(WorkspaceManagementService::notFound);
 		return preauthorized(actor, target.getWorkspaceNodeId(), true);
 	}
+	private UUID preauthorizedRankGrant(Actor actor, UUID grantId) {
+		RankGrant target = rankGrants.findById(grantId).orElseThrow(WorkspaceManagementService::notFound);
+		return preauthorized(actor, target.getWorkspaceNodeId(), true);
+	}
 	private Tenant lock(UUID tenantId) {
 		Tenant current = tenants.findById(tenantId).orElseThrow(WorkspaceManagementService::notFound);
 		return lock(current.getKey());
@@ -446,6 +552,10 @@ public class WorkspaceManagementService {
 	}
 	private WorkspaceGrant grant(UUID id, UUID tenantId) {
 		return grants.findById(id).filter(value -> value.getTenantId().equals(tenantId))
+				.orElseThrow(WorkspaceManagementService::notFound);
+	}
+	private RankGrant rankGrant(UUID id, UUID tenantId) {
+		return rankGrants.findById(id).filter(value -> value.getTenantId().equals(tenantId))
 				.orElseThrow(WorkspaceManagementService::notFound);
 	}
 	/**
@@ -472,6 +582,33 @@ public class WorkspaceManagementService {
 		String orgKey = orgUnits.findById(grant.getOrgUnitId()).orElseThrow(WorkspaceManagementService::conflict).getKey();
 		if (declared.get().grants().stream().anyMatch(spec -> spec.node().equals(nodeKey) && spec.orgUnit().equals(orgKey)
 				&& spec.role().equals(grant.getRole().name()))) throw conflict();
+	}
+	private void undeclaredRankGrant(Optional<RbacBootstrapSpec.TenantSpec> declared, WorkspaceNode node,
+			RankGrant grant) {
+		if (isDeclaredRankGrant(declared, node, grant)) throw conflict();
+	}
+	private boolean isDeclaredRankGrant(Optional<RbacBootstrapSpec.TenantSpec> declared, WorkspaceNode node,
+			RankGrant grant) {
+		if (declared.isEmpty()) return false;
+		String orgKey = grant.getOrgUnitId() == null ? null : orgUnits.findById(grant.getOrgUnitId())
+				.orElseThrow(WorkspaceManagementService::conflict).getKey();
+		return isDeclaredRankGrant(declared, node, grant, orgKey);
+	}
+	private static boolean isDeclaredRankGrant(Optional<RbacBootstrapSpec.TenantSpec> declared, WorkspaceNode node,
+			RankGrant grant, String orgKey) {
+		return declared.get().rankGrants().stream().anyMatch(spec -> spec.node().equals(node.getKey())
+				&& Objects.equals(spec.orgUnit(), orgKey) && spec.rank().equals(grant.getRank().name())
+				&& spec.role().equals(grant.getRole().name()));
+	}
+	private static String orgKey(Map<UUID, String> orgKeys, UUID orgUnitId) {
+		String key = orgKeys.get(orgUnitId);
+		if (key == null) throw conflict();
+		return key;
+	}
+	private boolean hasRankGrant(UUID nodeId, UUID orgUnitId, Rank rank, WorkspaceRole role, UUID except) {
+		return rankGrants.findByWorkspaceNodeId(nodeId).stream().anyMatch(grant ->
+				Objects.equals(grant.getOrgUnitId(), orgUnitId) && grant.getRank() == rank && grant.getRole() == role
+						&& !grant.getId().equals(except));
 	}
 	/** 같은 노드·org-unit·역할의 부여가 이미 있나(except는 자기 자신). 있으면 uq_wrk_grn_policy 위반이 500이 되므로 먼저 409로 막는다. */
 	private boolean hasGrant(UUID nodeId, UUID orgUnitId, WorkspaceRole role, UUID except) {
@@ -530,6 +667,16 @@ public class WorkspaceManagementService {
 		ref.put("wrk_node_id", grant.getWorkspaceNodeId());
 		return ref;
 	}
+	private Map<String, Object> rankPolicyRef(RankGrant grant) {
+		Map<String, Object> ref = new LinkedHashMap<>();
+		ref.put("rank_grn_id", grant.getId());
+		ref.put("org_unit_key", grant.getOrgUnitId() == null ? null : orgUnits.findById(grant.getOrgUnitId())
+				.orElseThrow(WorkspaceManagementService::conflict).getKey());
+		ref.put("rank", grant.getRank().name());
+		ref.put("role", grant.getRole().name());
+		ref.put("wrk_node_id", grant.getWorkspaceNodeId());
+		return ref;
+	}
 	private static Map<String, Object> orgUnitRef(OrgUnit unit) {
 		Map<String, Object> ref = new LinkedHashMap<>();
 		ref.put("org_unit_key", unit.getKey());
@@ -552,6 +699,16 @@ public class WorkspaceManagementService {
 		snapshot.put("id", grant.getId());
 		snapshot.put("tnn_id", grant.getTenantId());
 		snapshot.put("org_unit_id", grant.getOrgUnitId());
+		snapshot.put("role", grant.getRole().name());
+		snapshot.put("wrk_node_id", grant.getWorkspaceNodeId());
+		return snapshot;
+	}
+	private static Map<String, Object> rankGrantSnapshot(RankGrant grant) {
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("id", grant.getId());
+		snapshot.put("tnn_id", grant.getTenantId());
+		snapshot.put("org_unit_id", grant.getOrgUnitId());
+		snapshot.put("rank", grant.getRank().name());
 		snapshot.put("role", grant.getRole().name());
 		snapshot.put("wrk_node_id", grant.getWorkspaceNodeId());
 		return snapshot;

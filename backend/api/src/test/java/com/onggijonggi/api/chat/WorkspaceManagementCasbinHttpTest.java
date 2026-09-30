@@ -133,6 +133,42 @@ class WorkspaceManagementCasbinHttpTest extends PostgresSpringTestBase {
 	}
 
 	@Test
+	void rankGrantEndpointsEnforceManageAndRefreshCasbin() {
+		UUID project = created(post(hrAdmin, List.of("USER"), "/api/rbac/workspaces",
+				Map.of("parentId", hr.toString(), "kind", "WORK", "name", "Rank project")));
+		String path = "/api/rbac/workspaces/" + project + "/rank-grants";
+		post(opsMember, List.of("USER"), path, Map.of("rank", "S", "role", "VIEWER"))
+				.expectStatus().isEqualTo(HttpStatus.FORBIDDEN);
+		post(hrAdmin, List.of("USER"), path, Map.of("role", "VIEWER"))
+				.expectStatus().isBadRequest();
+		post(hrAdmin, List.of("USER"), path, Map.of("rank", "S"))
+				.expectStatus().isBadRequest();
+		post(hrAdmin, List.of("USER"), path, Map.of("rank", "UNKNOWN", "role", "VIEWER"))
+				.expectStatus().isBadRequest();
+
+		UUID rule = created(post(hrAdmin, List.of("USER"), path, Map.of("rank", "S", "role", "VIEWER")));
+		assertThat(authorizer.canView(opsMember, project).block()).isTrue();
+		client.get().uri(path).header(HttpHeaders.AUTHORIZATION, bearer(opsMember, List.of("USER")))
+				.exchange().expectStatus().isEqualTo(HttpStatus.FORBIDDEN);
+		client.get().uri(path).header(HttpHeaders.AUTHORIZATION, bearer(hrAdmin, List.of("USER")))
+				.exchange().expectStatus().isOk().expectBody().jsonPath("$[0].id").isEqualTo(rule.toString())
+				.jsonPath("$[0].declared").isEqualTo(false);
+
+		client.patch().uri("/api/rbac/rank-grants/" + rule + "/role")
+				.header(HttpHeaders.AUTHORIZATION, bearer(hrAdmin, List.of("USER")))
+				.contentType(MediaType.APPLICATION_JSON).body(Map.of("role", "CONTRIBUTOR"))
+				.exchange().expectStatus().isNoContent();
+		client.patch().uri("/api/rbac/rank-grants/" + rule + "/rank")
+				.header(HttpHeaders.AUTHORIZATION, bearer(hrAdmin, List.of("USER")))
+				.contentType(MediaType.APPLICATION_JSON).body(Map.of("rank", "B"))
+				.exchange().expectStatus().isNoContent();
+		assertThat(authorizer.canView(opsMember, project).block()).isFalse();
+		client.delete().uri("/api/rbac/rank-grants/" + rule)
+				.header(HttpHeaders.AUTHORIZATION, bearer(hrAdmin, List.of("USER")))
+				.exchange().expectStatus().isNoContent();
+	}
+
+	@Test
 	void auditRowsCarryTheResponseTraceIdAndTheBootstrapKeyShape() {
 		String traceId = post(hrAdmin, List.of("USER"), "/api/rbac/workspaces",
 				Map.of("parentId", hr.toString(), "kind", "WORK", "name", "추적"))
