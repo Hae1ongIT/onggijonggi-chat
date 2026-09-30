@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,7 @@ import reactor.core.publisher.Sinks;
 import reactor.test.scheduler.VirtualTimeScheduler;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -693,6 +695,160 @@ class ThreadMessageDispatcherTest {
 	}
 
 	/** 앞 턴이 있으면 뒤 턴은 기다린다는 것을 방에 알리고, 기다리는 중에 취소하면 큐에서 빠진다. */
+	@Test
+	void membershipRevocationCancelsTheSubjectsActiveCollabTurn() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+
+		awaitTrue(upstreamCancelled);
+		assertThat(upstreamCancelled).isTrue();
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.contains(ChatAnswerStatus.DONE);
+	}
+
+	@Test
+	void revocationDuringCompletionDoesNotEmitASecondTerminalFrame() {
+		AtomicReference<Runnable> revokeOnDone = new AtomicReference<>();
+		AtomicBoolean triggered = new AtomicBoolean();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+				boolean broadcast = super.broadcastIfCurrent(threadId, generation, frame);
+				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE
+						&& triggered.compareAndSet(false, true)) revokeOnDone.get().run();
+				return broadcast;
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("answer"));
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		revokeOnDone.set(() -> dispatcher.cancelCollabTurnsFrom(room.participant.subject()));
+
+		dispatcher.dispatch(command(room, "@AI finish", UUID.randomUUID()), room.membership.generation());
+
+		awaitTrue(triggered);
+		assertThat(triggered).isTrue();
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.DONE);
+	}
+
+	@Test
+	void revocationWaitsForInProgressDeltaBeforeSendingTerminalFrame() throws Exception {
+		CountDownLatch streamingEntered = new CountDownLatch(1);
+		CountDownLatch releaseStreaming = new CountDownLatch(1);
+		CountDownLatch revocationStarted = new CountDownLatch(1);
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.STREAMING) {
+					streamingEntered.countDown();
+					try {
+						releaseStreaming.await(2, TimeUnit.SECONDS);
+					} catch (InterruptedException error) {
+						Thread.currentThread().interrupt();
+					}
+				}
+				return super.broadcastIfCurrent(threadId, generation, frame);
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(source.asFlux());
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+		try {
+			dispatcher.dispatch(command(room, "@AI race", UUID.randomUUID()), room.membership.generation());
+			verify(llm, timeout(1000)).streamChat(any());
+			Future<?> emission = executor.submit(() -> source.tryEmitNext("delta"));
+			assertThat(streamingEntered.await(1, TimeUnit.SECONDS)).isTrue();
+			Future<?> revocation = executor.submit(() -> {
+				revocationStarted.countDown();
+				dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+			});
+			assertThat(revocationStarted.await(1, TimeUnit.SECONDS)).isTrue();
+			assertThatThrownBy(() -> revocation.get(100, TimeUnit.MILLISECONDS))
+					.isInstanceOf(TimeoutException.class);
+			releaseStreaming.countDown();
+			emission.get(2, TimeUnit.SECONDS);
+			revocation.get(2, TimeUnit.SECONDS);
+			awaitFrameCount(room.frames, 3);
+			assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+					.extracting(frame -> ((ChatAnswerFrame) frame).status())
+					.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.DONE);
+		} finally {
+			releaseStreaming.countDown();
+			executor.shutdownNow();
+		}
+	}
+
+	/** 권한 회수는 1:1 턴을 건드리지 않는다(#299) — 1:1은 워크스페이스 권한이 아니라 소유자 계약으로 지킨다. */
+	@Test
+	void membershipRevocationLeavesTheSubjectsDirectTurnRunning() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+
+		// 취소는 호출 안에서 동기로 일어나므로, 호출이 끝났는데 끊기지 않았다면 건드리지 않은 것이다.
+		assertThat(upstreamCancelled).isFalse();
+	}
+
+	/** 같은 협업방이라도 다른 사람이 시작한 턴은 그대로 둔다 — 권한을 잃은 사람의 턴만 취소한다. */
+	@Test
+	void membershipRevocationLeavesOtherPeoplesCollabTurnsRunning() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancelCollabTurnsFrom("someone-else");
+
+		assertThat(upstreamCancelled).isFalse();
+	}
+
+	@Test
+	void membershipRevocationCancelsTheSubjectsQueuedCollabTurn() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.never());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		UUID queuedTurnId = UUID.randomUUID();
+
+		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.dispatch(command(room, "@AI queued", queuedTurnId), room.membership.generation());
+		awaitFrameCount(room.frames, 3);
+
+		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
+
+		assertThat(room.frames).contains(new ChatQueuedFrame(room.threadId, queuedTurnId, ChatQueuedStatus.CANCELLED));
+		verify(llm, times(1)).streamChat(any());
+	}
+
 	@Test
 	void announcesQueuedTurnsAndDropsOneCancelledWhileWaiting() {
 		TestRoom room = new TestRoom();

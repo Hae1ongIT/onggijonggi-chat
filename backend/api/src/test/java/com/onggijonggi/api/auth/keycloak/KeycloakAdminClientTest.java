@@ -191,15 +191,15 @@ class KeycloakAdminClientTest {
 
 	/** 절체 검증은 활성 사용자를 100건씩 끝까지 읽는다 — 첫 페이지에서 멈추면 뒤 사용자가 대조에서 조용히 빠진다. */
 	@Test
-	void listsEnabledTenantUsersAcrossPagesUntilAShortPage() {
+	void listsEnabledUserSubjectsAcrossPagesUntilAShortPage() {
 		List<String> firstValues = new ArrayList<>();
 		KeycloakAdminClient client = clientServingUserPages(130, firstValues);
 
-		List<KeycloakTenantUser> users = client.listEnabledTenantUsers().block();
+		List<String> users = client.listEnabledUserSubjects().block();
 
 		assertThat(users).hasSize(130);
-		assertThat(users.get(0).subject()).isEqualTo("user-0");
-		assertThat(users.get(129).subject()).isEqualTo("user-129");
+		assertThat(users.get(0)).isEqualTo("user-0");
+		assertThat(users.get(129)).isEqualTo("user-129");
 		assertThat(firstValues).containsExactly("0", "100");
 		assertThat(tokenRequests.get()).as("페이지마다 토큰을 새로 받지 않는다").isEqualTo(1);
 	}
@@ -210,7 +210,7 @@ class KeycloakAdminClientTest {
 		List<String> firstValues = new ArrayList<>();
 		KeycloakAdminClient client = clientServingUserPages(100, firstValues);
 
-		assertThat(client.listEnabledTenantUsers().block()).hasSize(100);
+		assertThat(client.listEnabledUserSubjects().block()).hasSize(100);
 		assertThat(firstValues).containsExactly("0", "100");
 	}
 
@@ -219,24 +219,24 @@ class KeycloakAdminClientTest {
 		List<String> firstValues = new ArrayList<>();
 		KeycloakAdminClient client = clientServingUserPages(0, firstValues);
 
-		assertThat(client.listEnabledTenantUsers().block()).isEmpty();
+		assertThat(client.listEnabledUserSubjects().block()).isEmpty();
 		assertThat(firstValues).containsExactly("0");
 	}
 
-	/** 활성 사용자만, 전체(brief 아님) 표현으로 요청한다 — brief는 사용자 속성을 빼서 tenant를 읽을 수 없다. */
+	/** 절체 검증에는 활성 사용자 subject만 필요하므로 간략 표현을 요청한다. */
 	@Test
-	void requestsOnlyEnabledUsersWithFullRepresentation() {
+	void requestsOnlyEnabledUsersWithBriefRepresentation() {
 		KeycloakAdminClient client = clientServingUserPages(1, new ArrayList<>());
 
-		client.listEnabledTenantUsers().block();
+		client.listEnabledUserSubjects().block();
 
 		String query = lastUserRequest.get().url().getRawQuery();
-		assertThat(query).contains("enabled=true").contains("briefRepresentation=false").contains("max=100");
+		assertThat(query).contains("enabled=true").contains("briefRepresentation=true").contains("max=100");
 	}
 
-	/** tenant 속성이 없거나 복수값·빈 값이면 추측하지 않고 비운다 — 호출부가 그 사용자를 속성 불량으로 보고한다. */
+	/** 예전 tenant 속성이 있거나 잘못되어도 활성 사용자 subject 목록은 영향을 받지 않는다. */
 	@Test
-	void mapsTheTenantAttributeOnlyWhenItIsASingleNonBlankValue() {
+	void listsSubjectsRegardlessOfUnusedTenantAttributes() {
 		String page = """
 				[
 				  { "id": "single", "attributes": { "tenant": ["acme"] } },
@@ -249,15 +249,9 @@ class KeycloakAdminClientTest {
 				""";
 		KeycloakAdminClient client = clientServingRawUserPages(page);
 
-		List<KeycloakTenantUser> users = client.listEnabledTenantUsers().block();
+		List<String> subjects = client.listEnabledUserSubjects().block();
 
-		assertThat(users).extracting(KeycloakTenantUser::subject, KeycloakTenantUser::tenant).containsExactly(
-				org.assertj.core.groups.Tuple.tuple("single", Optional.of("acme")),
-				org.assertj.core.groups.Tuple.tuple("none", Optional.empty()),
-				org.assertj.core.groups.Tuple.tuple("no-attributes", Optional.empty()),
-				org.assertj.core.groups.Tuple.tuple("multiple", Optional.empty()),
-				org.assertj.core.groups.Tuple.tuple("blank", Optional.empty()),
-				org.assertj.core.groups.Tuple.tuple("empty-list", Optional.empty()));
+		assertThat(subjects).containsExactly("single", "none", "no-attributes", "multiple", "blank", "empty-list");
 	}
 
 	/** 두 번째 페이지가 실패하면 앞 페이지만 돌려주지 않고 오류를 전파한다 — 일부만 대조한 결과를 통과로 오해하지 않게 한다. */
@@ -274,7 +268,7 @@ class KeycloakAdminClientTest {
 		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
 				Duration.ofMinutes(5));
 
-		StepVerifier.create(client.listEnabledTenantUsers()).expectError().verify();
+		StepVerifier.create(client.listEnabledUserSubjects()).expectError().verify();
 	}
 
 	/** total명의 사용자를 100건 단위로 나눠 주는 Keycloak을 흉내 낸다. 요청마다 `first` 값을 기록한다. */

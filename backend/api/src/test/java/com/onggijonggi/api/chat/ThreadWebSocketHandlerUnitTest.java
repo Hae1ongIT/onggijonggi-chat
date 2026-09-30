@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscription;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
@@ -23,6 +24,8 @@ import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -109,6 +112,30 @@ class ThreadWebSocketHandlerUnitTest {
 		handler.handle(session).block();
 
 		assertThat(sent.get()).contains("\"type\":\"error\"", "\"code\":\"INTERNAL_ERROR\"", "\"threadId\":null");
+		verify(session).close(CloseStatus.NORMAL);
+	}
+
+	@Test
+	void sendsForbiddenInsteadOfInternalErrorForInactiveUser() {
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		AtomicReference<String> sent = new AtomicReference<>();
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> "inactive-user"));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("inactive-user"))
+				.thenReturn(Mono.error(new ResponseStatusException(HttpStatus.FORBIDDEN)));
+		stubTextMessages(session);
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(
+				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+				.doOnNext(message -> sent.set(message.getPayloadAsText())).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		handler(registry, provisioning).handle(session).block();
+
+		assertThat(sent.get()).contains("\"type\":\"error\"", "\"code\":\"FORBIDDEN\"");
 		verify(session).close(CloseStatus.NORMAL);
 	}
 
@@ -211,6 +238,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.COLLAB)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(membership.canEnterWorkspace(any(), any())).thenReturn(Mono.just(true));
 		return membership;
@@ -220,6 +248,7 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		return membership;
@@ -321,6 +350,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any(), any()))
 				.thenThrow(new IllegalStateException("database unavailable"));
@@ -356,6 +386,7 @@ class ThreadWebSocketHandlerUnitTest {
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
 		ThreadWebSocketHandler handler = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				new CollabAuthorizationRevoker(registry, dispatcher),
 				provisioning, membership, directChatTurnService, Clock.systemUTC(), WINDOW_SECONDS,
 				MESSAGES_PER_WINDOW);
 
@@ -389,6 +420,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.canUseDirect(any(), any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any(), any()))
 				.thenReturn(new DirectChatTurnService.StoredTurn(humanMsgId, 0L, agentMsgId, threadId, 1L, true,
@@ -419,6 +451,7 @@ class ThreadWebSocketHandlerUnitTest {
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
 		ThreadWebSocketHandler handler = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				new CollabAuthorizationRevoker(registry, dispatcher),
 				provisioning, membership, directChatTurnService, Clock.systemUTC(), WINDOW_SECONDS,
 				MESSAGES_PER_WINDOW);
 
@@ -570,6 +603,7 @@ class ThreadWebSocketHandlerUnitTest {
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
 		ThreadWebSocketHandler handler = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				new CollabAuthorizationRevoker(registry, dispatcher),
 				provisioning, membership, mock(DirectChatTurnService.class), Clock.systemUTC(), WINDOW_SECONDS,
 				MESSAGES_PER_WINDOW);
 
@@ -633,8 +667,43 @@ class ThreadWebSocketHandlerUnitTest {
 		assertThat(sent).noneMatch(frame -> frame.contains("\"type\":\"chat.message\""));
 	}
 
+	@Test
+	void refusesCollabSubscriptionRevokedAfterTheWorkspaceCheckStarted() {
+		UUID threadId = UUID.randomUUID();
+		ThreadMembershipService membership = admittingMembership();
+		List<String> sent = runFrames(membership, revoker ->
+				when(membership.canEnterWorkspace(any(), any())).thenReturn(Mono.fromSupplier(() -> {
+					revoker.revoke("collab-member");
+					return true;
+				})), WsTestExchange.subscribeFrame(threadId));
+
+		assertThat(sent).anyMatch(frame -> frame.contains("\"code\":\"FORBIDDEN\""));
+		assertThat(sent).noneMatch(frame -> frame.contains("presence.snapshot"));
+	}
+
+	@Test
+	void refusesCollabMessageRevokedAfterTheWorkspaceCheckStarted() {
+		UUID threadId = UUID.randomUUID();
+		ThreadMembershipService membership = admittingMembership();
+		List<String> sent = runFrames(membership, revoker ->
+				when(membership.canEnterWorkspace(any(), any())).thenReturn(Mono.just(true),
+						Mono.fromSupplier(() -> {
+							revoker.revoke("collab-member");
+							return true;
+						})), WsTestExchange.subscribeFrame(threadId),
+				"{\"type\":\"chat.message\",\"threadId\":\"" + threadId + "\",\"content\":\"hello\"}");
+
+		assertThat(sent).anyMatch(frame -> frame.contains("\"code\":\"FORBIDDEN\""));
+		assertThat(sent).noneMatch(frame -> frame.contains("\"type\":\"chat.message\""));
+	}
+
 	/** 인바운드 프레임을 차례로 넣고 나간 프레임을 모은다. */
 	private static List<String> runFrames(ThreadMembershipService membership, String... frames) {
+		return runFrames(membership, ignored -> {}, frames);
+	}
+
+	private static List<String> runFrames(ThreadMembershipService membership,
+			Consumer<CollabAuthorizationRevoker> configure, String... frames) {
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
 		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
 		WebSocketSession session = mock(WebSocketSession.class);
@@ -654,7 +723,10 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
-		new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher, provisioning, membership,
+		CollabAuthorizationRevoker revoker = new CollabAuthorizationRevoker(registry, dispatcher);
+		configure.accept(revoker);
+		new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				revoker, provisioning, membership,
 				mock(DirectChatTurnService.class), Clock.systemUTC(), WINDOW_SECONDS, MESSAGES_PER_WINDOW)
 				.handle(session).block();
 		return sent;
@@ -694,7 +766,8 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
-		return new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher, provisioning,
+		return new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				new CollabAuthorizationRevoker(registry, dispatcher), provisioning,
 				admittingMembership(), directChatTurnService, Clock.systemUTC(), WINDOW_SECONDS, messagesPerWindow);
 	}
 

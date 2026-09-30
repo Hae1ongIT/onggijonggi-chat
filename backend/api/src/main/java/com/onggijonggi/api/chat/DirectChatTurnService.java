@@ -144,10 +144,13 @@ public class DirectChatTurnService {
 		return key.getCreatedAt().isBefore(Instant.now().minus(IDEMPOTENCY_KEY_TTL));
 	}
 
-	/** 새 1:1은 common에 둔다. common을 정할 수 없는 배포(트리 없음 등)에서는 워크스페이스 없이 만든다. */
+	/**
+	 * 새 1:1은 common에 둔다. 판정이 켜져 있는데 요청자의 common을 정할 수 없으면(배정 없음 등) 403으로 만들지 않는다(#299).
+	 * 판정이 꺼져 있고 common을 정할 수 없는 배포(트리 없음 등)에서는 워크스페이스 없이 만든다.
+	 */
 	private StoredTurn create(UUID threadId, UUID userId, String content, String title, String idempotencyKey) {
 		Thr direct = Thr.direct(threadId, userId, title);
-		threadWorkspaceService.directPlacementBlocking()
+		threadWorkspaceService.directPlacementBlocking(userId)
 				.ifPresent(common -> direct.placeIn(common.getTenantId(), common.getId()));
 		Thr thread = thrRepository.save(direct);
 		ThrMbr owner = thrMbrRepository.save(new ThrMbr(threadId, userId, ThrMbrRole.OWNER, userId));

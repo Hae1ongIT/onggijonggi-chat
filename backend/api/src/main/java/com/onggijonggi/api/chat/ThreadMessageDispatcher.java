@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -213,7 +214,7 @@ public class ThreadMessageDispatcher {
 				? fetchContextOnlyBlocking(command.threadId())
 				: persistHumanMessageAndFetchContext(msgId, seq, command);
 		PendingTurn pendingTurn = new PendingTurn(command.threadId(), key.roomGeneration(), queued.prompt(),
-				command.traceId(), TurnRef.of(command.turnId(), command.connectionId()), command.model(), context,
+				command.traceId(), command.fromSubject(), TurnRef.of(command.turnId(), command.connectionId()), command.model(), context,
 				direct ? reserved : null, queued.terminalPersisted());
 		ActiveTurn turnToStart = null;
 		boolean admitted = false;
@@ -451,6 +452,7 @@ public class ThreadMessageDispatcher {
 			// state.active는 비우지 않는다 — advance()가 "끝난 턴이 아직 활성인가"로 경합을 거르므로,
 			// 여기서 비우면 다음 대기 턴이 시작되지 않는다.
 			activeTurn = state.active;
+			if (!activeTurn.claimTerminal()) return;
 		}
 
 		activeTurn.subscription.dispose();
@@ -459,6 +461,51 @@ public class ThreadMessageDispatcher {
 				modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false,
 				direct ? ChatAnswerStatus.CANCELLED : ChatAnswerStatus.DONE));
 		advance(key, state, activeTurn);
+	}
+
+	/**
+	 * 그 사람이 시작한 협업방 AI 턴만 취소한다(권한 회수, #299) — 진행 중인 턴, 대기열, 아직 줄에 오르지 않은
+	 * 턴 모두다. 같은 방의 다른 사람 턴과 1:1(DIRECT) 턴은 건드리지 않는다. 1:1은 워크스페이스 권한이 아니라
+	 * 소유자 계약으로 지키기 때문이다.
+	 */
+	public void cancelCollabTurnsFrom(String subject) {
+		for (Map.Entry<RoomKey, RoomAiState> entry : states.entrySet()) {
+			RoomKey key = entry.getKey();
+			RoomAiState state = entry.getValue();
+			if (state.kind != ThrKind.COLLAB) {
+				continue;
+			}
+			ActiveTurn activeTurn = null;
+			List<PendingTurn> cancelledPending = new ArrayList<>();
+			synchronized (state) {
+				if (state.closed) {
+					continue;
+				}
+				if (state.active != null && subject.equals(state.active.turn.fromSubject())
+						&& state.active.claimTerminal()) {
+					activeTurn = state.active;
+				}
+				for (Iterator<PendingTurn> iterator = state.pending.iterator(); iterator.hasNext();) {
+					PendingTurn candidate = iterator.next();
+					if (subject.equals(candidate.fromSubject())) {
+						iterator.remove();
+						cancelledPending.add(candidate);
+					}
+				}
+				state.inFlight.replaceAll((ref, inFlight) -> subject.equals(inFlight.queued().command().fromSubject())
+						? inFlight.cancel() : inFlight);
+			}
+			for (PendingTurn pendingTurn : cancelledPending) {
+				broadcastQuietly(key, queuedFrame(pendingTurn, ChatQueuedStatus.CANCELLED));
+			}
+			if (activeTurn != null) {
+				activeTurn.subscription.dispose();
+				persistAgentCancellation(activeTurn);
+				broadcastQuietly(key, new ChatAnswerFrame(key.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
+						modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false, ChatAnswerStatus.DONE));
+				advance(key, state, activeTurn);
+			}
+		}
 	}
 
 	/** inFlight는 COLLAB처럼 (turnId, connectionId) 짝으로 키가 잡혀 있다 — DIRECT는 turnId만
@@ -509,8 +556,11 @@ public class ThreadMessageDispatcher {
 				})
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
-					activeTurn.content.append(delta);
-					broadcastDelta(activeTurn, delta);
+					synchronized (state) {
+						if (state.closed || activeTurn.terminalClaimed.get()) return;
+						activeTurn.content.append(delta);
+						broadcastDelta(activeTurn, delta);
+					}
 				})
 				.concatWith(Flux.defer(() -> activeTurn.hasNonBlankOutput.get()
 						? Flux.empty()
@@ -600,6 +650,7 @@ public class ThreadMessageDispatcher {
 	* closeGeneration()의 CANCELLED 시도를 무시하게 만든다.
 	*/
 	private void handleTurnComplete(RoomKey key, RoomAiState state, ActiveTurn activeTurn, String content) {
+		if (!activeTurn.claimTerminal()) return;
 		try {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
@@ -627,6 +678,7 @@ public class ThreadMessageDispatcher {
 			closeGeneration(key, state, true);
 			return;
 		}
+		if (!activeTurn.claimTerminal()) return;
 
 		String code = error instanceof OpenAIServiceException || error instanceof TurnTimeoutException
 				|| error instanceof EmptyLlmOutputException ? "MODEL_UNAVAILABLE" : "INTERNAL_ERROR";
@@ -693,7 +745,7 @@ public class ThreadMessageDispatcher {
 		state.worker.dispose();
 		if (activeTurn != null) {
 			activeTurn.subscription.dispose();
-			persistAgentCancellation(activeTurn);
+			if (activeTurn.claimTerminal()) persistAgentCancellation(activeTurn);
 		}
 		if (state.kind == ThrKind.DIRECT) {
 			pendingTurns.forEach(turn -> {
@@ -864,7 +916,7 @@ public class ThreadMessageDispatcher {
 	* ref는 취소 지목 키다(이슈 #160). model이 null이면 서버 기본값을 쓴다. reservedTurn은 DIRECT만
 	* 채운다 — `DirectChatTurnService`가 이미 만든 PENDING AGENT를 가리킨다(이슈 #162).
 	*/
-	private record PendingTurn(UUID threadId, UUID roomGeneration, String prompt, String traceId, TurnRef ref,
+	private record PendingTurn(UUID threadId, UUID roomGeneration, String prompt, String traceId, String fromSubject, TurnRef ref,
 			String model, Mono<List<Msg>> context, ChatMessageCommand.ReservedTurn reservedTurn,
 			AtomicBoolean terminalPersisted) {
 
@@ -880,6 +932,8 @@ public class ThreadMessageDispatcher {
 		private final Disposable.Swap subscription = Disposables.swap();
 
 		private final AtomicBoolean hasNonBlankOutput = new AtomicBoolean();
+
+		private final AtomicBoolean terminalClaimed = new AtomicBoolean();
 
 		private final Deque<String> leadingWhitespace = new ArrayDeque<>();
 
@@ -901,6 +955,10 @@ public class ThreadMessageDispatcher {
 
 		/** 완료/실패 저장이 이 턴에 대해 이미 한 번 시도됐는지 — 두 번째 시도는 조용히 건너뛴다. */
 		private final AtomicBoolean terminalPersisted;
+
+		boolean claimTerminal() {
+			return terminalClaimed.compareAndSet(false, true);
+		}
 
 		ActiveTurn(PendingTurn turn, SeqBlock seqBlock) {
 			this.turn = turn;

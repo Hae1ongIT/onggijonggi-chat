@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.onggijonggi.common.chat.domain.MsgIdmKey;
 import com.onggijonggi.common.chat.persistence.MsgIdmKeyRepository;
+import com.onggijonggi.common.user.AppUser;
+import com.onggijonggi.common.user.AppUserRepository;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -33,6 +35,9 @@ class DirectChatTurnServiceIntegrationTest {
 	@Autowired
 	private MsgIdmKeyRepository msgIdmKeyRepository;
 
+	@Autowired
+	private AppUserRepository appUserRepository;
+
 	/**
 	* TTL(5분)을 넘긴 키로 재시도하면 옛 행을 즉시 지우고 새 요청으로 진행해야 한다.
 	* deleteImmediatelyByUserIdAndKey(즉시 실행되는 @Modifying 삭제) 없이 일반 delete()만
@@ -42,7 +47,7 @@ class DirectChatTurnServiceIntegrationTest {
 	@Test
 	void retryingAfterTheKeyExpiresSucceedsWithoutAUniqueConstraintViolation() throws Exception {
 		UUID threadId = UUID.randomUUID();
-		UUID userId = UUID.randomUUID();
+		UUID userId = appUserRepository.save(new AppUser("idempotency-" + UUID.randomUUID())).getId();
 		String key = UUID.randomUUID().toString();
 
 		DirectChatTurnService.StoredTurn first = directChatTurnService

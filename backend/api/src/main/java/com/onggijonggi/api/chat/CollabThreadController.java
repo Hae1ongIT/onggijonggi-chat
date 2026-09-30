@@ -120,7 +120,7 @@ public class CollabThreadController {
 
 	/**
 	* 인증된 사용자는 제목과 워크스페이스로 방을 만들며, 생성 서비스가 최초 OWNER 참가를 함께 만든다.
-	* 워크스페이스는 볼 수 있는 곳이어야 한다(ThreadWorkspaceService.collabPlacement).
+	* 워크스페이스에 THREAD_CREATE 권한이 있어야 한다(ThreadWorkspaceService.collabPlacement).
 	* Idempotency-Key 헤더가 있으면(이슈 #149) 응답 유실 뒤 재시도에도 같은 방을 그대로 돌려준다 —
 	* 헤더가 없는 호출은 이 계약을 요구하지 않은 것으로 보고 기존과 동일하게 매번 새로 만든다.
 	*/
