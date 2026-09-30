@@ -37,7 +37,7 @@ const OUTCOME_LABELS: Record<string, string> = {
   UNASSIGNED: '해제',
 };
 
-export function PermissionsAdmin() {
+export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
   const [overview, setOverview] = useState<PermissionsOverview | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [savingSubject, setSavingSubject] = useState<string | null>(null);
@@ -74,13 +74,21 @@ export function PermissionsAdmin() {
   }
 
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="flex sticky top-0 items-center gap-2 border-b bg-background px-2 py-1.5">
-        <SidebarToggle />
-        <h1 className="text-sm font-semibold">권한 관리</h1>
-      </header>
+    <div className={embedded ? 'flex flex-col' : 'flex h-dvh flex-col'}>
+      {!embedded && (
+        <header className="flex sticky top-0 items-center gap-2 border-b bg-background px-2 py-1.5">
+          <SidebarToggle />
+          <h1 className="text-sm font-semibold">권한 관리</h1>
+        </header>
+      )}
 
-      <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 overflow-y-auto p-6">
+      <div
+        className={
+          embedded
+            ? 'flex flex-col gap-8'
+            : 'mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 overflow-y-auto p-6'
+        }
+      >
         <p className="rounded-lg bg-muted px-4 py-3 text-sm">
           팀·직급을 바꾸면 바로 저장되고, 아래 표가 실제 권한 판정 결과로 다시
           그려집니다. 변경과 CSV 적용은 PLATFORM_ADMIN만 할 수 있습니다.
