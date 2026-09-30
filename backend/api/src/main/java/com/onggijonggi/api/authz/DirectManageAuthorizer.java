@@ -3,7 +3,6 @@ package com.onggijonggi.api.authz;
 import com.onggijonggi.common.authz.OrgUnitMember;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
 import com.onggijonggi.common.authz.OrgUnitRepository;
-import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.RankGrant;
 import com.onggijonggi.common.authz.RankGrantRepository;
 import com.onggijonggi.common.authz.TenantRepository;
@@ -103,7 +102,7 @@ public class DirectManageAuthorizer {
 
 	private boolean isActiveOrgUnit(OrgUnitMember assignment) {
 		return orgUnits.findById(assignment.getOrgUnitId())
-				.filter(unit -> unit.getTenantId().equals(assignment.getTenantId()) && unit.getStatus() == OrgUnitStatus.ACTIVE)
+				.filter(unit -> unit.isActiveIn(assignment.getTenantId()))
 				.isPresent();
 	}
 

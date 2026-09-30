@@ -5,7 +5,6 @@ import com.onggijonggi.api.authz.WorkspaceAuthorizer;
 import com.onggijonggi.common.authz.OrgUnitMember;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
 import com.onggijonggi.common.authz.OrgUnitRepository;
-import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.Tenant;
 import com.onggijonggi.common.authz.TenantRepository;
 import com.onggijonggi.common.authz.TenantStatus;
@@ -133,7 +132,7 @@ public class ThreadWorkspaceService {
 		boolean tenantActive = tenants.findById(assignment.getTenantId())
 				.filter(tenant -> tenant.getStatus() == TenantStatus.ACTIVE).isPresent();
 		boolean unitActive = orgUnits.findById(assignment.getOrgUnitId())
-				.filter(unit -> unit.getTenantId().equals(assignment.getTenantId()) && unit.getStatus() == OrgUnitStatus.ACTIVE)
+				.filter(unit -> unit.isActiveIn(assignment.getTenantId()))
 				.isPresent();
 		return tenantActive && unitActive;
 	}
