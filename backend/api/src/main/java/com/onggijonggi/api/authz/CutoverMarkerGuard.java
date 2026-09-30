@@ -51,7 +51,13 @@ public class CutoverMarkerGuard implements SmartLifecycle {
 			Integer count = jdbc.queryForObject("select count(*) from ctv", Integer.class);
 			return count != null && count > 0;
 		} catch (BadSqlGrammarException tableMissing) {
-			return false;
+			String sqlState = tableMissing.getSQLException().getSQLState();
+			// PostgreSQL undefined_table와 H2의 table-not-found만 구 스키마로 취급한다.
+			// 같은 예외로 번역되는 권한 오류(42501) 등은 기동을 차단한다.
+			if ("42P01".equals(sqlState) || "42S02".equals(sqlState) || "42S04".equals(sqlState)) {
+				return false;
+			}
+			throw tableMissing;
 		}
 	}
 }

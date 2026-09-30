@@ -37,9 +37,9 @@ import reactor.core.scheduler.Schedulers;
 
 /**
  * Class Name : ThreadWorkspaceService.java
- * Description : 03·CORE 방이 어느 워크스페이스에 놓이는지를 정한다. 협업방은 만드는 사람이 고르고(볼 수 있는 곳만),
+ * Description : 03·CORE 방이 어느 워크스페이스에 놓이는지를 정한다. 협업방은 만드는 사람이 고르고(THREAD_CREATE가 있는 곳만),
  *               1:1은 common에 둔다. 사람이 볼 수 있는 워크스페이스 목록과 협업방 목록 거르기도 여기서 한다.
- *               판정은 모두 {@link WorkspaceAuthorizer#canView}에 맡기고 흉내 내지 않는다.
+ *               조회는 {@link WorkspaceAuthorizer#canView}, 생성은 THREAD_CREATE 판정에 맡긴다.
  *
  *               워크스페이스 트리는 bootstrap이 만든다. 모든 Thread는 Tenant·워크스페이스에 놓이므로(절체 뒤 NOT NULL) 방을
  *               워크스페이스 없이 만들지 않는다. 설정이 없는 기본 배포도 bootstrap이 Tenant 하나와 그 common을 만든다.
