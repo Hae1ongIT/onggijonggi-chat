@@ -45,6 +45,11 @@ public final class CasbinPolicy {
 	private CasbinPolicy() {
 	}
 
+	/** 그 role이 이 액션을 포함하나. 규칙 펼치기와 같은 표를 쓴다 — Casbin 밖에서 판정하는 곳도 뜻이 갈라지지 않게 한다. */
+	public static boolean roleAllows(WorkspaceRole role, String action) {
+		return ROLE_ACTIONS.get(role).contains(action);
+	}
+
 	/** Casbin p 정책 한 행. 순서대로 sub_rule, obj(wrk_node.id), act다. */
 	public record Rule(String subjectRule, String object, String action) {
 
