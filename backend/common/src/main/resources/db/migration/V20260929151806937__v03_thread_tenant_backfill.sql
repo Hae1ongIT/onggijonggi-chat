@@ -12,7 +12,7 @@ begin
     if exists (select 1 from thr) then
         select count(*) into active_count from tnn where status = 'ACTIVE';
         if active_count <> 1 then
-            raise exception 'thread cutover requires exactly one ACTIVE tenant, found %; run the RBAC bootstrap first: start the app once with spring.flyway.enabled=false so it creates the tenant, then migrate again', active_count;
+            raise exception 'thread cutover requires exactly one ACTIVE tenant, found %; run the RBAC bootstrap first: start the app once with spring.flyway.target=20260928080757930 (SPRING_FLYWAY_TARGET) so it creates the tenant, then migrate again', active_count;
         end if;
         select id into target_tenant from tnn where status = 'ACTIVE';
         select count(*) into active_count

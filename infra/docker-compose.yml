@@ -201,8 +201,8 @@ services:
       - "8090:8090"
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILE:-prod}
-      # v0.2에서 올릴 때 한 번만 false로 둔다(INSTALL.md「v0.2에서 올릴 때」). 평소에는 건드리지 않는다.
-      SPRING_FLYWAY_ENABLED: ${SPRING_FLYWAY_ENABLED:-true}
+      # v0.2에서 올릴 때 한 번만 절체 migration 앞 버전으로 정한다(INSTALL.md「v0.2에서 올릴 때」). 평소에는 latest(끝까지 적용)다.
+      SPRING_FLYWAY_TARGET: ${SPRING_FLYWAY_TARGET:-latest}
       SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-appdb}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-appuser}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}

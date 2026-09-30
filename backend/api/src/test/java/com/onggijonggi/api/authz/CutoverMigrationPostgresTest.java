@@ -142,6 +142,35 @@ class CutoverMigrationPostgresTest {
 		}
 	}
 
+	@Test
+	void threadsAndActiveNodesStayConsistentInBothDirections() throws SQLException {
+		migrateAll();
+		UUID tenant = UUID.randomUUID();
+		UUID root = UUID.randomUUID();
+		UUID common = UUID.randomUUID();
+		UUID team = UUID.randomUUID();
+		UUID spare = UUID.randomUUID();
+		UUID owner = UUID.randomUUID();
+		try (Connection connection = connect()) {
+			seedTenant(connection, tenant, root, common, team);
+			execute(connection, "insert into wrk_node (id, tnn_id, prn_id, node_key, kind, name, path) values (?, ?, ?, 'spare', 'WORK', 'Spare', array[?, ?]::uuid[])", spare, tenant, root, root, spare);
+			execute(connection, "insert into app_user (id, keycloak_subj) values (?, 'guard-owner')", owner);
+			execute(connection, "insert into thr (id, kind, created_user_id, title, tnn_id, wrk_node_id) values (?, 'COLLAB', ?, 'placed', ?, ?)", UUID.randomUUID(), owner, tenant, team);
+
+			// Thread가 놓인 노드는 끌 수 없다.
+			assertThatThrownBy(() -> execute(connection, "update wrk_node set status = 'INACTIVE', inactive_at = now() where id = ?", team))
+					.isInstanceOf(SQLException.class)
+					.hasMessageContaining("a workspace with threads cannot be deactivated");
+
+			// 비어 있는 노드는 끌 수 있고, 꺼진 노드에는 Thread를 놓을 수 없다.
+			execute(connection, "update wrk_node set status = 'INACTIVE', inactive_at = now() where id = ?", spare);
+			assertThatThrownBy(() -> execute(connection, "insert into thr (id, kind, created_user_id, title, tnn_id, wrk_node_id) values (?, 'COLLAB', ?, 'late', ?, ?)", UUID.randomUUID(), owner, tenant, spare))
+					.isInstanceOf(SQLException.class)
+					.hasMessageContaining("thread requires an active workspace node");
+			assertThat(count(connection, "select count(*) from pg_trigger where tgname in ('trg_thr_node_active', 'trg_wrk_node_thr') and tgenabled = 'A'")).isEqualTo(2);
+		}
+	}
+
 	private void migrateBeforeCutover() {
 		flyway().target("20260928080757930").load().migrate();
 	}

@@ -30,7 +30,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * Description : 대화가 이미 있고 Tenant가 없는 배포(권한 기능을 켜지 않고 쓰던 배포)를 절체 migration까지 올리는 경로를 실제
  *               PostgreSQL 16에서 확인한다. 절체 migration은 기존 Thread가 있으면 유일한 ACTIVE Tenant가 있어야 하는데 Tenant는
  *               앱이 뜬 뒤 bootstrap이 만든다. 그래서 (1) Tenant 없이 migration하면 원인을 알려 주며 멈추고 아무것도 바꾸지 않는다,
- *               (2) Flyway를 끄고 새 앱을 띄워 bootstrap으로 Tenant·COMMON을 만들면, (3) 그 뒤 migration이 성공해 기존 대화를 COMMON에
+ *               (2) Flyway를 절체 migration 앞 버전까지만 적용해 새 앱을 띄워 bootstrap으로 Tenant·COMMON을 만들면, (3) 그 뒤 migration이 성공해 기존 대화를 COMMON에
  *               놓고 자식 행의 Tenant까지 채운다. 테스트 순서가 곧 운영 절차다(INSTALL.md「v0.2에서 올릴 때」).
  */
 @SpringBootTest
