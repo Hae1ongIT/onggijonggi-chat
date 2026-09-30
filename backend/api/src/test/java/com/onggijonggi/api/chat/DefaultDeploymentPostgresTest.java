@@ -77,6 +77,7 @@ class DefaultDeploymentPostgresTest {
 	void newThreadsNeedTheDefaultTenantAndLandInItsCommon() throws Exception {
 		assertThat(rbac.isEnforce()).as("기본 배포는 판정이 꺼져 있다").isFalse();
 		assertThat(jdbc.queryForObject("select count(*) from tnn", Integer.class)).isZero();
+		assertThat(jdbc.queryForObject("select count(*) from ctv", Integer.class)).as("완료 표지는 migration이 자동으로 기록하지 않는다").isZero();
 		RestTestClient client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port).build();
 		UUID user = user("default-user");
 

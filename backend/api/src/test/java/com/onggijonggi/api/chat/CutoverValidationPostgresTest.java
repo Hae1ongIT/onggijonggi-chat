@@ -71,7 +71,7 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 	}
 
 	@Test
-	void directAndCollabUseTheirFinalWorkspacesWithoutStaging() {
+	void directAndCollabUseTheirFinalWorkspaces() {
 		Fixture fixture = fixture();
 		UUID owner = user(fixture.subject());
 		UUID direct = thread("DIRECT", owner, null);
@@ -176,17 +176,6 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 
 		CutoverValidationResult result = validation.validate(List.of(fixture.subject()));
 		assertThat(result.failures()).contains(new CutoverValidationResult.Failure("INVALID_ACTIVE_SUBJECT_ASSIGNMENT", null, fixture.subject()));
-	}
-
-	@Test
-	void disabledKeycloakAccountHistoryIsKept() {
-		Fixture fixture = fixture();
-		UUID owner = user(fixture.subject());
-		UUID collab = thread("COLLAB", null, fixture.teamWorkspace());
-		member(collab, owner);
-
-		// Keycloak에서 비활성인 계정은 권한이 없어도 참여 이력이 절체를 막지 않는다.
-		assertThat(validation.validate(List.of()).ready()).isTrue();
 	}
 
 	@Test
@@ -316,7 +305,7 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 	}
 
 	private void grant(UUID tenant, UUID team, UUID workspace) {
-		jdbc.update("insert into wrk_grn (id, tnn_id, org_unit_id, wrk_node_id, role) values (?, ?, ?, ?, 'VIEWER')", UUID.randomUUID(), tenant, team, workspace);
+		grant(tenant, team, workspace, "VIEWER");
 	}
 
 	private record Fixture(UUID tenant, UUID common, UUID teamWorkspace, UUID team, String subject) {

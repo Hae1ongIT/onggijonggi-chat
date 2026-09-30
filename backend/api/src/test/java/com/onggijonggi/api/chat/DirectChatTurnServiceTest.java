@@ -76,7 +76,7 @@ class DirectChatTurnServiceTest {
 		UUID tenantId = UUID.randomUUID();
 		WorkspaceNode root = WorkspaceNode.root(tenantId, "기본");
 		WorkspaceNode common = WorkspaceNode.common(tenantId, root.getId(), root.getPath(), "공용");
-		when(threadWorkspaceService.directPlacementBlocking(userId)).thenReturn(Optional.of(common));
+		when(threadWorkspaceService.directPlacementBlocking(userId)).thenReturn(common);
 
 		DirectChatTurnService.StoredTurn turn = service.prepareOrCreateWithPendingAgentBlocking(threadId, userId,
 				"안녕", List.of(), "안녕", "key-1");

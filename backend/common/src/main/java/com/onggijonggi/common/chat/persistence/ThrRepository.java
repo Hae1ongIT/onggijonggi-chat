@@ -13,6 +13,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Class Name : ThrRepository.java
@@ -64,6 +65,7 @@ public interface ThrRepository extends JpaRepository<Thr, UUID> {
 	* 잠금·보관 같은 상태 전이만 저장한다. 읽어 둔 Thr 전체를 save(merge)하면 그사이 메시지 채번이 올린 next_seq를 옛 값으로
 	* 되돌려 seq가 중복되므로, 바뀌는 열만 갱신한다.
 	*/
+	@Transactional
 	@Modifying(clearAutomatically = true)
 	@Query("update Thr t set t.status = :status, t.lockedAt = :lockedAt, t.archivedAt = :archivedAt, t.updatedAt = :updatedAt where t.id = :id")
 	int updateLifecycle(@Param("id") UUID id, @Param("status") ThrStatus status, @Param("lockedAt") Instant lockedAt,

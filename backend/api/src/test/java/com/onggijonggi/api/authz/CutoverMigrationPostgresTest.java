@@ -1,6 +1,7 @@
 package com.onggijonggi.api.authz;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import com.onggijonggi.api.support.MigrationVersions;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
@@ -172,7 +173,7 @@ class CutoverMigrationPostgresTest {
 	}
 
 	private void migrateBeforeCutover() {
-		flyway().target("20260928080757930").load().migrate();
+		flyway().target(MigrationVersions.BEFORE_CUTOVER).load().migrate();
 	}
 
 	private void migrateAll() {

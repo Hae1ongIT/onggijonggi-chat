@@ -45,7 +45,7 @@ public class DirectChatTurnService {
 	/** 이 기간이 지난 키는 재사용하지 않는다 — thr_idm_key(#149)의 24시간보다 훨씬 짧다.
 	 * 채팅 재시도는 보통 수초 안에 일어나는 일이라 짧은 TTL로도 실제 재시도는 다 잡히고,
 	 * 너무 길면 한참 뒤 같은 내용을 진짜로 다시 보내고 싶은 사용자의 새 메시지까지 막는다. */
-	private static final Duration IDEMPOTENCY_KEY_TTL = Duration.ofMinutes(5);
+	public static final Duration IDEMPOTENCY_KEY_TTL = Duration.ofMinutes(5);
 
 	private final ThrRepository thrRepository;
 	private final ThrMbrRepository thrMbrRepository;
@@ -159,8 +159,7 @@ public class DirectChatTurnService {
 	private StoredTurn create(UUID threadId, UUID userId, String content, List<UUID> fileIds, String title,
 			String idempotencyKey) {
 		Thr direct = Thr.direct(threadId, userId, title);
-		WorkspaceNode common = threadWorkspaceService.directPlacementBlocking(userId)
-				.orElseThrow(() -> new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE));
+		WorkspaceNode common = threadWorkspaceService.directPlacementBlocking(userId);
 		direct.placeIn(common.getTenantId(), common.getId());
 		Thr thread = thrRepository.save(direct);
 		ThrMbr owner = thrMbrRepository.save(new ThrMbr(threadId, userId, ThrMbrRole.OWNER, userId));

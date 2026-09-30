@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import com.onggijonggi.api.support.MigrationVersions;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.onggijonggi.api.authz.RbacBootstrapService;
@@ -41,7 +42,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class UpgradeWithExistingThreadsPostgresTest {
 
 	/** 절체 migration 바로 앞 버전. 이 버전까지가 "올리기 전"의 스키마다. */
-	private static final String BEFORE_CUTOVER = "20260928080757930";
+	private static final String BEFORE_CUTOVER = MigrationVersions.BEFORE_CUTOVER;
 	private static final Path SETUP = tempSetupFile();
 	private static boolean legacySeeded;
 
