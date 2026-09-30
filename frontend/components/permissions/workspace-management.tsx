@@ -294,7 +294,7 @@ function WorkspaceDetails({
             change={() =>
               rbacRequest(`${workspacePath(node.id)}/deactivate`, 'POST')
             }
-            refresh={refresh}
+            refresh={refreshNodes}
           />
         )}
         {node.actions.includes('REACTIVATE') && (

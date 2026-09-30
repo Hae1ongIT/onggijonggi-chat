@@ -46,6 +46,49 @@ const node: ManagedWorkspace = {
   declared: false,
   actions: ['RENAME', 'GRANTS'],
 };
+it('비활성화 성공 뒤 이전 ACTIVE 상세를 재조회하거나 실패 경고를 띄우지 않는다', async () => {
+  api.listManagedWorkspaces.mockResolvedValue([
+    { ...node, actions: ['DEACTIVATE'] },
+  ]);
+  render(<WorkspaceManagement />);
+  const deactivate = await screen.findByRole('button', {
+    name: '하위 트리 비활성화',
+  });
+  await waitFor(() =>
+    expect((deactivate as HTMLButtonElement).disabled).toBe(false),
+  );
+  for (const fn of [
+    api.listOrganizations,
+    api.listTeamGrants,
+    api.listRankGrants,
+    api.listManagedThreads,
+  ]) {
+    fn.mockRejectedValue(new Error('비활성 노드 상세 조회 거부'));
+  }
+  api.listManagedWorkspaces.mockResolvedValue([
+    { ...node, status: 'INACTIVE', actions: ['REACTIVATE'] },
+  ]);
+  fireEvent.click(deactivate);
+  fireEvent.click(await screen.findByRole('button', { name: '확인하고 저장' }));
+  await screen.findByRole('button', { name: '대상 재활성화' });
+  await waitFor(() =>
+    expect(api.success).toHaveBeenCalledWith('하위 트리 비활성화: 변경 완료'),
+  );
+  expect(api.rbacRequest).toHaveBeenCalledWith(
+    '/api/rbac/workspaces/workspace/deactivate',
+    'POST',
+  );
+  for (const fn of [
+    api.listOrganizations,
+    api.listTeamGrants,
+    api.listRankGrants,
+    api.listManagedThreads,
+  ]) {
+    expect(fn).toHaveBeenCalledTimes(1);
+  }
+  expect(api.warning).not.toHaveBeenCalled();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
 const audit = (id: string): AuditItem => ({
   id,
   tenantId: 'tenant',
