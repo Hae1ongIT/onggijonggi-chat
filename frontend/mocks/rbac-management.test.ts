@@ -15,6 +15,61 @@ const request = (path: string, method = 'GET', body?: unknown) =>
       : {}),
   });
 
+it('overview는 해제·재배정과 권한 축소 뒤 최신 VIEW를 계산하고 COMMON을 제외한다', async () => {
+  const state = createRbacMockState();
+  const person = state.people[0];
+  const team = person.teamId;
+  const node = fixture(state.nodes.find((value) => value.kind === 'ORG'));
+  const overview = async () =>
+    (
+      await handleRbacMock(
+        request('/api/platform/rbac/admin/overview'),
+        state,
+        'both',
+      )
+    ).json();
+  await handleRbacMock(
+    request(
+      `/api/platform/rbac/admin/people/${person.subject}/assignment`,
+      'DELETE',
+    ),
+    state,
+    'both',
+  );
+  expect((await overview()).people[0].visible).toEqual([]);
+  await handleRbacMock(
+    request(
+      `/api/platform/rbac/admin/people/${person.subject}/assignment`,
+      'PUT',
+      { teamId: team, rank: 'S' },
+    ),
+    state,
+    'both',
+  );
+  const result = await overview();
+  expect(result.workspaces.map((value: { id: string }) => value.id)).toEqual([
+    node.id,
+  ]);
+  expect(result.people[0].visible).toEqual([node.id]);
+  state.grants = state.grants.filter((grant) => grant.workspaceId !== node.id);
+  expect((await overview()).people[0].visible).toEqual([]);
+  state.ranks.push({
+    id: 'view-rank',
+    workspaceId: node.id,
+    orgUnitId: null,
+    rank: 'K',
+    role: 'VIEWER',
+    declared: false,
+  });
+  person.rank = 'TL';
+  expect((await overview()).people[0].visible).toEqual([node.id]);
+  node.status = 'INACTIVE';
+  expect((await overview()).people[0].visible).toEqual([]);
+  node.status = 'ACTIVE';
+  person.enabled = false;
+  expect((await overview()).people[0].visible).toEqual([]);
+});
+
 it('leaf 이동은 ROOT 부모·동일 부모·복원 불가 부여를 거부한다', async () => {
   for (const scenario of ['root', 'same', 'declared', 'inactive', 'no-admin']) {
     const state = createRbacMockState();

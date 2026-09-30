@@ -210,20 +210,50 @@ export async function handleRbacMock(
     method === 'GET' &&
     resource.join('/') === 'admin/overview'
   ) {
+    const displayNodes = state.nodes.filter(
+      (node) =>
+        node.status === 'ACTIVE' &&
+        node.kind !== 'ROOT' &&
+        node.kind !== 'COMMON',
+    );
+    const canView = (person: PermissionPerson, id: string) =>
+      person.enabled &&
+      person.teamId !== null &&
+      state.organizations.some(
+        (unit) => unit.id === person.teamId && unit.status === 'ACTIVE',
+      ) &&
+      (state.grants.some(
+        (grant) =>
+          grant.workspaceId === id &&
+          grant.orgUnitId === person.teamId &&
+          ROLES.includes(grant.role),
+      ) ||
+        state.ranks.some(
+          (grant) =>
+            grant.workspaceId === id &&
+            (grant.orgUnitId === null || grant.orgUnitId === person.teamId) &&
+            ROLES.includes(grant.role) &&
+            person.rank !== null &&
+            RANKS.indexOf(person.rank) >= 0 &&
+            RANKS.indexOf(person.rank) <= RANKS.indexOf(grant.rank),
+        ));
     return Response.json({
       teams: state.organizations
         .filter((unit) => unit.status === 'ACTIVE')
         .map(({ id, key, name }) => ({ id, key, name })),
       ranks: RANKS.map((code) => ({ code, label: code })),
-      workspaces: state.nodes
-        .filter((node) => node.status === 'ACTIVE' && node.kind !== 'ROOT')
-        .map((node) => ({
-          id: node.id,
-          key: node.id,
-          name: node.name,
-          depth: 1,
-        })),
-      people: state.people,
+      workspaces: displayNodes.map((node) => ({
+        id: node.id,
+        key: node.id,
+        name: node.name,
+        depth: 1,
+      })),
+      people: state.people.map((person) => ({
+        ...person,
+        visible: displayNodes
+          .filter((node) => canView(person, node.id))
+          .map((node) => node.id),
+      })),
     });
   }
   if (

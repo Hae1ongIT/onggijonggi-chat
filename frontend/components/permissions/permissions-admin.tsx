@@ -40,36 +40,64 @@ const OUTCOME_LABELS: Record<string, string> = {
 export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
   const [overview, setOverview] = useState<PermissionsOverview | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const [savingSubject, setSavingSubject] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const mutationBusy = useRef(false);
+  const sequence = useRef(0);
 
   const reload = useCallback(async () => {
+    const request = ++sequence.current;
     try {
-      setOverview(await fetchPermissionsOverview());
+      const result = await fetchPermissionsOverview();
+      if (request !== sequence.current) return;
+      setOverview(result);
       setFailed(null);
     } catch (error) {
-      setFailed(error instanceof Error ? error.message : '');
+      if (request === sequence.current) {
+        setOverview(null);
+        setFailed(error instanceof Error ? error.message : '');
+        throw error;
+      }
     }
   }, []);
 
   useEffect(() => {
-    void reload();
+    void reload().catch(() => undefined);
+    return () => {
+      ++sequence.current;
+    };
   }, [reload]);
+
+  function beginChange() {
+    if (mutationBusy.current) return false;
+    mutationBusy.current = true;
+    setSaving(true);
+    return true;
+  }
+  function endChange() {
+    mutationBusy.current = false;
+    setSaving(false);
+  }
 
   async function change(
     subject: string,
     teamId: string | null,
     rank: string | null,
   ) {
-    setSavingSubject(subject);
+    if (!beginChange()) return;
     try {
       await saveAssignment(subject, teamId, rank);
-      await reload();
+      toast.success('저장했습니다.');
+      try {
+        await reload();
+      } catch {
+        toast.warning('변경 완료, 최신 정보 조회 실패');
+      }
     } catch (error) {
       toast.error(
         `저장하지 못했습니다. ${error instanceof Error ? error.message : ''}`,
       );
     } finally {
-      setSavingSubject(null);
+      endChange();
     }
   }
 
@@ -104,15 +132,26 @@ export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
           <p className="text-sm text-muted-foreground">불러오는 중…</p>
         )}
 
+        {failed !== null && (
+          <Button onClick={() => void reload().catch(() => undefined)}>
+            목록 다시 조회
+          </Button>
+        )}
+
         {overview && (
           <>
             <AssignmentTable
               overview={overview}
-              savingSubject={savingSubject}
+              saving={saving}
               onChange={change}
             />
             <VisibilityTable overview={overview} />
-            <CsvImport onApplied={reload} />
+            <CsvImport
+              onApplied={reload}
+              changing={saving}
+              beginChange={beginChange}
+              endChange={endChange}
+            />
           </>
         )}
       </div>
@@ -122,11 +161,11 @@ export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
 
 function AssignmentTable({
   overview,
-  savingSubject,
+  saving,
   onChange,
 }: {
   overview: PermissionsOverview;
-  savingSubject: string | null;
+  saving: boolean;
   onChange: (
     subject: string,
     teamId: string | null,
@@ -146,7 +185,6 @@ function AssignmentTable({
         </thead>
         <tbody>
           {overview.people.map((person) => {
-            const saving = savingSubject === person.subject;
             return (
               <tr key={person.subject} className="border-b">
                 <td className="py-2">
@@ -273,7 +311,17 @@ function VisibilityTable({ overview }: { overview: PermissionsOverview }) {
   );
 }
 
-function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
+function CsvImport({
+  onApplied,
+  changing,
+  beginChange,
+  endChange,
+}: {
+  onApplied: () => Promise<void>;
+  changing: boolean;
+  beginChange: () => boolean;
+  endChange: () => void;
+}) {
   const [csv, setCsv] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
   const [report, setReport] = useState<ImportReport | null>(null);
@@ -282,13 +330,18 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
   const selection = useRef(0);
 
   async function applyCsv(text: string) {
+    if (!beginChange()) return;
     setBusy(true);
     try {
       const result = await importMembersCsv(text, true);
       setReport(result);
       if (result.applied) {
-        await onApplied();
         toast.success('저장했습니다.');
+        try {
+          await onApplied();
+        } catch {
+          toast.warning('변경 완료, 최신 정보 조회 실패');
+        }
       }
     } catch (error) {
       toast.error(
@@ -296,10 +349,12 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
       );
     } finally {
       setBusy(false);
+      endChange();
     }
   }
 
   async function pick(event: ChangeEvent<HTMLInputElement>) {
+    if (changing) return;
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
@@ -348,14 +403,14 @@ function CsvImport({ onApplied }: { onApplied: () => Promise<void> }) {
             accept=".csv,text/csv"
             className="hidden"
             onChange={pick}
-            disabled={busy}
+            disabled={busy || changing}
           />
         </label>
         {fileName && (
           <span className="text-sm text-muted-foreground">{fileName}</span>
         )}
         <Button
-          disabled={!canApply || busy}
+          disabled={!canApply || busy || changing}
           onClick={() => csv && applyCsv(csv)}
           size="sm"
         >
