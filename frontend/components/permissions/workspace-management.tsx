@@ -41,6 +41,7 @@ export function WorkspaceManagement() {
           ? value
           : (result[0]?.id ?? ''),
       );
+      return result;
     } catch (reason) {
       if (request === sequence.current) {
         setError(String(reason instanceof Error ? reason.message : reason));
@@ -113,7 +114,7 @@ function WorkspaceDetails({
 }: {
   node: ManagedWorkspace;
   nodes: ManagedWorkspace[];
-  refreshNodes: () => Promise<void>;
+  refreshNodes: () => Promise<ManagedWorkspace[] | undefined>;
   refreshSignal: number;
 }) {
   const [name, setName] = useState(node.name);
@@ -175,7 +176,10 @@ function WorkspaceDetails({
     };
   }, [reload, refreshSignal]);
   async function refresh() {
-    await refreshNodes();
+    const current = (await refreshNodes())?.find(
+      (value) => value.id === node.id,
+    );
+    if (!current || current.status !== 'ACTIVE') return;
     await reload();
   }
   const active = organizations.filter((value) => value.status === 'ACTIVE');

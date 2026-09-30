@@ -29,7 +29,7 @@ export function ChangeButton({
   description: string;
   disabled?: boolean;
   change: () => Promise<unknown>;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);

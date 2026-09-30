@@ -152,6 +152,49 @@ it('ROOT의 직접 관리자는 조직을 선택해도 팀 부여를 추가할 �
   expect(api.rbacRequest).not.toHaveBeenCalled();
 });
 
+it('자기 MANAGE 회수로 목록에서 사라진 노드는 상세 재조회와 장애 경고를 생략한다', async () => {
+  api.listTeamGrants.mockResolvedValue([
+    {
+      id: 'own-grant',
+      orgUnitId: 'org',
+      orgUnitName: '내 조직',
+      orgUnitStatus: 'ACTIVE',
+      role: 'ADMIN',
+      declared: false,
+    },
+  ]);
+  render(<WorkspaceManagement />);
+  await screen.findByText('내 조직 (ACTIVE)');
+  api.listManagedWorkspaces.mockResolvedValue([]);
+  for (const fn of [
+    api.listOrganizations,
+    api.listTeamGrants,
+    api.listRankGrants,
+    api.listManagedThreads,
+  ]) {
+    fn.mockRejectedValue(new Error('회수된 노드 상세 조회 거부'));
+  }
+  fireEvent.click(screen.getByRole('button', { name: '팀 부여 삭제' }));
+  fireEvent.click(await screen.findByRole('button', { name: '확인하고 저장' }));
+  await screen.findByText('현재 직접 관리 권한이 있는 Workspace가 없습니다.');
+  await waitFor(() =>
+    expect(api.success).toHaveBeenCalledWith('팀 부여 삭제: 변경 완료'),
+  );
+  expect(api.rbacRequest).toHaveBeenCalledWith(
+    '/api/rbac/grants/own-grant',
+    'DELETE',
+  );
+  for (const fn of [
+    api.listOrganizations,
+    api.listTeamGrants,
+    api.listRankGrants,
+    api.listManagedThreads,
+  ]) {
+    expect(fn).toHaveBeenCalledTimes(1);
+  }
+  expect(api.warning).not.toHaveBeenCalled();
+});
+
 it('이름 저장 실패에는 입력이 남고 성공 뒤 권한 회수에는 상세가 사라진다', async () => {
   api.rbacRequest
     .mockRejectedValueOnce(new Error('권한 거부'))

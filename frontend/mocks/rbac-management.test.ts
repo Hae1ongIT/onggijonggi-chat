@@ -14,6 +14,141 @@ const request = (path: string, method = 'GET', body?: unknown) =>
         }
       : {}),
   });
+
+it('leaf 이동은 ROOT 부모·동일 부모·복원 불가 부여를 거부한다', async () => {
+  for (const scenario of ['root', 'same', 'declared', 'inactive', 'no-admin']) {
+    const state = createRbacMockState();
+    state.rooms = [];
+    const node = fixture(state.nodes.find((value) => value.kind === 'ORG'));
+    const root = fixture(state.nodes.find((value) => value.kind === 'ROOT'));
+    state.ranks.push({
+      id: 'root-manage',
+      workspaceId: root.id,
+      orgUnitId: null,
+      rank: 'S',
+      role: 'ADMIN',
+      declared: false,
+    });
+    const oldParent = { ...node, id: 'old-parent', name: '이전 부모' };
+    const target = { ...node, id: 'new-parent', name: '새 부모' };
+    state.nodes.push(oldParent, target);
+    const grant = state.grants[0];
+    state.grants.push(
+      { ...grant, id: 'old-admin', workspaceId: oldParent.id },
+      { ...grant, id: 'new-admin', workspaceId: target.id },
+    );
+    if (scenario !== 'root') node.parentId = oldParent.id;
+    if (scenario === 'declared') grant.declared = true;
+    if (scenario === 'inactive') {
+      state.organizations.push({
+        id: 'inactive-org',
+        key: 'inactive',
+        name: '비활성 조직',
+        status: 'INACTIVE',
+        declared: false,
+      });
+      state.grants.push({
+        ...grant,
+        id: 'inactive-grant',
+        orgUnitId: 'inactive-org',
+        role: 'VIEWER',
+      });
+    }
+    if (scenario === 'no-admin') {
+      grant.role = 'VIEWER';
+      state.ranks.push({
+        id: 'rank-admin',
+        workspaceId: node.id,
+        orgUnitId: null,
+        rank: 'S',
+        role: 'ADMIN',
+        declared: false,
+      });
+    }
+    const previous = node.parentId;
+    const response = await handleRbacMock(
+      request(`/api/rbac/workspaces/${node.id}/parent`, 'PATCH', {
+        parentId:
+          scenario === 'root'
+            ? root.id
+            : scenario === 'same'
+              ? oldParent.id
+              : target.id,
+      }),
+      state,
+      'workspace',
+    );
+    expect(response.status, scenario).toBe(409);
+    expect(node.parentId).toBe(previous);
+    expect(state.audits).toHaveLength(0);
+  }
+});
+
+it('조직 생성은 필수 COMMON 부여도 같은 요청 감사로 기록한다', async () => {
+  const state = createRbacMockState();
+  const response = await handleRbacMock(
+    request('/api/platform/rbac/tenants/default/org-units', 'POST', {
+      key: 'new-team',
+      name: '새 팀',
+    }),
+    state,
+    'platform',
+  );
+  expect(response.status).toBe(201);
+  expect(state.audits.map((row) => row.eventKind)).toEqual([
+    'ORG_UNIT_CREATED',
+    'POLICY_ADDED',
+  ]);
+  expect(state.audits[1].workspaceNodeId).toBe(
+    state.nodes.find((node) => node.kind === 'COMMON')?.id,
+  );
+  expect(state.audits[1].targetRef).toMatchObject({
+    org_unit_key: 'new-team',
+    role: 'VIEWER',
+  });
+  expect(state.audits[1].beforeJson).toBeNull();
+  expect(state.audits[0].requestId).toBe(state.audits[1].requestId);
+});
+
+it('subtree 비활성화는 변경된 활성 노드마다 같은 요청 감사와 전후 상태를 남긴다', async () => {
+  const state = createRbacMockState();
+  state.rooms = [];
+  const parent = fixture(state.nodes.find((node) => node.kind === 'ORG'));
+  const child = {
+    ...parent,
+    id: 'child',
+    parentId: parent.id,
+    name: '하위 노드',
+  };
+  state.nodes.push(child, {
+    ...child,
+    id: 'already-inactive',
+    status: 'INACTIVE',
+  });
+  state.grants.push({
+    ...state.grants[0],
+    id: 'child-admin',
+    workspaceId: child.id,
+  });
+  expect(
+    (
+      await handleRbacMock(
+        request(`/api/rbac/workspaces/${parent.id}/deactivate`, 'POST'),
+        state,
+        'workspace',
+      )
+    ).status,
+  ).toBe(204);
+  expect(state.audits).toHaveLength(2);
+  expect(new Set(state.audits.map((row) => row.workspaceNodeId))).toEqual(
+    new Set([parent.id, child.id]),
+  );
+  expect(new Set(state.audits.map((row) => row.requestId)).size).toBe(1);
+  for (const row of state.audits) {
+    expect(row.beforeJson).toMatchObject({ status: 'ACTIVE' });
+    expect(row.afterJson).toMatchObject({ status: 'INACTIVE' });
+  }
+});
 it('플랫폼과 Workspace 권한을 분리하고 일반 사용자는 목록이 비어 있다', async () => {
   const state = createRbacMockState();
   expect(
@@ -392,6 +527,16 @@ it('Workspace 생성의 초기 ADMIN은 fixture가 아니라 현재 요청자 �
   expect(
     state.grants.find((grant) => grant.workspaceId === id)?.orgUnitId,
   ).toBe('new-org');
+  expect(state.audits.map((row) => row.eventKind)).toEqual([
+    'NODE_CREATED',
+    'POLICY_ADDED',
+  ]);
+  expect(state.audits[1].workspaceNodeId).toBe(id);
+  expect(state.audits[1].targetRef).toMatchObject({
+    org_unit_key: 'new-org',
+    role: 'ADMIN',
+  });
+  expect(state.audits[0].requestId).toBe(state.audits[1].requestId);
   expect(
     (
       await (

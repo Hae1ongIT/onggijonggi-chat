@@ -368,6 +368,8 @@ export async function handleRbacMock(
       );
   }
   if (method === 'GET') return error(404, 'NOT_FOUND');
+  const deactivated: { node: ManagedWorkspace; before: ManagedWorkspace }[] =
+    [];
   let body: Record<string, unknown> = {};
   try {
     if (method !== 'DELETE' && !url.pathname.endsWith('activate'))
@@ -515,6 +517,9 @@ export async function handleRbacMock(
         eventKind = 'NODE_RENAMED';
       } else if (action === 'parent') {
         const target = state.nodes.find((value) => value.id === body.parentId);
+        const oldParent = state.nodes.find(
+          (value) => value.id === currentNode.parentId,
+        );
         if (
           !target ||
           !isManager(target.id) ||
@@ -524,10 +529,26 @@ export async function handleRbacMock(
           return error(403, 'FORBIDDEN');
         if (
           target.id === currentNode.id ||
+          target.id === currentNode.parentId ||
+          target.kind === 'ROOT' ||
+          oldParent?.kind === 'ROOT' ||
           target.kind === 'COMMON' ||
           target.status !== 'ACTIVE' ||
           state.nodes.some((value) => value.parentId === nodeId) ||
           state.rooms.some((value) => value.workspaceId === nodeId)
+        )
+          return error(409, 'RBAC_STATE_CONFLICT');
+        const previous = state.grants.filter(
+          (grant) => grant.workspaceId === nodeId,
+        );
+        if (
+          !previous.some((grant) => grant.role === 'ADMIN') ||
+          previous.some(
+            (grant) =>
+              grant.declared ||
+              state.organizations.find((unit) => unit.id === grant.orgUnitId)
+                ?.status !== 'ACTIVE',
+          )
         )
           return error(409, 'RBAC_STATE_CONFLICT');
         currentNode.parentId = target.id;
@@ -562,7 +583,10 @@ export async function handleRbacMock(
         )
           return error(409, 'RBAC_STATE_CONFLICT');
         for (const node of state.nodes)
-          if (subtree.has(node.id)) node.status = 'INACTIVE';
+          if (subtree.has(node.id) && node.status === 'ACTIVE') {
+            deactivated.push({ node, before: structuredClone(node) });
+            node.status = 'INACTIVE';
+          }
         eventKind = 'NODE_DEACTIVATED';
       } else if (action === 'reactivate') {
         if (
@@ -827,16 +851,57 @@ export async function handleRbacMock(
               wrk_node_id: workspaceNodeId,
             }
           : { id: created ?? nodeId ?? resource[1] };
-  appendAudit(
-    state,
-    eventKind,
-    targetKind,
-    workspaceNodeId,
-    targetRef,
-    created ? null : before,
-    after,
-    requestId,
-  );
+  if (deactivated.length) {
+    for (const { node, before: previous } of deactivated) {
+      appendAudit(
+        state,
+        eventKind,
+        targetKind,
+        node.id,
+        { wrk_node_id: node.id },
+        previous,
+        structuredClone(node),
+        requestId,
+      );
+    }
+  } else
+    appendAudit(
+      state,
+      eventKind,
+      targetKind,
+      workspaceNodeId,
+      targetRef,
+      created ? null : before,
+      after,
+      requestId,
+    );
+  if (eventKind === 'ORG_UNIT_CREATED' || eventKind === 'NODE_CREATED') {
+    const requiredGrant = state.grants.find((grant) =>
+      eventKind === 'ORG_UNIT_CREATED'
+        ? grant.orgUnitId === created &&
+          grant.workspaceId === COMMON &&
+          grant.role === 'VIEWER'
+        : grant.workspaceId === created && grant.role === 'ADMIN',
+    );
+    if (requiredGrant)
+      appendAudit(
+        state,
+        'POLICY_ADDED',
+        'POLICY',
+        requiredGrant.workspaceId,
+        {
+          wrk_grn_id: requiredGrant.id,
+          wrk_node_id: requiredGrant.workspaceId,
+          org_unit_key: state.organizations.find(
+            (unit) => unit.id === requiredGrant.orgUnitId,
+          )?.key,
+          role: requiredGrant.role,
+        },
+        null,
+        structuredClone(requiredGrant),
+        requestId,
+      );
+  }
   if (
     eventKind === 'THREAD_MOVED' &&
     before &&
