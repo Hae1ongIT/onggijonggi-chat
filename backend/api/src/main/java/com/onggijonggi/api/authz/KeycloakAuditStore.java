@@ -83,6 +83,18 @@ public class KeycloakAuditStore {
 		return Optional.ofNullable(value).map(this::map);
 	}
 
+	/** 마지막으로 저장한 realm 역할 id→이름. roles-by-id 이벤트의 역할 이름을 되찾는 데 쓴다. */
+	public Map<String, String> roleNames() {
+		String value = jdbc.queryForObject("select role_ref_json::text from keycloak_adt_crs where id = 1", String.class);
+		Map<String, String> names = new java.util.HashMap<>();
+		if (value != null) map(value).forEach((id, name) -> names.put(id, String.valueOf(name)));
+		return names;
+	}
+
+	public void recordRoleNames(Map<String, String> names) {
+		jdbc.update("update keycloak_adt_crs set role_ref_json = ?::jsonb where id = 1", objectMapper.writeValueAsString(names));
+	}
+
 	public void recordEventsConfig(Map<String, Object> config) {
 		jdbc.update("update keycloak_adt_crs set evt_cnf_json = ?::jsonb where id = 1", json(config));
 	}

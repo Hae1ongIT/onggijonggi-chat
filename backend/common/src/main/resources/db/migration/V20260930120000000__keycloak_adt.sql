@@ -19,8 +19,8 @@ create table keycloak_adt (
     primary key (id),
     constraint keycloak_adt_evt_value check (evt_kind in (
         'ROLE_GRANTED', 'ROLE_REVOKED', 'GROUP_JOINED', 'GROUP_LEFT', 'GROUP_ROLE_GRANTED', 'GROUP_ROLE_REVOKED',
-        'ROLE_DEFINITION_CHANGED', 'GROUP_DELETED', 'MANAGEMENT_ROLE_GRANTED', 'MANAGEMENT_ROLE_REVOKED',
-        'USER_CREATED_WITH_ACCESS', 'USER_ENABLED', 'USER_DISABLED', 'USER_DELETED', 'EVENT_CONFIG_CHANGED',
+        'ROLE_DEFINITION_CHANGED', 'GROUP_MOVED', 'GROUP_DELETED', 'MANAGEMENT_ROLE_GRANTED', 'MANAGEMENT_ROLE_REVOKED',
+        'USER_CREATED_WITH_ACCESS', 'USER_ENABLED', 'USER_DISABLED', 'USER_DELETED', 'TOKEN_MAPPER_CHANGED', 'EVENT_CONFIG_CHANGED',
         'ROLE_HELD_AT_START', 'BASELINE_RECORDED')),
     -- 같은 이벤트를 두 번 읽어도 한 행. 역할이 없는 이벤트도 막도록 NULL을 같은 값으로 본다. 한 이벤트의 여러 행은
     -- 역할(role)·그룹(trg_path)으로, 이벤트 id가 없는 기준선 행은 보유자(trg_subj)로 갈린다.
@@ -51,7 +51,8 @@ for each statement execute function keycloak_adt_append_only();
 alter table keycloak_adt enable always trigger trg_keycloak_adt_append_only;
 alter table keycloak_adt enable always trigger trg_keycloak_adt_no_truncate;
 
--- 수집기 상태(커서, 마지막 성공·실패, 마지막으로 읽은 이벤트 설정). 감사 기록이 아니라 고칠 수 있다.
+-- 수집기 상태(커서, 마지막 성공·실패, 마지막으로 읽은 이벤트 설정, realm 역할 id→이름 스냅샷). 감사 기록이 아니라 고칠 수 있다.
+-- 역할 스냅샷은 roles-by-id 경로의 삭제·이름 변경 이벤트에 역할 이름이 없어서 둔다.
 create table keycloak_adt_crs (
     id              smallint     not null primary key check (id = 1),
     evt_at          timestamptz,
@@ -59,7 +60,8 @@ create table keycloak_adt_crs (
     last_run_at     timestamptz,
     last_err_at     timestamptz,
     err_text        varchar(512),
-    evt_cnf_json    jsonb
+    evt_cnf_json    jsonb,
+    role_ref_json   jsonb
 );
 
 insert into keycloak_adt_crs (id) values (1);

@@ -361,6 +361,35 @@ public class KeycloakAdminClient {
 				.defaultIfEmpty(Optional.empty()));
 	}
 
+	/** realm의 모든 계정(서비스 계정 포함)과 활성 여부. 기준선이 실효 보유자와 비활성 계정을 찾을 때 쓴다. */
+	public Mono<List<KeycloakUser>> users() {
+		return adminToken().flatMapMany(token -> pages(token, KeycloakUser.class, 0, (builder, first) -> builder
+				.path("/admin/realms/{realm}/users").queryParam("first", first).queryParam("max", PAGE)
+				.queryParam("briefRepresentation", true).build(realm))).collectList();
+	}
+
+	/** 사용자의 실효 realm 역할 이름 — 직접·그룹·복합(realm·클라이언트 경유)·기본 역할을 모두 펼친 결과다. */
+	public Mono<List<String>> effectiveRealmRoleNames(String userId) {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri("/admin/realms/{realm}/users/{id}/role-mappings/realm/composite", realm, userId)
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(KeycloakRole.class)
+				.map(KeycloakRole::name)
+				.collectList());
+	}
+
+	/** 사용자의 한 클라이언트에 대한 실효 역할 이름. */
+	public Mono<List<String>> effectiveClientRoleNames(String userId, String clientUuid) {
+		return adminToken().flatMap(token -> webClient.get()
+				.uri("/admin/realms/{realm}/users/{id}/role-mappings/clients/{client}/composite", realm, userId, clientUuid)
+				.headers(headers -> headers.setBearerAuth(token))
+				.retrieve()
+				.bodyToFlux(KeycloakRole.class)
+				.map(KeycloakRole::name)
+				.collectList());
+	}
+
 	private static final int PAGE = 100;
 
 	/** first/max로 페이지를 끝까지 읽는다. 한 페이지가 가득 차면 다음 페이지를 더 묻는다. */
@@ -391,6 +420,9 @@ public class KeycloakAdminClient {
 	}
 
 	public record KeycloakGroup(String id, String name, String path) {
+	}
+
+	public record KeycloakUser(String id, String username, Boolean enabled) {
 	}
 
 	public record KeycloakRole(String id, String name, Boolean composite, Boolean clientRole, String containerId) {

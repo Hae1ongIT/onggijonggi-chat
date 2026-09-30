@@ -106,6 +106,67 @@ final class KeycloakTestAdmin {
 		send("POST", realmPath("/roles/" + encode(role) + "/composites"), List.of(role(child)));
 	}
 
+	/** 기존 그룹을 다른 그룹 아래로 옮긴다. */
+	void moveGroupUnder(String parentId, String groupId, String name) {
+		send("POST", realmPath("/groups/" + parentId + "/children"), Map.of("id", groupId, "name", name));
+	}
+
+	/** 기존 그룹을 최상위로 뺀다. */
+	void moveGroupToTop(String groupId, String name) {
+		send("POST", realmPath("/groups"), Map.of("id", groupId, "name", name));
+	}
+
+	void renameRole(String name, String newName) {
+		send("PUT", realmPath("/roles/" + encode(name)), Map.of("name", newName));
+	}
+
+	String roleId(String name) {
+		return (String) role(name).get("id");
+	}
+
+	void deleteRoleById(String roleId) {
+		send("DELETE", realmPath("/roles-by-id/" + roleId), null);
+	}
+
+	void deleteRole(String name) {
+		send("DELETE", realmPath("/roles/" + encode(name)), null);
+	}
+
+	void addClientRoleComposite(String clientUuid, String clientRole, String realmRole) {
+		send("POST", realmPath("/clients/" + clientUuid + "/roles/" + encode(clientRole) + "/composites"),
+				List.of(role(realmRole)));
+	}
+
+	void addDefaultRole(String realmRole) {
+		addComposite("default-roles-" + realm, realmRole);
+	}
+
+	void removeDefaultRole(String realmRole) {
+		send("DELETE", realmPath("/roles/default-roles-" + realm + "/composites"), List.of(role(realmRole)));
+	}
+
+	/** partial import로 역할을 가진 사용자를 만든다. */
+	void importUserWithRole(String username, String role) {
+		send("POST", realmPath("/partialImport"), Map.of("ifResourceExists", "SKIP",
+				"users", List.of(Map.of("username", username, "enabled", true, "realmRoles", List.of(role)))));
+	}
+
+	/** 토큰에 역할을 싣는 hardcoded-role 매퍼를 클라이언트에 붙인다. */
+	void addHardcodedRoleMapper(String clientId, String role) {
+		send("POST", realmPath("/clients/" + clientUuid(clientId) + "/protocol-mappers/models"), Map.of("name", "hardcoded-" + role,
+				"protocol", "openid-connect", "protocolMapper", "oidc-hardcoded-role-mapper", "config", Map.of("role", role)));
+	}
+
+	/** realm 전체 수정(PUT realm). admin event 설정도 여기로 바꿀 수 있다. */
+	void updateRealm(Map<String, Object> changes) {
+		send("PUT", "/admin/realms/" + realm, changes);
+	}
+
+	String userId(String username) {
+		return (String) ((Map<?, ?>) list(send("GET", realmPath("/users?exact=true&username=" + encode(username)), null)).get(0))
+				.get("id");
+	}
+
 	void setAdminEvents(boolean enabled) {
 		Map<?, ?> config = object(send("GET", realmPath("/events/config"), null));
 		java.util.Map<String, Object> changed = new java.util.LinkedHashMap<>();

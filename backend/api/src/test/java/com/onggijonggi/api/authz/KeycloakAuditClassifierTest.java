@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient.KeycloakAdminEvent;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ class KeycloakAuditClassifierTest {
 
 	private static final String REALM_MANAGEMENT = "rm-uuid";
 	private static final Function<String, Optional<Boolean>> UNKNOWN = subject -> Optional.empty();
+	private static final Map<String, String> ROLES_BY_ID = Map.of("r-1", "PLATFORM_ADMIN");
 	private final KeycloakAuditClassifier classifier = new KeycloakAuditClassifier(new JsonMapper());
 
 	@Test
@@ -67,9 +69,88 @@ class KeycloakAuditClassifierTest {
 		assertThat(classify(enabledUpdate)).isEmpty();
 		assertThat(classify(disabledUpdate)).extracting(KeycloakAuditRow::kind)
 				.containsExactly(KeycloakAuditEventKind.USER_DISABLED);
-		assertThat(classifier.classify(disabledUpdate, REALM_MANAGEMENT, subject -> Optional.of(false))).isEmpty();
-		assertThat(classifier.classify(enabledUpdate, REALM_MANAGEMENT, subject -> Optional.of(false)))
+		assertThat(classifier.classify(disabledUpdate, context(subject -> Optional.of(false)))).isEmpty();
+		assertThat(classifier.classify(enabledUpdate, context(subject -> Optional.of(false))))
 				.extracting(KeycloakAuditRow::kind).containsExactly(KeycloakAuditEventKind.USER_ENABLED);
+	}
+
+	@Test
+	void movingAGroupUnderAnotherOrToTheTopIsRecorded() {
+		assertThat(classify(event("UPDATE", "groups/parent/children", "{\"id\":\"moved\",\"name\":\"x\"}")))
+				.singleElement().satisfies(row -> {
+					assertThat(row.kind()).isEqualTo(KeycloakAuditEventKind.GROUP_MOVED);
+					assertThat(row.reference()).containsEntry("groupId", "moved").containsEntry("newParentId", "parent");
+				});
+		assertThat(classify(event("UPDATE", "groups", "{\"id\":\"moved\"}"))).singleElement()
+				.satisfies(row -> assertThat(row.reference()).containsEntry("newParentId", null));
+		// 빈 하위 그룹을 새로 만드는 것은 권한을 바꾸지 않는다.
+		assertThat(classify(event("CREATE", "groups/parent/children", "{\"id\":\"new\"}"))).isEmpty();
+	}
+
+	@Test
+	void creatingRenamingAndDeletingRealmRolesIsRecordedWithNamesEvenByIdOnly() {
+		assertThat(classify(event("CREATE", "roles/PLATFORM_ADMIN", "{\"name\":\"PLATFORM_ADMIN\"}")))
+				.extracting(KeycloakAuditRow::role).containsExactly("PLATFORM_ADMIN");
+		assertThat(classify(event("UPDATE", "roles/viewer", "{\"name\":\"PLATFORM_ADMIN\"}"))).singleElement()
+				.satisfies(row -> {
+					assertThat(row.role()).isEqualTo("PLATFORM_ADMIN");
+					assertThat(row.reference()).containsEntry("before", "viewer").containsEntry("after", "PLATFORM_ADMIN");
+				});
+		// 이름이 그대로인 수정(설명 등)은 남기지 않는다.
+		assertThat(classify(event("UPDATE", "roles/viewer", "{\"name\":\"viewer\",\"description\":\"d\"}"))).isEmpty();
+		// roles-by-id 삭제에는 상세가 없다 — 저장해 둔 이름으로 되찾는다.
+		assertThat(classify(event("DELETE", "roles-by-id/r-1", null))).singleElement().satisfies(row -> {
+			assertThat(row.role()).isEqualTo("PLATFORM_ADMIN");
+			assertThat(row.reference()).containsEntry("roleId", "r-1").containsEntry("operation", "DELETE");
+		});
+	}
+
+	@Test
+	void clientRoleCompositesAreRecordedToo() {
+		String child = "[{\"name\":\"PLATFORM_ADMIN\"}]";
+
+		assertThat(classify(event("CREATE", "clients/" + REALM_MANAGEMENT + "/roles/view-users/composites", child)))
+				.singleElement().satisfies(row -> {
+					assertThat(row.kind()).isEqualTo(KeycloakAuditEventKind.ROLE_DEFINITION_CHANGED);
+					assertThat(row.role()).isEqualTo("realm-management/view-users");
+					assertThat(row.reference()).containsEntry("operation", "ADD");
+				});
+		assertThat(classify(event("DELETE", "roles-by-id/r-1/composites", child))).extracting(KeycloakAuditRow::role)
+				.containsExactly("PLATFORM_ADMIN");
+	}
+
+	@Test
+	void tokenMappersAreRecordedWithTypeAndRoleButNotTheirConfig() {
+		String mapper = "{\"name\":\"hr\",\"protocolMapper\":\"oidc-hardcoded-role-mapper\",\"config\":{\"role\":\"PLATFORM_ADMIN\",\"secret\":\"s\"}}";
+
+		assertThat(classify(event("CREATE", "clients/c1/protocol-mappers/models/m1", mapper))).singleElement()
+				.satisfies(row -> {
+					assertThat(row.kind()).isEqualTo(KeycloakAuditEventKind.TOKEN_MAPPER_CHANGED);
+					assertThat(row.role()).isEqualTo("PLATFORM_ADMIN");
+					assertThat(row.reference()).containsEntry("mapperType", "oidc-hardcoded-role-mapper")
+							.doesNotContainKey("config");
+				});
+		assertThat(classify(event("CREATE", "identity-provider/instances/ext/mappers/m2",
+				"{\"identityProviderMapper\":\"oidc-hardcoded-role-idp-mapper\",\"config\":{\"role\":\"PLATFORM_ADMIN\"}}")))
+				.extracting(KeycloakAuditRow::kind).containsExactly(KeycloakAuditEventKind.TOKEN_MAPPER_CHANGED);
+		assertThat(classify(event("DELETE", "client-scopes/s1/protocol-mappers/models/m3", null)))
+				.extracting(KeycloakAuditRow::kind).containsExactly(KeycloakAuditEventKind.TOKEN_MAPPER_CHANGED);
+	}
+
+	@Test
+	void turningAdminEventsOffThroughTheRealmIsRecordedButOtherRealmChangesAreNot() {
+		assertThat(classify(event("UPDATE", null, "{\"adminEventsEnabled\":false}"))).singleElement().satisfies(row -> {
+			assertThat(row.kind()).isEqualTo(KeycloakAuditEventKind.EVENT_CONFIG_CHANGED);
+			assertThat(row.targetPath()).isEqualTo("realm");
+			assertThat(row.reference()).containsEntry("adminEventsEnabled", false);
+		});
+		assertThat(classify(event("UPDATE", null, "{\"displayName\":\"x\"}"))).isEmpty();
+	}
+
+	@Test
+	void anAccountCreatedDisabledIsRecordedSoTurningItOnLaterShows() {
+		assertThat(classify(event("CREATE", "users/u1", "{\"username\":\"off\",\"enabled\":false}")))
+				.extracting(KeycloakAuditRow::kind).containsExactly(KeycloakAuditEventKind.USER_DISABLED);
 	}
 
 	@Test
@@ -88,21 +169,26 @@ class KeycloakAuditClassifierTest {
 	}
 
 	@Test
-	void anEventWithoutAnIdFallsBackToTimeOperationPathAndADigestOfTheDetails() {
-		KeycloakAdminEvent withoutDetails = new KeycloakAdminEvent(null, 1000L, null, "DELETE", "USER", "users/u1", null);
+	void anEventWithoutAnIdFallsBackToTimeOperationAndAShortDigest() {
 		KeycloakAdminEvent first = new KeycloakAdminEvent(null, 1000L, null, "CREATE", null, "users/u1/role-mappings/realm",
 				"[{\"name\":\"A\"}]");
 		KeycloakAdminEvent second = new KeycloakAdminEvent(null, 1000L, null, "CREATE", null, "users/u1/role-mappings/realm",
 				"[{\"name\":\"B\"}]");
+		KeycloakAdminEvent longPath = new KeycloakAdminEvent(null, 1000L, null, "DELETE", null, "roles/" + "x".repeat(400), null);
 
-		assertThat(KeycloakAuditClassifier.eventId(withoutDetails)).isEqualTo("t:1000:DELETE:users/u1");
-		// 같은 밀리초·같은 경로·같은 작업이라도 상세가 다르면 다른 이벤트다. 해시에 상세 원문은 남지 않는다.
-		assertThat(KeycloakAuditClassifier.eventId(first)).isNotEqualTo(KeycloakAuditClassifier.eventId(second))
-				.doesNotContain("name");
+		assertThat(KeycloakAuditClassifier.eventId(first)).startsWith("t:1000:CREATE:")
+				.isNotEqualTo(KeycloakAuditClassifier.eventId(second)).doesNotContain("name").doesNotContain("users");
+		// 경로를 통째로 넣지 않아 열 길이(255)를 넘지 않는다.
+		assertThat(KeycloakAuditClassifier.eventId(longPath)).hasSizeLessThan(64);
 	}
 
 	private List<KeycloakAuditRow> classify(KeycloakAdminEvent event) {
-		return classifier.classify(event, REALM_MANAGEMENT, UNKNOWN);
+		return classifier.classify(event, context(UNKNOWN));
+	}
+
+	private static KeycloakAuditClassifier.Context context(Function<String, Optional<Boolean>> lastKnownEnabled) {
+		return new KeycloakAuditClassifier.Context(REALM_MANAGEMENT, lastKnownEnabled,
+				id -> Optional.ofNullable(ROLES_BY_ID.get(id)));
 	}
 
 	private static KeycloakAdminEvent event(String operation, String path, String representation) {
