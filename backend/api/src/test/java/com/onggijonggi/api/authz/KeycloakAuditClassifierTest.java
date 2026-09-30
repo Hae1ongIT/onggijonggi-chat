@@ -148,6 +148,20 @@ class KeycloakAuditClassifierTest {
 	}
 
 	@Test
+	void rolesInACreatedAccountCountOnlyForAPartialImport() {
+		String representation = "{\"username\":\"q\",\"groups\":[\"/admins\"],\"realmRoles\":[\"PLATFORM_ADMIN\"],"
+				+ "\"clientRoles\":{\"realm-management\":[\"manage-users\"]}}";
+		// 일반 생성은 역할을 무시하므로 그룹만 남는다.
+		assertThat(classify(event("CREATE", "users/u1", representation))).extracting(KeycloakAuditRow::role)
+				.containsExactly((String) null);
+		// partial import는 역할까지 적용한다.
+		KeycloakAdminEvent imported = new KeycloakAdminEvent("event-2", 1000L, null, "CREATE", "REALM", "users/u1",
+				representation);
+		assertThat(classify(imported)).extracting(KeycloakAuditRow::role)
+				.containsExactly(null, "PLATFORM_ADMIN", "realm-management/manage-users");
+	}
+
+	@Test
 	void anAccountCreatedDisabledIsRecordedSoTurningItOnLaterShows() {
 		assertThat(classify(event("CREATE", "users/u1", "{\"username\":\"off\",\"enabled\":false}")))
 				.extracting(KeycloakAuditRow::kind).containsExactly(KeycloakAuditEventKind.USER_DISABLED);
@@ -185,8 +199,8 @@ class KeycloakAuditClassifierTest {
 				"Failing row contains (secret-subject, PLATFORM_ADMIN)"))).isEqualTo("DataIntegrityViolationException");
 		assertThat(KeycloakAuditCollector.summary(new IllegalStateException("connect to 10.0.0.5 failed")))
 				.isEqualTo("IllegalStateException");
-		assertThat(KeycloakAuditCollector.summary(new KeycloakAuditCollector.CollectorProblem("view-clients 권한 확인")))
-				.isEqualTo("view-clients 권한 확인");
+		assertThat(KeycloakAuditCollector.summary(new KeycloakAuditCollector.CollectorProblem("view-users 권한 확인")))
+				.isEqualTo("view-users 권한 확인");
 	}
 
 	@Test

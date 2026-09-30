@@ -52,6 +52,39 @@ final class KeycloakTestAdmin {
 						.toList());
 	}
 
+	void revokeManagementRoles(String userId, List<String> roles) {
+		String realmManagement = clientUuid("realm-management");
+		send("DELETE", realmPath("/users/" + userId + "/role-mappings/clients/" + realmManagement),
+				roles.stream().map(role -> object(send("GET", realmPath("/clients/" + realmManagement + "/roles/" + role), null)))
+						.toList());
+	}
+
+	void grantGroupManagementRoles(String groupId, List<String> roles) {
+		String realmManagement = clientUuid("realm-management");
+		send("POST", realmPath("/groups/" + groupId + "/role-mappings/clients/" + realmManagement),
+				roles.stream().map(role -> object(send("GET", realmPath("/clients/" + realmManagement + "/roles/" + role), null)))
+						.toList());
+	}
+
+	void revokeGroupRealmRole(String groupId, String role) {
+		send("DELETE", realmPath("/groups/" + groupId + "/role-mappings/realm"), List.of(role(role)));
+	}
+
+	/** 사용자의 실효 realm 역할 이름(Keycloak이 실제로 권한을 줬는지 확인할 때). */
+	List<String> effectiveRealmRoles(String userId) {
+		return list(send("GET", realmPath("/users/" + userId + "/role-mappings/realm/composite"), null)).stream()
+				.map(item -> String.valueOf(((Map<?, ?>) item).get("name"))).toList();
+	}
+
+	List<String> effectiveClientRoles(String userId, String clientUuid) {
+		return list(send("GET", realmPath("/users/" + userId + "/role-mappings/clients/" + clientUuid + "/composite"), null))
+				.stream().map(item -> String.valueOf(((Map<?, ?>) item).get("name"))).toList();
+	}
+
+	String createSubGroup(String parentId, String name) {
+		return createAndReturnId(realmPath("/groups/" + parentId + "/children"), Map.of("name", name));
+	}
+
 	String clientUuid(String clientId) {
 		return (String) list(send("GET", realmPath("/clients?clientId=" + encode(clientId)), null)).stream()
 				.map(item -> (Map<?, ?>) item).filter(item -> clientId.equals(item.get("clientId"))).findFirst()

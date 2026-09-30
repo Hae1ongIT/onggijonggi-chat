@@ -21,7 +21,7 @@ import tools.jackson.databind.ObjectMapper;
  * Class Name : KeycloakAuditClassifier.java
  * Description : Keycloak admin event 한 건을 keycloak_adt 행으로 바꾼다(#304). 권한과 관련된 것만 남기고 나머지는 빈 목록이다.
  *               종류는 resourceType이 아니라 리소스 경로 모양과 작업 종류로 가른다 — 경로가 Admin API 주소 그 자체라 더 안정적이다
- *               (partial import도 사용자마다 `users/{id}` CREATE로 남아 같은 규칙에 걸린다).
+ *               (partial import도 사용자마다 `users/{id}` CREATE로 남아 같은 규칙에 걸린다 — resourceType만 REALM이다).
  *               상세(representation) 원문은 저장하지 않고 역할 이름·그룹·enabled·매퍼 종류 같은 필요한 값만 뽑는다.
  *               상세가 꺼져 있어 역할 이름을 모르면 역할 없이 한 행을 남기고 reference에 detailsMissing을 적는다.
  *               경로와 상세 모양은 실제 Keycloak 26으로 확인했다(KeycloakAuditKeycloakTest).
@@ -38,8 +38,9 @@ public class KeycloakAuditClassifier {
 		this.objectMapper = objectMapper;
 	}
 
-	/** 분류에 필요한 현재 상태. */
 	/**
+	 * 분류에 필요한 현재 상태.
+	 *
 	 * @param enabledBefore 계정의, 주어진 시각 <b>이전</b> 마지막으로 기록된 활성 상태. 시각을 기준으로 해야 이미 처리한 이벤트를
 	 *                      다시 읽을 때 결과가 같다(지금 상태로 비교하면 나중 변경 때문에 가짜 행이 생긴다).
 	 */
@@ -157,7 +158,7 @@ public class KeycloakAuditClassifier {
 		switch (operation) {
 			case "DELETE" -> rows.add(KeycloakAuditEventKind.USER_DELETED, subject, null, rows.path, new LinkedHashMap<>());
 			case "CREATE" -> {
-				userCreatedWithAccess(user, subject, rows);
+				userCreatedWithAccess(user, subject, "REALM".equals(event.resourceType()), rows);
 				// 비활성으로 만든 계정은 나중에 켜는 순간이 권한 획득이므로, 만들 때의 상태를 남겨 둔다.
 				if (Boolean.FALSE.equals(user.get("enabled"))) {
 					rows.add(KeycloakAuditEventKind.USER_DISABLED, subject, null, rows.path, new LinkedHashMap<>());
@@ -179,15 +180,21 @@ public class KeycloakAuditClassifier {
 		}
 	}
 
-	/** 계정을 만들며 넣은 그룹·realm 역할·realm-management 역할(partial import 포함). 없으면 저장하지 않는다. */
+	/**
+	 * 계정을 만들며 넣은 그룹·realm 역할·realm-management 역할. 없으면 저장하지 않는다.
+	 * 그룹은 두 경로 모두 적용되지만, 역할은 partial import(resourceType REALM)에서만 적용된다 — 일반 생성(POST /users)은
+	 * realmRoles·clientRoles를 요청 본문에 받아 이벤트에도 그대로 남기면서 실제로는 주지 않는다(실제 Keycloak 26으로 확인).
+	 * 요청만 보고 기록하면 없는 부여가 감사에 남는다.
+	 */
 	@SuppressWarnings("unchecked")
-	private void userCreatedWithAccess(Map<String, Object> user, String subject, Rows rows) {
+	private void userCreatedWithAccess(Map<String, Object> user, String subject, boolean partialImport, Rows rows) {
 		for (Object group : list(user.get("groups"))) {
 			Map<String, Object> reference = new LinkedHashMap<>();
 			reference.put("groupPath", group);
 			// 한 이벤트의 여러 그룹 행을 멱등 키로 가르려고 경로 자리에 그룹 경로를 쓴다.
 			rows.add(KeycloakAuditEventKind.USER_CREATED_WITH_ACCESS, subject, null, "groups" + group, reference);
 		}
+		if (!partialImport) return;
 		for (Object role : list(user.get("realmRoles"))) {
 			rows.add(KeycloakAuditEventKind.USER_CREATED_WITH_ACCESS, subject, String.valueOf(role), rows.path,
 					new LinkedHashMap<>());

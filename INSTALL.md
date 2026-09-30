@@ -256,7 +256,7 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 1. **Realm settings → Events → Admin events settings**에서 *Save events*와 *Include representation*을 켜고, *Expiration*을 1년(365일)으로 둔 뒤 저장한다.
 2. **Clients → `ogjg-client`(`KEYCLOAK_CLIENT_ID`) → Service account roles → Assign role**에서 `realm-management`의 `view-events`·`view-realm`을 추가한다(`view-users`는 이미 있다). 이벤트를 지우는 `manage-events`와, 모든 클라이언트의 secret까지 읽히는 `view-clients`는 주지 않는다.
 
-**✅ 확인**: 아무 계정에 역할을 붙였다 떼고 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)에 두 행이 보인다. 응답의 `collector`에 `lastError`가 비어 있고 `adminEventsEnabled`가 `true`면 정상이다. 권한을 아직 안 줬으면 BFF는 멈추지 않고 `lastError`(예: `Keycloak 403 …/events/config`)로 알린다.
+**✅ 확인**: 아무 계정에 역할을 붙였다 떼고 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)에 두 행이 보인다. 응답의 `collector`에서 `lastSuccessAt`이 `lastErrorAt`보다 늦고(또는 `lastErrorAt`이 비어 있고) `adminEventsEnabled`가 `true`면 정상이다. `lastError`는 회복한 뒤에도 마지막 오류로 남아 있으므로 비어 있는지로 판단하지 않는다. 권한을 아직 안 줬으면 BFF는 멈추지 않고 `lastError`(예: `Keycloak 403 …/events/config`)로 알린다.
 
 **개인정보**: 이 설정으로 Keycloak은 관리자 변경의 상세(계정 생성·수정 시 이메일·이름 등)를 1년 보관한다. 앱 DB에는 상세를 옮기지 않고 계정 id·역할·그룹 경로만 영구 보존한다(권한 변경 감사가 목적이라 지우지 않는다). 기록을 지울 수 없다는 보장은 BFF가 쓰는 DB 계정이 테이블 소유자·슈퍼유저가 아닐 때만 성립한다 — 기본 compose는 같은 계정을 쓰므로, 운영에서는 migration 계정과 BFF 실행 계정을 나누길 권한다.
 

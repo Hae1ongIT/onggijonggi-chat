@@ -86,7 +86,10 @@ class KeycloakAuditKeycloakTest {
 		admin.joinGroup(bob, admins);
 		admin.leaveGroup(bob, admins);
 		admin.grantManagementRoles(bob, List.of("manage-events"));
-		String dave = admin.createUser(Map.of("username", "dave", "enabled", true, "groups", List.of("/admins")));
+		String dave = admin.createUser(Map.of("username", "dave", "email", "dave@example.com", "enabled", true,
+				"groups", List.of("/admins")));
+		// 계정 생성 때 넣은 그룹은 Keycloak이 실제로 적용한다 — 그래서 기록한다.
+		assertThat(admin.effectiveRealmRoles(dave)).contains("PLATFORM_ADMIN");
 		admin.updateUser(bob, Map.of("enabled", false));
 		admin.updateUser(bob, Map.of("enabled", true));
 		admin.updateUser(alice, Map.of("firstName", "앨리스"));
@@ -108,6 +111,17 @@ class KeycloakAuditKeycloakTest {
 		admin.addHardcodedRoleMapper("bff", "PLATFORM_ADMIN");
 		String sleeper = admin.createUser(Map.of("username", "sleeper", "enabled", false));
 		admin.updateUser(sleeper, Map.of("enabled", true));
+		// 그룹의 realm 역할과 관리 역할, 관리 역할 회수.
+		String ops = admin.createGroup("ops");
+		admin.grantGroupRealmRole(ops, "PLATFORM_ADMIN");
+		admin.revokeGroupRealmRole(ops, "PLATFORM_ADMIN");
+		admin.grantGroupManagementRoles(ops, List.of("manage-users"));
+		admin.revokeManagementRoles(bob, List.of("manage-events"));
+		// 계정을 만들 때 역할을 바로 넣는 경로. 기록은 Keycloak이 실제로 역할을 줬는지와 정확히 같아야 한다
+		// (일반 생성은 역할 필드를 무시한다 — 기록하면 없는 부여가 감사에 남는다).
+		String quinn = admin.createUser(Map.of("username", "quinn", "enabled", true, "realmRoles", List.of("PLATFORM_ADMIN")));
+		String rita = admin.createUser(Map.of("username", "rita", "enabled", true,
+				"clientRoles", Map.of("realm-management", List.of("manage-users"))));
 
 		setup.collector().runOnce();
 		assertThat(setup.state().lastError()).isNull();
@@ -131,10 +145,25 @@ class KeycloakAuditKeycloakTest {
 				"TOKEN_MAPPER_CHANGED||PLATFORM_ADMIN",
 				"USER_DISABLED|" + sleeper + "|",
 				"USER_ENABLED|" + sleeper + "|");
-		// 그룹 이동은 아래로 넣기와 최상위로 빼기 두 번이다. roles-by-id 삭제에도 저장해 둔 이름이 붙는다.
+		assertThat(rows(setup.jdbc())).contains(
+				"GROUP_ROLE_GRANTED||PLATFORM_ADMIN",
+				"GROUP_ROLE_REVOKED||PLATFORM_ADMIN",
+				"MANAGEMENT_ROLE_GRANTED||realm-management/manage-users",
+				"MANAGEMENT_ROLE_REVOKED|" + bob + "|realm-management/manage-events");
+		assertThat(rows(setup.jdbc()).contains("USER_CREATED_WITH_ACCESS|" + quinn + "|PLATFORM_ADMIN"))
+				.as("계정 생성의 realm 역할은 Keycloak이 실제로 줬을 때만 기록된다")
+				.isEqualTo(admin.effectiveRealmRoles(quinn).contains("PLATFORM_ADMIN"));
+		assertThat(rows(setup.jdbc()).contains("USER_CREATED_WITH_ACCESS|" + rita + "|realm-management/manage-users"))
+				.as("계정 생성의 관리 역할은 Keycloak이 실제로 줬을 때만 기록된다")
+				.isEqualTo(admin.effectiveClientRoles(rita, admin.clientUuid("realm-management")).contains("manage-users"));
+		// 그룹 이동은 아래로 넣기와 최상위로 빼기 두 번이다.
 		assertThat(count(setup.jdbc(), "GROUP_MOVED")).isEqualTo(2);
-		assertThat(setup.jdbc().queryForObject("select role from keycloak_adt where evt_kind = 'ROLE_DEFINITION_CHANGED'"
-				+ " and trg_ref->>'operation' = 'DELETE'", String.class)).isEqualTo("viewer2");
+		// 역할 정의 변경은 작업까지 맞아야 한다(같은 역할의 만들기·복합 추가·이름 변경·삭제가 한 문자열로 겹치지 않게).
+		// roles-by-id 삭제에도 저장해 둔 이름이 붙는다.
+		assertThat(setup.jdbc().query("select role || ':' || (trg_ref->>'operation') from keycloak_adt"
+				+ " where evt_kind = 'ROLE_DEFINITION_CHANGED'", (rs, rowNum) -> rs.getString(1))).contains(
+				"auditor:CREATE", "auditor:ADD", "viewer:CREATE", "viewer2:RENAME", "viewer2:DELETE",
+				"realm-management/manage-realm:ADD");
 		// 이름 변경은 권한과 무관하다. 활성 상태가 그대로인 사용자 수정은 남지 않는다.
 		assertThat(rows(setup.jdbc())).noneMatch(row -> row.startsWith("USER_ENABLED|" + alice)
 				|| row.startsWith("USER_DISABLED|" + alice));
@@ -144,35 +173,57 @@ class KeycloakAuditKeycloakTest {
 		setup.collector().runOnce();
 		assertThat(total(setup.jdbc())).isEqualTo(before);
 		assertThat(count(setup.jdbc(), "BASELINE_RECORDED")).isEqualTo(1);
-		// 상세 원문과 IP 주소는 저장하지 않는다.
-		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt where act_json::text like '%ipAddress%'"
-				+ " or trg_ref::text like '%firstName%'", Integer.class)).isZero();
+		// 상세 원문(이메일 등)과 IP 주소는 어느 열에도 저장하지 않는다.
+		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt where keycloak_adt::text like '%dave@example.com%'"
+				+ " or act_json::text like '%ipAddress%'", Integer.class)).isZero();
 	}
 
 	@Test
 	void theBaselineCountsEffectiveHoldersDisabledAccountsAndSurvivesAMissingRole() {
 		Setup setup = setup(COLLECTOR_ROLES);
 		KeycloakTestAdmin admin = setup.admin();
-		// 기본 역할도 realm 복합 역할이라 경로별 조회(composite)로 잡힌다.
+		// 기본 역할에 넣었다가 뺀 역할은 보유가 아니다.
 		admin.addDefaultRole("PLATFORM_ADMIN");
 		String ivy = admin.createUser(Map.of("username", "ivy", "enabled", true));
-		// 클라이언트 복합 역할 경유는 경로별 조회로 보이지 않는다 — 실효 역할 보강(effective)이 잡는다.
 		admin.removeDefaultRole("PLATFORM_ADMIN");
+		// 클라이언트 복합 역할 경유는 경로별 조회로 보이지 않는다 — 실효 역할 보강(effective)이 잡는다.
 		admin.addClientRoleComposite(admin.clientUuid("realm-management"), "manage-realm", "PLATFORM_ADMIN");
 		String kim = admin.createUser(Map.of("username", "kim", "enabled", true));
 		admin.grantManagementRoles(kim, List.of("manage-realm"));
+		// admin event를 끈 동안 만든 비활성 계정 — 이벤트가 없으므로 기준선만이 이 계정의 비활성을 남길 수 있다.
+		admin.setAdminEvents(false);
 		String paused = admin.createUser(Map.of("username", "paused", "enabled", false));
+		admin.setAdminEvents(true);
 
 		setup.collector().runOnce();
 
 		assertThat(setup.state().lastError()).isNull();
 		assertThat(heldAtStart(setup.jdbc())).contains("PLATFORM_ADMIN|" + kim + "|effective",
-				"realm-management/manage-realm|" + kim + "|direct").doesNotContain("PLATFORM_ADMIN|" + ivy + "|effective");
+				"realm-management/manage-realm|" + kim + "|direct").noneMatch(row -> row.contains(ivy));
 		// 수집 전부터 비활성이던 계정은 기준선에 비활성으로 남는다. 그래서 나중에 켜면 기록된다.
-		assertThat(rows(setup.jdbc())).contains("USER_DISABLED|" + paused + "|");
+		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt where evt_kind = 'USER_DISABLED'"
+				+ " and trg_subj = ? and act_json->>'source' = 'baseline'", Integer.class, paused)).isEqualTo(1);
 		admin.updateUser(paused, Map.of("enabled", true));
 		setup.collector().runOnce();
 		assertThat(rows(setup.jdbc())).contains("USER_ENABLED|" + paused + "|");
+	}
+
+	@Test
+	void theBaselineFollowsDefaultRolesAndSubGroups() {
+		Setup setup = setup(COLLECTOR_ROLES);
+		KeycloakTestAdmin admin = setup.admin();
+		admin.addDefaultRole("PLATFORM_ADMIN");
+		String lee = admin.createUser(Map.of("username", "lee", "enabled", true));
+		String parent = admin.createGroup("parent");
+		admin.grantGroupRealmRole(parent, "PLATFORM_ADMIN");
+		String child = admin.createSubGroup(parent, "child");
+		String mia = admin.createUser(Map.of("username", "mia", "enabled", true));
+		admin.joinGroup(mia, child);
+
+		setup.collector().runOnce();
+
+		// 기본 역할은 realm 복합 역할이라 composite로, 하위 그룹 구성원은 상위 그룹의 역할을 물려받아 group으로 잡힌다.
+		assertThat(heldAtStart(setup.jdbc())).contains("PLATFORM_ADMIN|" + lee + "|composite", "PLATFORM_ADMIN|" + mia + "|group");
 	}
 
 	@Test
@@ -224,7 +275,11 @@ class KeycloakAuditKeycloakTest {
 
 		setup.collector().runOnce();
 
-		assertThat(count(setup.jdbc(), "EVENT_CONFIG_CHANGED")).isGreaterThanOrEqualTo(1);
+		// 수집기가 폴링으로 본 변화(source=collector)와 별개로, Keycloak이 events/config 수정을 이벤트로 남겼는지 본다.
+		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt where evt_kind = 'EVENT_CONFIG_CHANGED'"
+				+ " and act_json->>'source' = 'collector'", Integer.class)).isEqualTo(1);
+		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt where evt_kind = 'EVENT_CONFIG_CHANGED'"
+				+ " and trg_path = 'events/config' and act_json->>'source' is null", Integer.class)).isEqualTo(1);
 		KeycloakAuditPage page = setup.queries().page(KeycloakAuditQuery.parse(null, null, null, null, null, null, null, null))
 				.block();
 		assertThat(page.collector().adminEventsEnabled()).isFalse();
