@@ -29,6 +29,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -66,11 +67,17 @@ public class ThreadParticipantService {
 	private final KeycloakAdminClient keycloakAdminClient;
 	private final ThrInvRepository thrInvRepository;
 	private final InvitationAcceptanceService invitationAcceptanceService;
+	private final ThreadMembershipService threadMembershipService;
+	private final RankedDisplayNames rankedDisplayNames;
+	private final PeopleSearch peopleSearch;
+	private final OwnerTransferAuditService ownerTransferAuditService;
 
 	public ThreadParticipantService(ThrMbrRepository thrMbrRepository, ThrRepository thrRepository,
 			AppUserRepository appUserRepository, RoomSessionRegistry roomSessionRegistry,
 			KeycloakAdminClient keycloakAdminClient, ThrInvRepository thrInvRepository,
-			InvitationAcceptanceService invitationAcceptanceService) {
+			InvitationAcceptanceService invitationAcceptanceService, ThreadMembershipService threadMembershipService,
+			RankedDisplayNames rankedDisplayNames, PeopleSearch peopleSearch,
+			OwnerTransferAuditService ownerTransferAuditService) {
 		this.thrMbrRepository = thrMbrRepository;
 		this.thrRepository = thrRepository;
 		this.appUserRepository = appUserRepository;
@@ -78,6 +85,10 @@ public class ThreadParticipantService {
 		this.keycloakAdminClient = keycloakAdminClient;
 		this.thrInvRepository = thrInvRepository;
 		this.invitationAcceptanceService = invitationAcceptanceService;
+		this.threadMembershipService = threadMembershipService;
+		this.rankedDisplayNames = rankedDisplayNames;
+		this.peopleSearch = peopleSearch;
+		this.ownerTransferAuditService = ownerTransferAuditService;
 	}
 
 	/** 참가자면 누구나 볼 수 있다 — 자기 방 구성원을 읽는 것뿐이라 OWNER로 좁히지 않는다. */
@@ -93,6 +104,8 @@ public class ThreadParticipantService {
 	* invite: OWNER가 subject로 지목한 사람을 MEMBER로 들인다. 이미 ACTIVE면 아무것도 하지 않고
 	* 성공으로 답한다 — 초대가 이루려던 상태가 이미 성립해 있기 때문이다. 이미 ACTIVE였던 경우는
 	* 명단이 실제로 바뀌지 않았으므로 통지하지 않는다(이슈 #129).
+	* 그 방의 워크스페이스를 볼 수 없는 사람은 초대하지 않는다(InviteeOutsideWorkspaceException) — 들여도 들어올 수 없다.
+	* 로그인 전인 사람도 팀·직급 배정이 subject 기준이라 같은 판정을 받는다.
 	* @param inviteeSubject 초대 대상의 Keycloak subject. 조회만 하고 새 계정을 만들지 않는다
 	*/
 	public Mono<Void> invite(UUID threadId, UUID actorUserId, String inviteeSubject) {
@@ -102,18 +115,24 @@ public class ThreadParticipantService {
 					return appUserRepository.findByKeycloakSubj(inviteeSubject).map(AppUser::getId);
 				})
 				.subscribeOn(Schedulers.boundedElastic())
+				.flatMap(invitee -> threadMembershipService.canEnterWorkspace(threadId, inviteeSubject)
+						.flatMap(inWorkspace -> inWorkspace
+								? Mono.just(invitee)
+								: Mono.error(new InviteeOutsideWorkspaceException())))
 				.flatMap(invitee -> invitee
 						.map(userId -> joinNow(threadId, actorUserId, userId, inviteeSubject))
 						.orElseGet(() -> inviteForFirstLogin(threadId, actorUserId, inviteeSubject)));
 	}
 
 	/**
-	* 초대할 사람을 이름으로 찾는다(이슈 #172). OWNER만 부를 수 있다 — 초대할 수 없는 사람에게
+	* 초대할 사람을 이름·직급·팀으로 찾는다(이슈 #172, PeopleSearch). "대리", "인사팀", "인사팀 대리",
+	* "황정민 대리"처럼 쓴다. OWNER만 부를 수 있다 — 초대할 수 없는 사람에게
 	* 검색을 열어 주면 계정 목록만 노출되고 할 수 있는 일은 없다. 인가를 invite()와 같은 자리에
 	* 걸어 두면, 나중에 "멤버도 초대 가능"으로 바뀌어도 검색이 저절로 따라온다.
 	*
 	* 스레드 스코프인 것은 그 인가를 재사용하기 위해서이자, 이미 그 방에 있는 사람과 이미 부른
-	* 사람을 결과에서 뺄 수 있기 때문이다 — 고를 수 없는 항목을 보여줄 이유가 없다.
+	* 사람을 결과에서 뺄 수 있기 때문이다 — 고를 수 없는 항목을 보여줄 이유가 없다. 같은 이유로
+	* 그 방의 워크스페이스를 볼 수 없는 사람도 뺀다.
 	*
 	* @param query 부분 일치 검색어. 인가 뒤 너무 짧으면 realm을 통째로 훑지 않고 빈 목록을 돌린다
 	*/
@@ -124,11 +143,14 @@ public class ThreadParticipantService {
 							: Optional.of(excludedSubjects(threadId));
 				})
 				.subscribeOn(Schedulers.boundedElastic())
-				.flatMap(excluded -> excluded.map(subjects -> keycloakAdminClient.search(query, CANDIDATE_SEARCH_MAX)
-						.map(found -> found.stream()
-								.filter(user -> !subjects.contains(user.subject()))
-								.map(user -> new InviteCandidate(user.subject(), user.displayName()))
-								.toList()))
+				.flatMap(excluded -> excluded.map(subjects -> peopleSearch.search(query, CANDIDATE_SEARCH_MAX)
+						.filter(user -> !subjects.contains(user.subject()))
+						.concatMap(user -> threadMembershipService.canEnterWorkspace(threadId, user.subject())
+								.filter(Boolean::booleanValue)
+								.flatMap(ignored -> rankedDisplayNames.withRank(user.subject(), user.displayName()))
+								.map(displayName -> new InviteCandidate(user.subject(), displayName)))
+						.take(CANDIDATE_SEARCH_MAX)
+						.collectList())
 						.orElseGet(() -> Mono.just(List.of())));
 	}
 
@@ -294,9 +316,7 @@ public class ThreadParticipantService {
 					thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, targetUserId,
 									ThrMbrRole.MEMBER, ThrMbrStatus.ACTIVE)
 							.orElseThrow(ThreadParticipantService::notParticipant);
-					if (thrMbrRepository.transferOwnership(threadId, actorUserId, targetUserId) != 2) {
-						throw stateConflict();
-					}
+					ownerTransferAuditService.transfer(threadId, actorUserId, targetUserId);
 					return null;
 				})
 				.subscribeOn(Schedulers.boundedElastic())
@@ -348,7 +368,7 @@ public class ThreadParticipantService {
 	* (ThreadMessageDispatcher의 "저장 실패는 채팅을 막지 않는다"와 같은 원칙).
 	*/
 	private Mono<Void> notifyParticipantChanged(UUID threadId, ParticipantChangeAction action, String subject) {
-		return keycloakAdminClient.displayName(subject)
+		return rankedDisplayNames.displayName(subject)
 				.map(displayName -> displayName.orElse(subject))
 				.doOnNext(displayName -> roomSessionRegistry.notifyIfListening(threadId,
 						new ParticipantChangedFrame(threadId, action, subject, displayName)))

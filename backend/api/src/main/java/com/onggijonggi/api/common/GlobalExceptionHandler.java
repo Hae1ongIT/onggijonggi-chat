@@ -1,6 +1,9 @@
 package com.onggijonggi.api.common;
 
+import com.onggijonggi.api.authz.RbacStateConflictException;
 import com.onggijonggi.api.chat.IdempotencyKeyConflictException;
+import com.onggijonggi.api.chat.InviteeOutsideWorkspaceException;
+import com.onggijonggi.api.chat.MsgFileRejectedException;
 import com.openai.errors.OpenAIServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,6 +78,30 @@ public class GlobalExceptionHandler {
 			ServerWebExchange exchange) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
 				.body(ErrorResponse.of("IDEMPOTENCY_KEY_CONFLICT", ex.getMessage(), traceId(exchange)));
+	}
+
+	/** 초대 대상이 그 방의 워크스페이스를 볼 수 없는 경우. 다시 시도해도 안 되지만 호출자의 권한 문제(403)는
+	 * 아니라서, 참여자 상태 충돌과 같은 409에 별도 코드를 붙여 화면이 이유를 알려 줄 수 있게 한다. */
+	@ExceptionHandler(InviteeOutsideWorkspaceException.class)
+	public ResponseEntity<ErrorResponse> handleInviteeOutsideWorkspace(InviteeOutsideWorkspaceException ex,
+			ServerWebExchange exchange) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(ErrorResponse.of("INVITEE_NO_WORKSPACE_ACCESS", ex.getMessage(), traceId(exchange)));
+	}
+
+	/** 첨부 파일을 받을 수 없는 경우 — 형식·크기·내용 없음. 사용자가 고칠 수 있는 이유라 문구를 그대로 보인다. */
+	@ExceptionHandler(MsgFileRejectedException.class)
+	public ResponseEntity<ErrorResponse> handleMsgFileRejected(MsgFileRejectedException ex, ServerWebExchange exchange) {
+		return ResponseEntity.status(ex.getStatus())
+				.body(ErrorResponse.of(ex.getCode(), ex.getMessage(), traceId(exchange)));
+	}
+
+	/** Workspace·부여·org-unit 관리(#260)가 현재 권한 구성 상태 때문에 거부된 경우(선언 리소스, 마지막 ADMIN, 남은 방 등).
+	 * 참여자 상태 충돌과 원인이 달라 별도 코드를 붙인다 — 같은 코드면 화면이 "참여자 정보가 바뀌었다"고 잘못 안내한다. */
+	@ExceptionHandler(RbacStateConflictException.class)
+	public ResponseEntity<ErrorResponse> handleRbacStateConflict(RbacStateConflictException ex, ServerWebExchange exchange) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(ErrorResponse.of("RBAC_STATE_CONFLICT", "권한 구성 상태 때문에 요청을 처리할 수 없습니다.", traceId(exchange)));
 	}
 
 	/** ThrMbr.ver(이슈 #137) 같은 낙관적 잠금 필드가 읽은 뒤 다른 트랜잭션에 덮어써졌을 때. 같은

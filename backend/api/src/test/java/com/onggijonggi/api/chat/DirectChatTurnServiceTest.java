@@ -21,6 +21,7 @@ import com.onggijonggi.common.chat.persistence.MsgIdmKeyRepository;
 import com.onggijonggi.common.chat.persistence.MsgRepository;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,12 +50,17 @@ class DirectChatTurnServiceTest {
 	private MsgRepository msgRepository;
 	@Mock
 	private MsgIdmKeyRepository msgIdmKeyRepository;
+	@Mock
+	private ThreadWorkspaceService threadWorkspaceService;
+	@Mock
+	private MsgFileService msgFileService;
 
 	private DirectChatTurnService service;
 
 	@BeforeEach
 	void setUp() {
-		service = new DirectChatTurnService(thrRepository, thrMbrRepository, msgRepository, msgIdmKeyRepository);
+		service = new DirectChatTurnService(thrRepository, thrMbrRepository, msgRepository, msgIdmKeyRepository,
+				threadWorkspaceService, msgFileService);
 	}
 
 	@Test
@@ -68,7 +74,7 @@ class DirectChatTurnServiceTest {
 		when(msgRepository.save(any(Msg.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
 		DirectChatTurnService.StoredTurn turn = service.prepareOrCreateWithPendingAgentBlocking(threadId, userId,
-				"안녕", "안녕", "key-1");
+				"안녕", List.of(), "안녕", "key-1");
 
 		ArgumentCaptor<Thr> thread = ArgumentCaptor.forClass(Thr.class);
 		verify(thrRepository).save(thread.capture());
@@ -106,7 +112,7 @@ class DirectChatTurnServiceTest {
 		when(msgIdmKeyRepository.findByUserIdAndKey(actorId, "key-1")).thenReturn(Optional.empty());
 		when(thrRepository.findByIdForSeqUpdate(threadId)).thenReturn(Optional.of(collab));
 
-		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, actorId, "안녕", "key-1"))
+		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, actorId, "안녕", List.of(), "key-1"))
 				.isInstanceOfSatisfying(ResponseStatusException.class,
 						status -> assertThat(status.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND));
 	}
@@ -125,7 +131,7 @@ class DirectChatTurnServiceTest {
 		when(msgRepository.findById(agentMsgId)).thenReturn(Optional.of(agentMsg));
 
 		DirectChatTurnService.StoredTurn turn = service.prepareExistingWithPendingAgentBlocking(threadId, userId,
-				"안녕", "key-1");
+				"안녕", List.of(), "key-1");
 
 		assertThat(turn.replay()).isTrue();
 		assertThat(turn.humanMessageId()).isEqualTo(humanMsgId);
@@ -145,7 +151,7 @@ class DirectChatTurnServiceTest {
 		when(msgIdmKeyRepository.findByUserIdAndKey(userId, "key-1")).thenReturn(Optional.of(existing));
 
 		assertThatThrownBy(
-				() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "다른 내용", "key-1"))
+				() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "다른 내용", List.of(), "key-1"))
 				.isInstanceOf(IdempotencyKeyConflictException.class);
 	}
 
@@ -165,7 +171,7 @@ class DirectChatTurnServiceTest {
 		when(msgIdmKeyRepository.findByUserIdAndKey(userId, "key-1")).thenReturn(Optional.of(expired));
 		when(thrRepository.findByIdForSeqUpdate(threadId)).thenReturn(Optional.empty());
 
-		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", "key-1"))
+		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", List.of(), "key-1"))
 				.isInstanceOfSatisfying(ResponseStatusException.class,
 						status -> assertThat(status.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND));
 		// notFound()는 findByIdForSeqUpdate가 empty를 반환했기 때문이다 — TTL 만료로 "새 요청"
@@ -189,7 +195,7 @@ class DirectChatTurnServiceTest {
 				UUID.randomUUID(), 1L);
 		when(msgIdmKeyRepository.findByUserIdAndKey(userId, "key-1")).thenReturn(Optional.of(existing));
 
-		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", "key-1"))
+		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", List.of(), "key-1"))
 				.isInstanceOf(IdempotencyKeyConflictException.class);
 	}
 
@@ -208,7 +214,7 @@ class DirectChatTurnServiceTest {
 		when(msgRepository.save(any(Msg.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
 		DirectChatTurnService.StoredTurn fresh = service.recoverOrphanedTurnBlocking(threadId, userId, "다시 보냄",
-				"key-1", orphanedAgentMsgId);
+				List.of(), "key-1", orphanedAgentMsgId);
 
 		assertThat(fresh.replay()).isFalse();
 		assertThat(orphaned.getStatus()).isEqualTo(MsgStatus.FAILED);

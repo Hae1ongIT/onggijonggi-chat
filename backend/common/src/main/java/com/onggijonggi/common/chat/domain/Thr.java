@@ -37,6 +37,13 @@ public class Thr {
 	@Column(name = "drc_own_user_id")
 	private UUID drcOwnUserId;
 
+	/** 한 번 정해진 Tenant는 바뀌지 않는다. 절체 backfill은 SQL로 채우고 엔티티는 갱신하지 않는다. */
+	@Column(name = "tnn_id", updatable = false)
+	private UUID tenantId;
+
+	@Column(name = "wrk_node_id")
+	private UUID workspaceNodeId;
+
 	@Column(name = "created_user_id", nullable = false)
 	private UUID createdUserId;
 
@@ -91,6 +98,22 @@ public class Thr {
 		return thread;
 	}
 
+	/**
+	* 저장 전에만 부른다 — tnn_id는 updatable=false라 저장 뒤에 바꿔도 반영되지 않는다. Tenant는 노드에서 따라오므로
+	* 호출자가 노드의 Tenant를 그대로 넘긴다. 워크스페이스 트리가 없는 배포(casbin 꺼짐)에서는 부르지 않아 둘 다 null로 남는다.
+	*/
+	public void placeIn(UUID tenantId, UUID workspaceNodeId) {
+		this.tenantId = tenantId;
+		this.workspaceNodeId = workspaceNodeId;
+	}
+
+	/** 협업방을 다른 Workspace로 옮긴다. Tenant는 바뀌지 않고 참여 행도 그대로 둔다. 1:1은 옮길 수 없다. */
+	public void moveToWorkspace(UUID workspaceNodeId) {
+		if (kind != ThrKind.COLLAB) throw new IllegalStateException("협업방만 옮길 수 있다");
+		this.workspaceNodeId = workspaceNodeId;
+		this.updatedAt = Instant.now();
+	}
+
 	public UUID getId() {
 		return id;
 	}
@@ -105,6 +128,14 @@ public class Thr {
 
 	public UUID getDrcOwnUserId() {
 		return drcOwnUserId;
+	}
+
+	public UUID getTenantId() {
+		return tenantId;
+	}
+
+	public UUID getWorkspaceNodeId() {
+		return workspaceNodeId;
 	}
 
 	public UUID getCreatedUserId() {
