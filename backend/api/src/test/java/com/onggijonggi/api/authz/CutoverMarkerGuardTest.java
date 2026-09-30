@@ -1,8 +1,13 @@
 package com.onggijonggi.api.authz;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -16,9 +21,9 @@ class CutoverMarkerGuardTest {
 	void absentTableOrMarkerDoesNotForceEnforcement() {
 		JdbcTemplate jdbc = database();
 		RbacProperties properties = new RbacProperties();
-		new CutoverMarkerGuard(jdbc, properties).run(null);
+		new CutoverMarkerGuard(jdbc, properties).start();
 		jdbc.execute("create table ctv (id smallint primary key)");
-		new CutoverMarkerGuard(jdbc, properties).run(null);
+		new CutoverMarkerGuard(jdbc, properties).start();
 	}
 
 	@Test
@@ -27,10 +32,35 @@ class CutoverMarkerGuardTest {
 		jdbc.execute("create table ctv (id smallint primary key)");
 		jdbc.update("insert into ctv (id) values (1)");
 		RbacProperties properties = new RbacProperties();
-		assertThatThrownBy(() -> new CutoverMarkerGuard(jdbc, properties).run(null))
+		CutoverMarkerGuard guard = new CutoverMarkerGuard(jdbc, properties);
+		assertThat(guard.getPhase()).isLessThan(WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE);
+		assertThatThrownBy(guard::start)
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("app.rbac.enforce=false");
+		assertThat(guard.isRunning()).isFalse();
 		properties.setEnforce(true);
-		new CutoverMarkerGuard(jdbc, properties).run(null);
+		guard.start();
+		assertThat(guard.isRunning()).isTrue();
+		guard.stop();
+		assertThat(guard.isRunning()).isFalse();
+	}
+
+	@Test
+	void markerFailureStopsLifecycleBeforeWebServerStartPhase() {
+		JdbcTemplate jdbc = database();
+		jdbc.execute("create table ctv (id smallint primary key)");
+		jdbc.update("insert into ctv (id) values (1)");
+		AtomicBoolean webServerStarted = new AtomicBoolean();
+		try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+			context.registerBean(CutoverMarkerGuard.class, () -> new CutoverMarkerGuard(jdbc, new RbacProperties()));
+			context.registerBean("webServerPhase", SmartLifecycle.class, () -> new SmartLifecycle() {
+				@Override public void start() { webServerStarted.set(true); }
+				@Override public void stop() { webServerStarted.set(false); }
+				@Override public boolean isRunning() { return webServerStarted.get(); }
+				@Override public int getPhase() { return WebServerApplicationContext.START_STOP_LIFECYCLE_PHASE; }
+			});
+			assertThatThrownBy(context::refresh).hasRootCauseInstanceOf(IllegalStateException.class);
+			assertThat(webServerStarted).isFalse();
+		}
 	}
 
 	private static JdbcTemplate database() {

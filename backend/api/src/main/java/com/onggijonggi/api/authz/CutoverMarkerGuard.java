@@ -1,7 +1,6 @@
 package com.onggijonggi.api.authz;
 
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -11,10 +10,11 @@ import org.springframework.stereotype.Component;
  * Description : 완료 표지가 기록된 DB에서 RBAC 강제를 끄고 서버가 기동되는 것을 막는다.
  */
 @Component
-public class CutoverMarkerGuard implements ApplicationRunner {
+public class CutoverMarkerGuard implements SmartLifecycle {
 
 	private final JdbcTemplate jdbc;
 	private final RbacProperties properties;
+	private volatile boolean running;
 
 	public CutoverMarkerGuard(JdbcTemplate jdbc, RbacProperties properties) {
 		this.jdbc = jdbc;
@@ -22,10 +22,26 @@ public class CutoverMarkerGuard implements ApplicationRunner {
 	}
 
 	@Override
-	public void run(ApplicationArguments args) {
+	public void start() {
 		if (!properties.isEnforce() && hasCutoverMarker()) {
 			throw new IllegalStateException("절체 완료 DB는 app.rbac.enforce=false로 기동할 수 없습니다");
 		}
+		running = true;
+	}
+
+	@Override
+	public void stop() {
+		running = false;
+	}
+
+	@Override
+	public boolean isRunning() {
+		return running;
+	}
+
+	@Override
+	public int getPhase() {
+		return 0;
 	}
 
 	boolean hasCutoverMarker() {

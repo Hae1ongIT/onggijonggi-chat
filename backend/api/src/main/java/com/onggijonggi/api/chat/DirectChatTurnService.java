@@ -152,8 +152,8 @@ public class DirectChatTurnService {
 	}
 
 	/**
-	 * 새 1:1은 common에 둔다. 판정이 켜져 있는데 요청자의 common을 정할 수 없으면(배정 없음 등) 403으로 만들지 않는다(#299).
-	 * 판정이 꺼져 있어도 유일한 ACTIVE Tenant의 common에 둔다 — 정할 수 없으면 503으로 만들지 않는다. 모든 Thread는
+	 * 새 1:1은 common에 둔다. 판정이 켜져 있는데 요청자의 common을 정할 수 없으면(배정 없음 등) 403을 반환한다(#299).
+	 * 판정이 꺼져 있어도 유일한 ACTIVE Tenant의 common에 둔다 — 정할 수 없으면 503을 반환한다. 모든 Thread는
 	 * Tenant·워크스페이스에 놓여야 한다(절체 뒤 NOT NULL).
 	 */
 	private StoredTurn create(UUID threadId, UUID userId, String content, List<UUID> fileIds, String title,

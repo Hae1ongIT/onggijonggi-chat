@@ -99,7 +99,14 @@ public class CutoverValidationService {
 							&& parent.getStatus() == WorkspaceNodeStatus.ACTIVE;
 				}).toList();
 		UUID commonId = commonNodes.size() == 1 ? commonNodes.get(0).getId() : null;
-		if (commonId == null) failures.add(failure("ACTIVE_COMMON_REQUIRED", null, null));
+		if (commonId == null) {
+			failures.add(failure("ACTIVE_COMMON_REQUIRED", null, null));
+			return new CutoverValidationResult(tenantId, List.copyOf(failures));
+		}
+		if (enabledSubjects.stream().anyMatch(subject -> subject == null || subject.isBlank())) {
+			failures.add(failure("INVALID_ENABLED_SUBJECT", null, null));
+			return new CutoverValidationResult(tenantId, List.copyOf(failures));
+		}
 
 		Set<String> enabled = new HashSet<>(enabledSubjects);
 		Map<UUID, String> subjectByUser = new HashMap<>();

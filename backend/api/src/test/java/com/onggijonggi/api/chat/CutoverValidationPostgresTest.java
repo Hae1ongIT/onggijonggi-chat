@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.onggijonggi.api.authz.CutoverValidationResult;
 import com.onggijonggi.api.authz.CutoverValidationService;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 
 /**
  * Class Name : CutoverValidationPostgresTest.java
@@ -32,6 +34,40 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 		assertThat(result.ready()).isFalse();
 		assertThat(result.failures()).extracting(CutoverValidationResult.Failure::code)
 				.contains("ACTIVE_TENANT_COUNT");
+	}
+
+	@Test
+	void missingCommonReportsOnlyTheRootCause() {
+		UUID tenant = UUID.randomUUID();
+		String key = "t" + tenant.toString().substring(0, 8);
+		jdbc.update("insert into tnn (id, tnn_key, name) values (?, ?, ?)", tenant, key, key);
+		UUID owner = user("owner-" + tenant);
+		UUID direct = thread("DIRECT", owner, null);
+		member(direct, owner);
+
+		CutoverValidationResult result = validation.validate(List.of());
+		assertThat(result.ready()).isFalse();
+		assertThat(result.tenantId()).isEqualTo(tenant);
+		assertThat(codes(result)).containsExactly("ACTIVE_COMMON_REQUIRED");
+	}
+
+	@Test
+	void duplicateCommonIsRejectedByTheDatabase() {
+		Fixture fixture = fixture();
+		UUID root = jdbc.queryForObject("select prn_id from wrk_node where id = ?", UUID.class, fixture.common());
+		UUID duplicate = UUID.randomUUID();
+		assertThatThrownBy(() -> jdbc.update("insert into wrk_node (id, tnn_id, prn_id, node_key, kind, name, path) values (?, ?, ?, 'common', 'COMMON', 'Duplicate', array[?, ?]::uuid[])",
+				duplicate, fixture.tenant(), root, root, duplicate))
+				.isInstanceOf(DataIntegrityViolationException.class);
+	}
+
+	@Test
+	void blankEnabledSubjectBlocksCutover() {
+		Fixture fixture = fixture();
+		CutoverValidationResult result = validation.validateWithKeycloak(List.of(" "));
+		assertThat(result.ready()).isFalse();
+		assertThat(result.tenantId()).isEqualTo(fixture.tenant());
+		assertThat(codes(result)).containsExactly("INVALID_ENABLED_SUBJECT");
 	}
 
 	@Test
