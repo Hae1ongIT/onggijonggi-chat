@@ -7,7 +7,7 @@ package com.onggijonggi.api.support;
 public final class MigrationVersions {
 
 	/** 기존 Thread 절체 migration 바로 앞 버전. 이 버전까지가 절체 전 스키마다. */
-	public static final String BEFORE_CUTOVER = "20260928080757930";
+	public static final String BEFORE_CUTOVER = "20260929055051721";
 
 	private MigrationVersions() {
 	}

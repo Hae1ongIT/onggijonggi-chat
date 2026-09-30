@@ -84,7 +84,7 @@ class DefaultDeploymentPostgresTest {
 		// Tenant가 없으면 제약 위반(500)이 아니라 준비가 안 됐다는 503이다. 아무것도 저장되지 않는다.
 		createCollab(client, "default-user", null).expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
 		org.assertj.core.api.Assertions.assertThatThrownBy(
-				() -> directTurns.prepareOrCreateWithPendingAgentBlocking(UUID.randomUUID(), user, "안녕", "제목", "key-" + UUID.randomUUID()))
+				() -> directTurns.prepareOrCreateWithPendingAgentBlocking(UUID.randomUUID(), user, "안녕", List.of(), "제목", "key-" + UUID.randomUUID()))
 				.isInstanceOfSatisfying(org.springframework.web.server.ResponseStatusException.class,
 						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
 		assertThat(threads.count()).isZero();
@@ -101,7 +101,7 @@ class DefaultDeploymentPostgresTest {
 		assertThat(jdbc.queryForObject("select wrk_node_id from thr where id = ?", UUID.class, UUID.fromString(collabId)))
 				.isEqualTo(common);
 		UUID directId = UUID.randomUUID();
-		directTurns.prepareOrCreateWithPendingAgentBlocking(directId, user, "안녕", "제목", "key-" + UUID.randomUUID());
+		directTurns.prepareOrCreateWithPendingAgentBlocking(directId, user, "안녕", List.of(), "제목", "key-" + UUID.randomUUID());
 		assertThat(jdbc.queryForObject("select wrk_node_id from thr where id = ?", UUID.class, directId)).isEqualTo(common);
 		assertThat(jdbc.queryForObject("select tnn_id from thr where id = ?", UUID.class, directId)).isEqualTo(tenant);
 		// 자식 행의 Tenant도 Thread에서 채워진다.

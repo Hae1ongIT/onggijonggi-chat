@@ -137,11 +137,11 @@ class EnforcedAfterCutoverPostgresTest {
 
 		// 1:1은 요청자 배정 Tenant의 COMMON에 놓이고, 배정이 없으면 만들 수 없다(403).
 		UUID direct = UUID.randomUUID();
-		directTurns.prepareOrCreateWithPendingAgentBlocking(direct, assigned, "안녕", "제목", "key-" + UUID.randomUUID());
+		directTurns.prepareOrCreateWithPendingAgentBlocking(direct, assigned, "안녕", List.of(), "제목", "key-" + UUID.randomUUID());
 		assertThat(one("select wrk_node_id from thr where id = ?", direct)).isEqualTo(alphaCommon);
 		assertThat(jdbc.queryForObject("select count(*) from msg where thr_id = ? and tnn_id = ?", Integer.class, direct, alpha))
 				.isEqualTo(2);
-		assertThatThrownBy(() -> directTurns.prepareOrCreateWithPendingAgentBlocking(UUID.randomUUID(), unassigned, "안녕", "제목",
+		assertThatThrownBy(() -> directTurns.prepareOrCreateWithPendingAgentBlocking(UUID.randomUUID(), unassigned, "안녕", List.of(), "제목",
 				"key-" + UUID.randomUUID()))
 				.isInstanceOfSatisfying(ResponseStatusException.class,
 						error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));

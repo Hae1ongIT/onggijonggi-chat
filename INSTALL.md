@@ -254,7 +254,7 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 **2. 절체 migration 앞까지만 적용해 새 이미지를 한 번 띄운다.** v0.2 DB에는 고객사 테이블이 아직 없으므로 Flyway를 완전히 끄면 안 된다 — 끄면 고객사를 만들 수 없다. `infra/.env`에 한 줄을 넣고 BFF만 다시 띄운다.
 
 ```bash
-SPRING_FLYWAY_TARGET=20260928080757930
+SPRING_FLYWAY_TARGET=20260929055051721
 ```
 
 ```bash

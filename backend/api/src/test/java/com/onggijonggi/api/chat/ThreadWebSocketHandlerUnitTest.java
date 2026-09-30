@@ -357,7 +357,7 @@ class ThreadWebSocketHandlerUnitTest {
 		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> "bootstrap-user"));
 		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
 		when(provisioning.resolveOrProvision("bootstrap-user")).thenReturn(Mono.just(UUID.randomUUID()));
-		when(directChatTurnService.prepareOrCreateWithPendingAgentBlocking(any(), any(), any(), any(), any()))
+		when(directChatTurnService.prepareOrCreateWithPendingAgentBlocking(any(), any(), any(), any(), any(), any()))
 				.thenThrow(new ResponseStatusException(status));
 		stubTextMessages(session);
 		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.chatMessageFrame(threadId, "hello"))));
