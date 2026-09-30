@@ -1,11 +1,11 @@
 package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import com.onggijonggi.api.support.TestFiles;
 
 import com.onggijonggi.api.authz.RbacBootstrapService;
 import com.onggijonggi.api.authz.RbacProperties;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -42,7 +42,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @Testcontainers(disabledWithoutDocker = true)
 class DefaultDeploymentPostgresTest {
 
-	private static final Path SETUP = tempSetupFile();
+	private static final Path SETUP = TestFiles.tempYaml("default-deploy-setup-");
 
 	@Container
 	static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -122,15 +122,5 @@ class DefaultDeploymentPostgresTest {
 		UUID id = UUID.randomUUID();
 		jdbc.update("insert into app_user (id, keycloak_subj) values (?, ?)", id, subject);
 		return id;
-	}
-
-	private static Path tempSetupFile() {
-		try {
-			Path file = Files.createTempFile("default-deploy-setup-", ".yml");
-			file.toFile().deleteOnExit();
-			return file;
-		} catch (IOException error) {
-			throw new IllegalStateException("임시 설정 파일을 만들 수 없다", error);
-		}
 	}
 }

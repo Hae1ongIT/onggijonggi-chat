@@ -1,11 +1,12 @@
 package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static com.onggijonggi.api.support.JdbcSupport.execute;
+import com.onggijonggi.api.support.TestFiles;
 import com.onggijonggi.api.support.MigrationVersions;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.onggijonggi.api.authz.RbacBootstrapService;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
@@ -43,7 +44,7 @@ class UpgradeWithExistingThreadsPostgresTest {
 
 	/** 절체 migration 바로 앞 버전. 이 버전까지가 "올리기 전"의 스키마다. */
 	private static final String BEFORE_CUTOVER = MigrationVersions.BEFORE_CUTOVER;
-	private static final Path SETUP = tempSetupFile();
+	private static final Path SETUP = TestFiles.tempYaml("upgrade-setup-");
 	private static boolean legacySeeded;
 
 	private static final UUID OWNER = UUID.randomUUID();
@@ -135,22 +136,5 @@ class UpgradeWithExistingThreadsPostgresTest {
 			throw new IllegalStateException("이전 버전 데이터를 넣을 수 없다", error);
 		}
 		legacySeeded = true;
-	}
-
-	private static void execute(java.sql.Connection connection, String sql, Object... values) throws java.sql.SQLException {
-		try (var statement = connection.prepareStatement(sql)) {
-			for (int index = 0; index < values.length; index++) statement.setObject(index + 1, values[index]);
-			statement.executeUpdate();
-		}
-	}
-
-	private static Path tempSetupFile() {
-		try {
-			Path file = Files.createTempFile("upgrade-setup-", ".yml");
-			file.toFile().deleteOnExit();
-			return file;
-		} catch (IOException error) {
-			throw new IllegalStateException("임시 설정 파일을 만들 수 없다", error);
-		}
 	}
 }

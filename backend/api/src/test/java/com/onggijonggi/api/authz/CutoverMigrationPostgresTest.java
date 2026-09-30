@@ -1,6 +1,9 @@
 package com.onggijonggi.api.authz;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static com.onggijonggi.api.support.JdbcSupport.count;
+import static com.onggijonggi.api.support.JdbcSupport.execute;
+import static com.onggijonggi.api.support.JdbcSupport.uuid;
 import com.onggijonggi.api.support.MigrationVersions;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -196,32 +199,5 @@ class CutoverMigrationPostgresTest {
 		execute(connection, "insert into wrk_node (id, tnn_id, node_key, kind, name, path) values (?, ?, 'root', 'ROOT', 'Root', array[?]::uuid[])", root, tenant, root);
 		execute(connection, "insert into wrk_node (id, tnn_id, prn_id, node_key, kind, name, path) values (?, ?, ?, 'common', 'COMMON', 'Common', array[?, ?]::uuid[])", common, tenant, root, root, common);
 		execute(connection, "insert into wrk_node (id, tnn_id, prn_id, node_key, kind, name, path) values (?, ?, ?, 'team', 'WORK', 'Team', array[?, ?]::uuid[])", team, tenant, root, root, team);
-	}
-
-	private static void execute(Connection connection, String sql, Object... values) throws SQLException {
-		try (PreparedStatement statement = connection.prepareStatement(sql)) {
-			for (int index = 0; index < values.length; index++) statement.setObject(index + 1, values[index]);
-			statement.executeUpdate();
-		}
-	}
-
-	private static int count(Connection connection, String sql, Object... values) throws SQLException {
-		try (PreparedStatement statement = connection.prepareStatement(sql)) {
-			for (int index = 0; index < values.length; index++) statement.setObject(index + 1, values[index]);
-			try (ResultSet rows = statement.executeQuery()) {
-				rows.next();
-				return rows.getInt(1);
-			}
-		}
-	}
-
-	private static UUID uuid(Connection connection, String sql, UUID id) throws SQLException {
-		try (PreparedStatement statement = connection.prepareStatement(sql)) {
-			statement.setObject(1, id);
-			try (ResultSet rows = statement.executeQuery()) {
-				rows.next();
-				return rows.getObject(1, UUID.class);
-			}
-		}
 	}
 }
