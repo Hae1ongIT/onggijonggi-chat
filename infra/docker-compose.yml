@@ -144,6 +144,51 @@ services:
       postgres:
         condition: service_healthy
 
+  casbin:
+    image: casbin/casbin-server:v1.19.0
+    container_name: infra-casbin
+    # 권한 판정 서버. .env에 COMPOSE_PROFILES=casbin(과 SPRING_PROFILE=prod,casbin)을 넣어야 켜진다.
+    profiles:
+      - casbin
+    restart: unless-stopped
+    # gRPC API에 인증이 없어 포트를 밖으로 열지 않는다. bff만 app-net 안에서 casbin:50051로 부른다.
+    # 메모리만 쓰고 저장소가 없다 — 재시작하면 bff가 DB에서 규칙을 다시 넣는다.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app-net
+
+  elasticsearch:
+    build:
+      context: ./elasticsearch
+    image: ogjg-chat/elasticsearch-nori:local
+    container_name: infra-elasticsearch
+    # RAG 검색용. 메모리를 많이 써서 .env에 COMPOSE_PROFILES=elasticsearch 를 넣어야 켜진다.
+    profiles:
+      - elasticsearch
+    restart: unless-stopped
+    # 보안(인증·TLS)을 끈 채라 호스트의 127.0.0.1에만 연다 — 로컬 개발에서 bff가 localhost:9200으로 붙는다.
+    ports:
+      - "127.0.0.1:9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms${ES_HEAP:-1g} -Xmx${ES_HEAP:-1g}
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - app-net
+
   bff:
     build:
       context: ../backend
@@ -173,6 +218,9 @@ services:
       SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL:  ${LLM_MODEL:-gemini-3.6-flash}
       APP_LLM_GATEWAY_URL:                  http://litellm:4000
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_FRONTEND_URL:-http://localhost:3010}
+    volumes:
+      # 조직 구조 설정. SPRING_PROFILE에 casbin이 있을 때만 읽는다(application-casbin.properties).
+      - ./config/workspace-setup.yml:/config/workspace-setup.yml:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8090/actuator/health"]
       interval: 20s
@@ -322,6 +370,7 @@ networks:
 volumes:
   postgres-data:
     driver: local
+  elasticsearch-data:
   caddy_data:
   caddy_config:
   document-worker-seaweed-volume:

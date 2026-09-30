@@ -4,12 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
 import com.onggijonggi.api.auth.keycloak.KeycloakUserSummary;
+import com.onggijonggi.common.authz.OrgUnitMemberRepository;
+import com.onggijonggi.common.authz.OrgUnitRepository;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrInv;
 import com.onggijonggi.common.chat.domain.ThrInvStatus;
@@ -65,12 +69,29 @@ class ThreadParticipantServiceTest {
 	@Mock
 	private InvitationAcceptanceService invitationAcceptanceService;
 
+	@Mock
+	private ThreadMembershipService threadMembershipService;
+
+	@Mock
+	private OrgUnitMemberRepository orgUnitMemberRepository;
+
+	@Mock
+	private OrgUnitRepository orgUnitRepository;
+
+	@Mock
+	private OwnerTransferAuditService ownerTransferAuditService;
+
 	private ThreadParticipantService service;
 
 	@BeforeEach
 	void setUp() {
 		service = new ThreadParticipantService(thrMbrRepository, thrRepository, appUserRepository,
-				roomSessionRegistry, keycloakAdminClient, thrInvRepository, invitationAcceptanceService);
+				roomSessionRegistry, keycloakAdminClient, thrInvRepository, invitationAcceptanceService,
+				threadMembershipService, new RankedDisplayNames(keycloakAdminClient, orgUnitMemberRepository),
+				new PeopleSearch(keycloakAdminClient, orgUnitMemberRepository, orgUnitRepository),
+				ownerTransferAuditService);
+		// 워크스페이스 판정은 따로 검증한다(아래 워크스페이스 테스트). 나머지 테스트는 늘 볼 수 있는 것으로 둔다.
+		lenient().when(threadMembershipService.canEnterWorkspace(any(), any())).thenReturn(Mono.just(true));
 		when(thrRepository.findById(any())).thenAnswer(ignored ->
 				Optional.of(Thr.collab(UUID.randomUUID(), "test room")));
 	}
@@ -141,7 +162,8 @@ class ThreadParticipantServiceTest {
 				ThrMbrStatus.ACTIVE))
 				.thenReturn(Optional.of(new ThrMbr(threadId, targetUserId, ThrMbrRole.MEMBER, actorUserId)));
 		// 사전 확인 시점엔 조건이 맞았지만, 그 사이 다른 위임이 끝나 실제 UPDATE는 한 행만 맞춘다.
-		when(thrMbrRepository.transferOwnership(threadId, actorUserId, targetUserId)).thenReturn(1);
+		doThrow(new ResponseStatusException(HttpStatus.CONFLICT)).when(ownerTransferAuditService)
+				.transfer(threadId, actorUserId, targetUserId);
 
 		StepVerifier.create(service.transferOwner(threadId, actorUserId, "race-target"))
 				.verifyErrorSatisfies(error -> assertThat(error)
@@ -348,7 +370,6 @@ class ThreadParticipantServiceTest {
 		when(thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, targetUserId, ThrMbrRole.MEMBER,
 				ThrMbrStatus.ACTIVE))
 				.thenReturn(Optional.of(new ThrMbr(threadId, targetUserId, ThrMbrRole.MEMBER, actorUserId)));
-		when(thrMbrRepository.transferOwnership(threadId, actorUserId, targetUserId)).thenReturn(2);
 		when(keycloakAdminClient.displayName("new-owner-sub")).thenReturn(Mono.just(Optional.of("New Owner")));
 
 		StepVerifier.create(service.transferOwner(threadId, actorUserId, "new-owner-sub")).verifyComplete();
@@ -461,6 +482,45 @@ class ThreadParticipantServiceTest {
 		StepVerifier.create(service.searchCandidates(threadId, actorUserId, "kim"))
 				.assertNext(candidates -> assertThat(candidates)
 						.containsExactly(new InviteCandidate("fresh-sub", "김신규")))
+				.verifyComplete();
+	}
+
+	/** 그 방의 워크스페이스를 볼 수 없는 사람은 초대하지 않는다 — 참가 행도 대기 초대도 만들지 않는다. */
+	@Test
+	void inviteRejectsSomeoneWhoCannotSeeTheThreadsWorkspace() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("outsider-sub")).thenReturn(Optional.empty());
+		when(threadMembershipService.canEnterWorkspace(threadId, "outsider-sub")).thenReturn(Mono.just(false));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "outsider-sub"))
+				.verifyError(InviteeOutsideWorkspaceException.class);
+		verify(thrMbrRepository, never()).save(any());
+		verify(thrInvRepository, never()).save(any());
+	}
+
+	/** 워크스페이스를 볼 수 없는 사람은 초대 후보에서도 뺀다 — 골라도 초대가 거절된다. */
+	@Test
+	void candidateSearchLeavesOutPeopleWhoCannotSeeTheThreadsWorkspace() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrMbrRepository.findByThrIdAndStatus(threadId, ThrMbrStatus.ACTIVE)).thenReturn(List.of());
+		when(thrInvRepository.findByThrIdAndStatus(threadId, ThrInvStatus.PENDING)).thenReturn(List.of());
+		when(keycloakAdminClient.search("kim", 20)).thenReturn(Mono.just(List.of(
+				new KeycloakUserSummary("colleague-sub", "김동료"),
+				new KeycloakUserSummary("outsider-sub", "김외부"))));
+		when(threadMembershipService.canEnterWorkspace(threadId, "outsider-sub")).thenReturn(Mono.just(false));
+
+		StepVerifier.create(service.searchCandidates(threadId, actorUserId, "kim"))
+				.assertNext(candidates -> assertThat(candidates)
+						.containsExactly(new InviteCandidate("colleague-sub", "김동료")))
 				.verifyComplete();
 	}
 
