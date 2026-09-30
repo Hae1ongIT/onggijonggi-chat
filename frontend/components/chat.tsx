@@ -360,7 +360,16 @@ function ChatSession({
     const latestUser = [...renderedMessages]
       .reverse()
       .find((message) => message.role === 'user');
-    if (!latestUser) return;
+    if (!latestUser) {
+      // 1:1 첫 발화의 bootstrap이 거부돼(권한·서버 설정) 에코가 한 번도 오지 않으면 렌더된 메시지가 없다.
+      // 보냈던 발화를 같은 clientMsgId로 다시 보낸다 — 서버 idempotency가 중복 생성을 막는다.
+      // 첨부만 보낸 발화는 첨부를 다시 실을 수 없어 다시 보내지 않는다.
+      const lastSent = lastSentRef.current;
+      if (lastSent && lastSent.content.trim() !== '') {
+        sendTurn(lastSent.content, lastSent.clientMsgId);
+      }
+      return;
+    }
     if (latestUser.content.trim() === '') {
       // 첨부만 보낸 메시지다 — 첨부를 다시 실을 수 없어 본문 없이 보내면 서버가 거절한다.
       toast.error('파일에 대해 물어볼 내용을 입력해 다시 보내 주세요.');
