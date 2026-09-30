@@ -28,10 +28,15 @@ public class KeycloakAuditStore {
 		this.objectMapper = objectMapper;
 	}
 
-	/** 새로 들어간 행 수. 이미 있는 행(멱등 키·기준선 표지 unique)은 세지 않는다. */
+	/**
+	 * 새로 들어간 행 수. 이미 있는 행(멱등 키·기준선 표지 unique)은 세지 않는다.
+	 * 글자 열은 열 길이에 맞춰 자른다 — 관리자가 만든 긴 역할·매퍼 이름 하나 때문에 저장이 실패해 커서가 멈추고 이후 감사가
+	 * 모두 끊기면 안 된다. 잘랐으면 reference에 원문의 해시를 남긴다(원문은 Keycloak 쪽에 있다).
+	 */
 	public int insert(List<KeycloakAuditRow> rows) {
 		int inserted = 0;
-		for (KeycloakAuditRow row : rows) {
+		for (KeycloakAuditRow original : rows) {
+			KeycloakAuditRow row = fitted(original);
 			inserted += jdbc.update("""
 					insert into keycloak_adt (id, keycloak_evt_id, evt_kind, evt_at, act_subj, act_json, trg_subj, role,
 					                          trg_path, trg_ref)
@@ -42,6 +47,35 @@ public class KeycloakAuditStore {
 					json(row.reference()));
 		}
 		return inserted;
+	}
+
+	private static final int TEXT = 255;
+	private static final int PATH = 1024;
+
+	static KeycloakAuditRow fitted(KeycloakAuditRow row) {
+		Map<String, Object> reference = new java.util.LinkedHashMap<>(row.reference());
+		String role = fit(row.role(), TEXT, "role", reference);
+		String targetPath = fit(row.targetPath(), PATH, "targetPath", reference);
+		String targetSubject = fit(row.targetSubject(), TEXT, "targetSubject", reference);
+		String actorSubject = fit(row.actorSubject(), TEXT, "actorSubject", reference);
+		String eventId = fit(row.keycloakEventId(), TEXT, "keycloakEventId", reference);
+		return new KeycloakAuditRow(eventId, row.kind(), row.occurredAt(), actorSubject, row.actor(), targetSubject, role,
+				targetPath, reference);
+	}
+
+	private static String fit(String value, int limit, String name, Map<String, Object> reference) {
+		if (value == null || value.length() <= limit) return value;
+		reference.put(name + "Truncated", sha256(value));
+		return value.substring(0, limit);
+	}
+
+	private static String sha256(String value) {
+		try {
+			return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+					.digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+		} catch (java.security.NoSuchAlgorithmException impossible) {
+			throw new IllegalStateException(impossible);
+		}
 	}
 
 	public boolean baselineRecorded() {
@@ -55,12 +89,17 @@ public class KeycloakAuditStore {
 				(rs, rowNum) -> rs.getObject(1, OffsetDateTime.class).toInstant()).stream().findFirst();
 	}
 
-	/** 사용자의 마지막으로 기록된 활성 상태. 비활성화·재활성화만 비교하려고 쓴다. */
-	public Optional<Boolean> lastKnownEnabled(String subject) {
+	/** 계정의, 주어진 시각 이전에 마지막으로 기록된 활성 상태와 그 시각. 다시 읽어도 결과가 같도록 시각을 기준으로 한다. */
+	public Optional<EnabledAt> enabledBefore(String subject, Instant before) {
 		return jdbc.query("""
-				select evt_kind from keycloak_adt where trg_subj = ? and evt_kind in ('USER_ENABLED', 'USER_DISABLED')
+				select evt_kind, evt_at from keycloak_adt
+				where trg_subj = ? and evt_kind in ('USER_ENABLED', 'USER_DISABLED') and evt_at < ?
 				order by evt_at desc, created_at desc limit 1
-				""", (rs, rowNum) -> "USER_ENABLED".equals(rs.getString(1)), subject).stream().findFirst();
+				""", (rs, rowNum) -> new EnabledAt("USER_ENABLED".equals(rs.getString(1)),
+				rs.getObject(2, OffsetDateTime.class).toInstant()), subject, Timestamp.from(before)).stream().findFirst();
+	}
+
+	public record EnabledAt(boolean enabled, Instant at) {
 	}
 
 	/** 마지막으로 처리한 이벤트 시각. 한 번도 읽지 않았으면 빈 Optional. */
@@ -72,9 +111,13 @@ public class KeycloakAuditStore {
 				}));
 	}
 
+	/** 커서는 뒤로 가지 않는다(최신 이벤트가 사라져도 다시 읽는 범위만 늘지 않게). */
 	public void advanceCursor(Instant at, String keycloakEventId) {
-		jdbc.update("update keycloak_adt_crs set evt_at = ?, keycloak_evt_id = ? where id = 1",
-				Timestamp.from(at), keycloakEventId);
+		jdbc.update("""
+				update keycloak_adt_crs set keycloak_evt_id = case when evt_at is null or evt_at <= ? then ? else keycloak_evt_id end,
+				       evt_at = greatest(coalesce(evt_at, ?), ?)
+				where id = 1
+				""", Timestamp.from(at), keycloakEventId, Timestamp.from(at), Timestamp.from(at));
 	}
 
 	/** 마지막으로 읽은 Keycloak 이벤트 설정. 처음이면 빈 Optional. */

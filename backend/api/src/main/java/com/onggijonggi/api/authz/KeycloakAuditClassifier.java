@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
@@ -38,7 +39,11 @@ public class KeycloakAuditClassifier {
 	}
 
 	/** 분류에 필요한 현재 상태. */
-	public record Context(String realmManagementClientUuid, Function<String, Optional<Boolean>> lastKnownEnabled,
+	/**
+	 * @param enabledBefore 계정의, 주어진 시각 <b>이전</b> 마지막으로 기록된 활성 상태. 시각을 기준으로 해야 이미 처리한 이벤트를
+	 *                      다시 읽을 때 결과가 같다(지금 상태로 비교하면 나중 변경 때문에 가짜 행이 생긴다).
+	 */
+	public record Context(String realmManagementClientUuid, BiFunction<String, Instant, Optional<Boolean>> enabledBefore,
 			Function<String, Optional<String>> realmRoleNameById) {
 	}
 
@@ -162,7 +167,7 @@ public class KeycloakAuditClassifier {
 				if (user.get("enabled") instanceof Boolean now) {
 					// 이전 값은 Keycloak이 주지 않는다. 마지막으로 기록한 상태와 달라졌을 때만 남긴다(모르면 활성으로 본다 —
 					// 수집 전부터 비활성이던 계정은 기준선이 USER_DISABLED로 남겨 둔다).
-					boolean before = context.lastKnownEnabled().apply(subject).orElse(true);
+					boolean before = context.enabledBefore().apply(subject, Instant.ofEpochMilli(event.time())).orElse(true);
 					if (before != now) {
 						rows.add(now ? KeycloakAuditEventKind.USER_ENABLED : KeycloakAuditEventKind.USER_DISABLED, subject,
 								null, rows.path, new LinkedHashMap<>());
@@ -330,6 +335,17 @@ public class KeycloakAuditClassifier {
 		} catch (NoSuchAlgorithmException impossible) {
 			throw new IllegalStateException(impossible);
 		}
+	}
+
+	/** 분류하다 실패한 이벤트의 행. 상세 원문과 예외 메시지는 넣지 않고 경로·작업·예외 종류만 남긴다. */
+	static KeycloakAuditRow unreadable(KeycloakAdminEvent event, RuntimeException failure) {
+		Map<String, Object> reference = new LinkedHashMap<>();
+		reference.put("operation", event.operationType());
+		reference.put("resourceType", event.resourceType());
+		reference.put("error", failure.getClass().getSimpleName());
+		String path = event.resourcePath() == null || event.resourcePath().isEmpty() ? "realm" : event.resourcePath();
+		return new KeycloakAuditRow(eventId(event), KeycloakAuditEventKind.EVENT_UNREADABLE, Instant.ofEpochMilli(event.time()),
+				actorSubject(event), actor(event), null, null, path, reference);
 	}
 
 	private static String actorSubject(KeycloakAdminEvent event) {

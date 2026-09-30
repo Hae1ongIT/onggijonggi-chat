@@ -47,8 +47,13 @@ public class KeycloakAuditCollector {
 
 	private static final Logger log = LoggerFactory.getLogger(KeycloakAuditCollector.class);
 	private static final Duration CALL_TIMEOUT = Duration.ofSeconds(30);
-	/** 날짜 단위로 다시 읽은 이벤트 중 이만큼 이전 것은 이미 처리한 것으로 보고 건너뛴다(중복은 어차피 멱등 키가 막는다). */
-	private static final Duration REREAD_WINDOW = Duration.ofMinutes(1);
+	/** 이벤트 목록 전체 읽기의 상한. 오래 멈췄다 다시 도는 첫 주기는 며칠치를 읽을 수 있다. */
+	private static final Duration EVENTS_TIMEOUT = Duration.ofMinutes(5);
+	/**
+	 * 커서보다 이만큼 앞의 이벤트까지 다시 분류한다(중복은 멱등 키가 막는다). Keycloak은 이벤트 시각을 요청 시작에 찍고 커밋 뒤에야
+	 * 보이므로, 긴 트랜잭션(대량 import 등, Keycloak 기본 트랜잭션 제한 5분)의 이벤트가 더 늦은 이벤트보다 나중에 보일 수 있다.
+	 */
+	private static final Duration REREAD_WINDOW = Duration.ofMinutes(10);
 
 	static final String PLATFORM_ADMIN = "PLATFORM_ADMIN";
 	/**
@@ -84,7 +89,7 @@ public class KeycloakAuditCollector {
 			recordEventsConfig(now, block(keycloak.eventsConfig()));
 			// 권한이 없으면 403이 아니라 빈 목록이 온다. 원인을 바로 알 수 있게 필요한 권한을 적는다.
 			String realmManagement = block(keycloak.clientUuid(KeycloakAuditClassifier.REALM_MANAGEMENT))
-					.orElseThrow(() -> new IllegalStateException(
+					.orElseThrow(() -> new CollectorProblem(
 							"realm-management 클라이언트를 찾을 수 없다(서비스 계정의 view-clients 권한 확인)"));
 			RoleNames roleNames = roleNames();
 			if (!store.baselineRecorded()) {
@@ -96,13 +101,16 @@ public class KeycloakAuditCollector {
 			if (lastFailure != null) log.info("Keycloak 권한 변경 감사 수집이 회복됐다");
 			lastFailure = null;
 		} catch (RuntimeException failure) {
+			// Keycloak이 재시작 등으로 토큰을 먼저 무효화했으면 다음 주기에 새 토큰을 받는다.
+			if (failure instanceof WebClientResponseException.Unauthorized) keycloak.invalidateToken();
 			String summary = summary(failure);
+			boolean changed = !summary.equals(lastFailure);
 			try {
 				store.recordFailure(now, summary);
 			} catch (RuntimeException statusFailure) {
-				log.warn("Keycloak 권한 변경 감사 수집 상태를 기록하지 못했다", statusFailure);
+				if (changed) log.warn("Keycloak 권한 변경 감사 수집 상태를 기록하지 못했다: {}", summary(statusFailure));
 			}
-			if (!summary.equals(lastFailure)) log.warn("Keycloak 권한 변경 감사 수집 실패: {}", summary);
+			if (changed) log.warn("Keycloak 권한 변경 감사 수집 실패: {}", summary);
 			lastFailure = summary;
 		}
 	}
@@ -172,21 +180,30 @@ public class KeycloakAuditCollector {
 		Optional<Instant> cursor = store.cursor();
 		// Keycloak의 기간 필터는 날짜 단위다. 시간대 차이를 넘기려고 하루 앞부터 읽는다.
 		LocalDate from = cursor.map(at -> at.atZone(ZoneOffset.UTC).toLocalDate().minusDays(1)).orElse(null);
-		List<KeycloakAdminEvent> events = new ArrayList<>(block(keycloak.adminEvents(from)));
+		List<KeycloakAdminEvent> events = new ArrayList<>(keycloak.adminEvents(from).block(EVENTS_TIMEOUT));
 		events.sort(Comparator.comparingLong(KeycloakAdminEvent::time).thenComparing(KeycloakAuditClassifier::eventId));
 		Instant floor = cursor.map(at -> at.minus(REREAD_WINDOW)).orElse(Instant.MIN);
-		Map<String, Boolean> enabledInBatch = new HashMap<>();
+		// 이번 배치에서 먼저 나온 활성 상태 변화. 시각 순으로 처리하므로 조회 시점보다 앞선 것만 쓴다.
+		Map<String, List<KeycloakAuditStore.EnabledAt>> enabledInBatch = new HashMap<>();
 		KeycloakAuditClassifier.Context context = new KeycloakAuditClassifier.Context(realmManagement,
-				subject -> enabledInBatch.containsKey(subject) ? Optional.of(enabledInBatch.get(subject))
-						: store.lastKnownEnabled(subject),
+				(subject, at) -> enabledBefore(subject, at, enabledInBatch),
 				id -> Optional.ofNullable(roleNames.lookup().get(id)));
 		List<KeycloakAuditRow> rows = new ArrayList<>();
 		KeycloakAdminEvent last = null;
 		for (KeycloakAdminEvent event : events) {
 			if (Instant.ofEpochMilli(event.time()).isBefore(floor)) continue;
-			for (KeycloakAuditRow row : classifier.classify(event, context)) {
-				if (row.kind() == KeycloakAuditEventKind.USER_ENABLED) enabledInBatch.put(row.targetSubject(), true);
-				if (row.kind() == KeycloakAuditEventKind.USER_DISABLED) enabledInBatch.put(row.targetSubject(), false);
+			List<KeycloakAuditRow> classified;
+			try {
+				classified = classifier.classify(event, context);
+			} catch (RuntimeException unreadable) {
+				// 이벤트 한 건 때문에 수집 전체가 멈추면 이후 감사가 모두 끊긴다. 요지만 남기고 넘어간다.
+				classified = List.of(KeycloakAuditClassifier.unreadable(event, unreadable));
+			}
+			for (KeycloakAuditRow row : classified) {
+				if (row.kind() == KeycloakAuditEventKind.USER_ENABLED || row.kind() == KeycloakAuditEventKind.USER_DISABLED) {
+					enabledInBatch.computeIfAbsent(row.targetSubject(), ignored -> new ArrayList<>()).add(
+							new KeycloakAuditStore.EnabledAt(row.kind() == KeycloakAuditEventKind.USER_ENABLED, row.occurredAt()));
+				}
 				roleNames.learn(row);
 				rows.add(row);
 			}
@@ -200,6 +217,18 @@ public class KeycloakAuditCollector {
 				store.advanceCursor(Instant.ofEpochMilli(newest.time()), KeycloakAuditClassifier.eventId(newest));
 			}
 		});
+	}
+
+	/** 주어진 시각 이전의 마지막 활성 상태 — DB 기록과 이번 배치에서 먼저 나온 변화 중 더 늦은 것. */
+	private Optional<Boolean> enabledBefore(String subject, Instant at,
+			Map<String, List<KeycloakAuditStore.EnabledAt>> enabledInBatch) {
+		Optional<KeycloakAuditStore.EnabledAt> latest = store.enabledBefore(subject, at);
+		for (KeycloakAuditStore.EnabledAt change : enabledInBatch.getOrDefault(subject, List.of())) {
+			if (change.at().isBefore(at) && (latest.isEmpty() || !change.at().isBefore(latest.get().at()))) {
+				latest = Optional.of(change);
+			}
+		}
+		return latest.map(KeycloakAuditStore.EnabledAt::enabled);
 	}
 
 	/**
@@ -227,8 +256,9 @@ public class KeycloakAuditCollector {
 		for (KeycloakAuditRow row : rows) covered.add(row.targetSubject() + "|" + row.role());
 		for (KeycloakUser user : block(keycloak.users())) {
 			List<String> held = new ArrayList<>();
-			if (block(keycloak.effectiveRealmRoleNames(user.id())).contains(PLATFORM_ADMIN)) held.add(PLATFORM_ADMIN);
-			for (String role : block(keycloak.effectiveClientRoleNames(user.id(), realmManagement))) {
+			// 기준선을 잡는 사이 지워진 계정(404)은 건너뛴다 — 한 명 때문에 기준선 전체를 버리지 않는다.
+			if (orNone(keycloak.effectiveRealmRoleNames(user.id())).contains(PLATFORM_ADMIN)) held.add(PLATFORM_ADMIN);
+			for (String role : orNone(keycloak.effectiveClientRoleNames(user.id(), realmManagement))) {
 				if (MANAGEMENT_ROLES.contains(role)) held.add(KeycloakAuditClassifier.REALM_MANAGEMENT + "/" + role);
 			}
 			for (String role : held) {
@@ -283,8 +313,8 @@ public class KeycloakAuditCollector {
 		while (!pending.isEmpty()) {
 			String current = pending.pop();
 			if (!visited.add(current)) continue;
-			members.addAll(block(keycloak.groupMemberIds(current)));
-			for (KeycloakGroup child : block(keycloak.subGroups(current))) pending.push(child.id());
+			members.addAll(orNone(keycloak.groupMemberIds(current)));
+			for (KeycloakGroup child : orNone(keycloak.subGroups(current))) pending.push(child.id());
 		}
 		return members;
 	}
@@ -309,7 +339,7 @@ public class KeycloakAuditCollector {
 		return result;
 	}
 
-	/** 역할이 아직 없으면(404) 보유자가 없는 것이다. 역할이 없다고 수집 전체를 멈추지 않는다. */
+	/** 역할·계정·그룹이 없으면(404) 보유자가 없는 것이다. 없다고 수집 전체를 멈추지 않는다. */
 	private static <T> List<T> orNone(Mono<List<T>> call) {
 		return block(call.onErrorResume(WebClientResponseException.NotFound.class, missing -> Mono.just(List.of())));
 	}
@@ -318,14 +348,23 @@ public class KeycloakAuditCollector {
 		return call.block(CALL_TIMEOUT);
 	}
 
-	/** 수집 상태에 남길 요지. 응답 본문·토큰은 넣지 않는다. */
+	/**
+	 * 수집 상태에 남길 요지. PLATFORM_ADMIN에게 조회로 보이므로 응답 본문·토큰·SQL(행 값이 들어 있다)·내부 호스트는 넣지 않는다.
+	 * Keycloak 응답은 상태와 경로만, 이 클래스가 직접 만든 설명(CollectorProblem)은 문장 그대로, 나머지는 예외 종류만 남긴다.
+	 */
 	static String summary(RuntimeException failure) {
 		if (failure instanceof WebClientResponseException response) {
 			String path = response.getRequest() == null ? "" : " " + response.getRequest().getURI().getPath();
 			return "Keycloak " + response.getStatusCode().value() + path;
 		}
-		String message = failure.getMessage() == null ? "" : ": " + failure.getMessage();
-		String text = failure.getClass().getSimpleName() + message;
-		return text.length() > 300 ? text.substring(0, 300) : text;
+		if (failure instanceof CollectorProblem) return failure.getMessage();
+		return failure.getClass().getSimpleName();
+	}
+
+	/** 수집기가 직접 설명하는 문제. 문장에 비밀·행 값을 넣지 않으므로 그대로 수집 상태에 남긴다. */
+	static final class CollectorProblem extends IllegalStateException {
+		CollectorProblem(String message) {
+			super(message);
+		}
 	}
 }

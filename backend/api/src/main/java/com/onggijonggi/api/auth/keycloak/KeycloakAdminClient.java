@@ -390,6 +390,11 @@ public class KeycloakAdminClient {
 				.collectList());
 	}
 
+	/** Keycloak이 재시작 등으로 토큰을 먼저 무효화했을 때(401) 다음 호출이 새 토큰을 받게 한다. */
+	public void invalidateToken() {
+		cachedToken.set(null);
+	}
+
 	private static final int PAGE = 100;
 
 	/** first/max로 페이지를 끝까지 읽는다. 한 페이지가 가득 차면 다음 페이지를 더 묻는다. */

@@ -154,6 +154,52 @@ class KeycloakAuditClassifierTest {
 	}
 
 	@Test
+	void theEnabledStateIsLookedUpAsOfTheEventTime() {
+		java.util.List<java.time.Instant> asked = new java.util.ArrayList<>();
+		KeycloakAuditClassifier.Context context = new KeycloakAuditClassifier.Context(REALM_MANAGEMENT, (subject, at) -> {
+			asked.add(at);
+			return Optional.empty();
+		}, id -> Optional.empty());
+
+		classifier.classify(event("UPDATE", "users/u1", "{\"enabled\":false}"), context);
+
+		// 지금 상태가 아니라 그 이벤트 시각 이전 상태를 묻는다 — 다시 읽어도 결과가 같다.
+		assertThat(asked).containsExactly(java.time.Instant.ofEpochMilli(1000L));
+	}
+
+	@Test
+	void aTooLongValueIsCutToTheColumnAndLeavesADigest() {
+		KeycloakAuditRow row = new KeycloakAuditRow("e", KeycloakAuditEventKind.TOKEN_MAPPER_CHANGED, java.time.Instant.EPOCH,
+				null, Map.of(), null, "r".repeat(300), "p".repeat(2000), Map.of("operation", "CREATE"));
+
+		KeycloakAuditRow fitted = KeycloakAuditStore.fitted(row);
+
+		assertThat(fitted.role()).hasSize(255);
+		assertThat(fitted.targetPath()).hasSize(1024);
+		assertThat(fitted.reference()).containsKeys("roleTruncated", "targetPathTruncated").containsEntry("operation", "CREATE");
+	}
+
+	@Test
+	void theFailureSummaryNeverCarriesRowValuesOrHosts() {
+		assertThat(KeycloakAuditCollector.summary(new org.springframework.dao.DataIntegrityViolationException(
+				"Failing row contains (secret-subject, PLATFORM_ADMIN)"))).isEqualTo("DataIntegrityViolationException");
+		assertThat(KeycloakAuditCollector.summary(new IllegalStateException("connect to 10.0.0.5 failed")))
+				.isEqualTo("IllegalStateException");
+		assertThat(KeycloakAuditCollector.summary(new KeycloakAuditCollector.CollectorProblem("view-clients 권한 확인")))
+				.isEqualTo("view-clients 권한 확인");
+	}
+
+	@Test
+	void anEventThatCannotBeClassifiedBecomesAnUnreadableRowWithoutItsDetails() {
+		KeycloakAuditRow row = KeycloakAuditClassifier.unreadable(event("UPDATE", "users/u1", "{\"secret\":\"x\"}"),
+				new ClassCastException("boom"));
+
+		assertThat(row.kind()).isEqualTo(KeycloakAuditEventKind.EVENT_UNREADABLE);
+		assertThat(row.reference()).containsEntry("error", "ClassCastException").doesNotContainValue("boom");
+		assertThat(row.reference().toString()).doesNotContain("secret");
+	}
+
+	@Test
 	void theActorKeepsRealmAndClientButNeverTheIpAddress() {
 		KeycloakAuditRow row = classify(event("DELETE", "users/u1", null)).get(0);
 
@@ -187,7 +233,7 @@ class KeycloakAuditClassifierTest {
 	}
 
 	private static KeycloakAuditClassifier.Context context(Function<String, Optional<Boolean>> lastKnownEnabled) {
-		return new KeycloakAuditClassifier.Context(REALM_MANAGEMENT, lastKnownEnabled,
+		return new KeycloakAuditClassifier.Context(REALM_MANAGEMENT, (subject, at) -> lastKnownEnabled.apply(subject),
 				id -> Optional.ofNullable(ROLES_BY_ID.get(id)));
 	}
 

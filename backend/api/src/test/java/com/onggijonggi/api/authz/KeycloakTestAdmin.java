@@ -153,7 +153,11 @@ final class KeycloakTestAdmin {
 
 	/** 토큰에 역할을 싣는 hardcoded-role 매퍼를 클라이언트에 붙인다. */
 	void addHardcodedRoleMapper(String clientId, String role) {
-		send("POST", realmPath("/clients/" + clientUuid(clientId) + "/protocol-mappers/models"), Map.of("name", "hardcoded-" + role,
+		addHardcodedRoleMapper(clientId, "hardcoded-" + role, role);
+	}
+
+	void addHardcodedRoleMapper(String clientId, String name, String role) {
+		send("POST", realmPath("/clients/" + clientUuid(clientId) + "/protocol-mappers/models"), Map.of("name", name,
 				"protocol", "openid-connect", "protocolMapper", "oidc-hardcoded-role-mapper", "config", Map.of("role", role)));
 	}
 

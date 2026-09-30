@@ -21,7 +21,7 @@ create table keycloak_adt (
         'ROLE_GRANTED', 'ROLE_REVOKED', 'GROUP_JOINED', 'GROUP_LEFT', 'GROUP_ROLE_GRANTED', 'GROUP_ROLE_REVOKED',
         'ROLE_DEFINITION_CHANGED', 'GROUP_MOVED', 'GROUP_DELETED', 'MANAGEMENT_ROLE_GRANTED', 'MANAGEMENT_ROLE_REVOKED',
         'USER_CREATED_WITH_ACCESS', 'USER_ENABLED', 'USER_DISABLED', 'USER_DELETED', 'TOKEN_MAPPER_CHANGED', 'EVENT_CONFIG_CHANGED',
-        'ROLE_HELD_AT_START', 'BASELINE_RECORDED')),
+        'EVENT_UNREADABLE', 'ROLE_HELD_AT_START', 'BASELINE_RECORDED')),
     -- 같은 이벤트를 두 번 읽어도 한 행. 역할이 없는 이벤트도 막도록 NULL을 같은 값으로 본다. 한 이벤트의 여러 행은
     -- 역할(role)·그룹(trg_path)으로, 이벤트 id가 없는 기준선 행은 보유자(trg_subj)로 갈린다.
     constraint uq_keycloak_adt_evt unique nulls not distinct (keycloak_evt_id, trg_subj, trg_path, role)
@@ -30,6 +30,8 @@ create table keycloak_adt (
 -- 기준선은 한 번만 잡는다.
 create unique index ux_keycloak_adt_baseline on keycloak_adt (evt_kind) where evt_kind = 'BASELINE_RECORDED';
 create index ix_keycloak_adt_evt_at on keycloak_adt (evt_at desc, id desc);
+-- 대상 계정별 조회와 수집기의 "이 계정의 마지막 활성 상태" 조회.
+create index ix_keycloak_adt_trg_subj on keycloak_adt (trg_subj, evt_at desc);
 
 -- 감사 행은 UPDATE·DELETE·TRUNCATE를 모두 거부한다. replica 모드에서도 우회되지 않게 ENABLE ALWAYS로 고정한다.
 create or replace function keycloak_adt_append_only()

@@ -175,6 +175,31 @@ class KeycloakAuditKeycloakTest {
 	}
 
 	@Test
+	void rereadingTheSameEventsNeverInventsAnEnableAndOversizedValuesDoNotStopCollection() {
+		Setup setup = setup(COLLECTOR_ROLES);
+		KeycloakTestAdmin admin = setup.admin();
+		setup.collector().runOnce();
+		// 프로필 저장(활성 그대로) 뒤 곧바로 비활성화. 두 이벤트가 재독 창 안에 있어 다음 주기에도 다시 분류된다.
+		String carl = admin.createUser(Map.of("username", "carl", "enabled", true));
+		admin.updateUser(carl, Map.of("enabled", true, "firstName", "칼"));
+		admin.updateUser(carl, Map.of("enabled", false));
+		// 관리자가 300자 역할 이름을 가진 매퍼를 만들어도 수집이 멈추지 않는다.
+		admin.addHardcodedRoleMapper("bff", "long-role", "R".repeat(300));
+
+		setup.collector().runOnce();
+		setup.collector().runOnce();
+
+		assertThat(setup.state().lastError()).isNull();
+		assertThat(rows(setup.jdbc())).filteredOn(row -> row.contains(carl)).containsExactly("USER_DISABLED|" + carl + "|");
+		assertThat(setup.jdbc().queryForObject("select length(role) from keycloak_adt where evt_kind = 'TOKEN_MAPPER_CHANGED'"
+				+ " and trg_ref ? 'roleTruncated'", Integer.class)).isEqualTo(255);
+		// 그 뒤의 변경도 계속 수집된다.
+		admin.updateUser(carl, Map.of("enabled", true));
+		setup.collector().runOnce();
+		assertThat(rows(setup.jdbc())).contains("USER_ENABLED|" + carl + "|");
+	}
+
+	@Test
 	void aRealmWithoutThePlatformAdminRoleStillRecordsTheBaselineAndCollects() {
 		Setup setup = setup(COLLECTOR_ROLES);
 		setup.admin().deleteRole("PLATFORM_ADMIN");

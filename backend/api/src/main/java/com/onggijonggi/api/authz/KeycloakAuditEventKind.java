@@ -24,6 +24,8 @@ public enum KeycloakAuditEventKind {
 	USER_DELETED,
 	TOKEN_MAPPER_CHANGED,
 	EVENT_CONFIG_CHANGED,
+	/** 분류하다 실패한 이벤트. 한 건 때문에 수집 전체가 멈추지 않게 요지만 남기고 넘어간다. */
+	EVENT_UNREADABLE,
 	ROLE_HELD_AT_START,
 	BASELINE_RECORDED
 }
