@@ -61,7 +61,7 @@ class UpgradeWithExistingThreadsPostgresTest {
 		registry.add("spring.datasource.username", POSTGRES::getUsername);
 		registry.add("spring.datasource.password", POSTGRES::getPassword);
 		registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
-		// 올리는 절차의 핵심: 새 앱을 띄우되 Flyway는 끈다. 스키마는 절체 migration 앞에 머문다.
+		// 올리는 절차(SPRING_FLYWAY_TARGET)로 스키마가 절체 migration 앞에 머문 상태를 재현한다. 앱은 Flyway 없이 그 스키마 위에서 뜬다.
 		registry.add("spring.flyway.enabled", () -> "false");
 		registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
 		registry.add("app.rbac.workspace-setup-path", SETUP::toString);

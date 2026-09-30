@@ -222,7 +222,7 @@ SPRING_PROFILE=prod,casbin
 COMPOSE_PROFILES=casbin
 ```
 
-`casbin`을 `prod` **뒤에** 적어야 한다 — 그러면 기본 조직 구조(고객사 `ogjg` 하나) 대신 팀·워크스페이스·규칙이 있는 `workspace-setup.yml`을 읽는다. 두 파일이 같은 고객사(`ogjg`)를 가리키므로 바꿔도 고객사가 둘로 늘지 않는다.
+`casbin`을 `prod` **뒤에** 적어야 한다 — 그러면 기본 조직 구조(고객사 `ogjg` 하나) 대신 팀·워크스페이스·규칙이 있는 `workspace-setup.yml`을 읽는다. 두 파일이 같은 고객사(`ogjg`)를 가리키므로 바꿔도 고객사가 둘로 늘지 않는다. `workspace-setup.yml`의 `tnn_key: ogjg`를 바꾸지 않는다 — 바꾸면 고객사가 둘이 되어 권한 기능이 꺼진 배포는 새 대화를 만들 수 없고(503) 기존 대화 절체도 멈춘다.
 
 ```bash
 docker compose up -d --build
@@ -241,7 +241,7 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 **3. 화면에서 확인한다.** `APP_USER`로 로그인하면 사이드바에 **권한 관리**가 생긴다(`demo` 계정은 일반 사용자라 메뉴가 없다)(<http://localhost:3010/admin/permissions>). 사람마다 팀·직급을 바꾸면 "누가 무엇을 보나" 표가 실제 판정 결과로 바뀐다.
 
-끄려면 두 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다.
+끄려면 두 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 넣어둔 팀·직급은 DB에 남는다. 단, 기존 대화 절체를 마치고 완료 표지가 기록된 DB에서는 끌 수 없다(아래「v0.2에서 올릴 때」).
 
 ---
 
@@ -263,7 +263,7 @@ docker compose up -d --build bff
 
 **✅ 성공**: BFF 로그에 `RBAC bootstrap 완료`가 찍히고 처리된 Tenant에 `ogjg`가 보인다. 기본 고객사(`ogjg`)와 공용 공간이 만들어졌다. 대화는 아직 그대로다.
 
-**3. Flyway를 다시 켜고 띄운다.** 2단계에서 넣은 줄을 지우고(지우지 않으면 이후 migration이 조용히 적용되지 않는다) 다시 띄우면, 이번엔 migration이 기존 대화를 공용 공간에 놓고 스키마를 마무리한다.
+**3. Flyway를 끝까지 적용해 띄운다.** 권한 판정(`prod,casbin`)을 켤 운영 DB라면 이 단계 전에 PLATFORM_ADMIN 계정으로 `POST /api/platform/rbac/cutover-validation`을 호출해 응답의 `failures`가 비어 있는지 확인한다(팀 배정 누락, 공용 공간 밖 대화 등을 알려 준다). 그다음 2단계에서 넣은 줄을 지우고(지우지 않으면 이후 migration이 조용히 적용되지 않는다) 다시 띄우면, 이번엔 migration이 기존 대화를 공용 공간에 놓고 스키마를 마무리한다.
 
 ```bash
 docker compose up -d bff
@@ -271,9 +271,11 @@ docker compose up -d bff
 
 **✅ 성공**: BFF가 정상 기동한다. 기존 대화가 모두 그대로 열린다.
 
-권한 기능을 켜서 쓰던 배포라면 이미 고객사가 있으므로 이 절차가 필요 없다. 고객사가 둘 이상이면 migration은 어느 쪽에 귀속할지 추측하지 않고 멈춘다.
+권한 기능을 켜서 쓰던 배포라면 이미 고객사가 있으므로 이 절차가 필요 없다. 공용 공간이 정확히 하나가 아니거나, 고객사가 둘 이상이거나, 대화가 공용 공간 밖·다른 고객사에 있으면 migration은 어느 쪽에 귀속할지 추측하지 않고 오류 메시지와 함께 멈춘다. 제약을 거는 migration은 다른 트랜잭션이 잠금을 10초 넘게 쥐고 있으면 실패하고 통째로 되돌려진다 — 쓰기를 멈춘 상태에서 같은 명령을 다시 실행한다.
 
-**되돌릴 수 없다는 점.** migration은 단계별로 따로 커밋되므로 중간 단계가 실패하면 DB가 일부만 바뀐 채 멈출 수 있다. 적용된 migration은 고치지 않고 새 migration으로 앞으로 고친다. 올리기 전에 DB를 백업한다. 이 절차를 마치면 권한 판정을 끈 채(`app.rbac.enforce=false`)로는 이 DB를 띄울 수 없다는 기동 가드가 켜지는 완료 표지가 기록될 수 있으니(운영자가 사후 검증 뒤 기록), 표지를 남긴 뒤에는 `SPRING_PROFILE=prod,casbin`으로만 띄운다.
+**되돌릴 수 없다는 점.** migration은 단계별로 따로 커밋되므로 중간 단계가 실패하면 DB가 일부만 바뀐 채 멈출 수 있다. 적용된 migration은 고치지 않고 새 migration으로 앞으로 고친다. 올리기 전에 DB를 백업한다.
+
+**완료 표지.** 이 절차 자체는 표지를 기록하지 않는다. 권한 판정을 켠 운영 DB에서 절체를 마친 운영자가 사후 검증과 `enforce=true` 인가 확인 뒤 `insert into ctv (id, tnn_id) values (1, '<검증한 고객사 id>')`로 직접 기록한다. 표지는 수정·삭제·TRUNCATE가 거부되고, 표지가 있는 DB는 `app.rbac.enforce=false`로 기동하지 못하므로 그 뒤에는 `SPRING_PROFILE=prod,casbin`과 `COMPOSE_PROFILES=casbin`을 함께 유지해야 한다. 표지가 없는 기본 배포에는 이 제한이 없다.
 
 ---
 
