@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -67,7 +68,7 @@ public class CutoverValidationService {
 	 * 운영자 API용: Keycloak 활성 계정 목록이 비었는데 DB에 사용자가 있으면 목록을 못 받은 것으로 본다.
 	 * 목록이 비면 모든 참여 이력이 "비활성 계정"으로 취급돼 계정 검사가 통째로 건너뛰어지므로, 통과로 읽히지 않게 막는다.
 	 */
-	@Transactional(readOnly = true)
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
 	public CutoverValidationResult validateWithKeycloak(Collection<String> enabledSubjects) {
 		CutoverValidationResult result = validate(enabledSubjects);
 		if (!enabledSubjects.isEmpty() || users.count() == 0) return result;
@@ -76,8 +77,9 @@ public class CutoverValidationService {
 		return new CutoverValidationResult(result.tenantId(), List.copyOf(failures));
 	}
 
-	/** Keycloak에서 활성인 subject만 받는다. app_user의 로컬 INACTIVE는 재활성화 가능하므로 제외 근거가 아니다. */
-	@Transactional(readOnly = true)
+	/** 읽기 전용 REPEATABLE_READ — 여러 표를 나눠 읽어도 한 시점의 스냅샷이라, 점검창에 쓰기가 남아 있어도 조합이 어긋나지 않는다.
+	 * Keycloak에서 활성인 subject만 받는다. app_user의 로컬 INACTIVE는 재활성화 가능하므로 제외 근거가 아니다. */
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
 	public CutoverValidationResult validate(Collection<String> enabledSubjects) {
 		// 같은 (코드, Thread, subject)는 한 번만 담는다. 상한을 넘으면 나머지는 버리고 표시만 남긴다.
 		Set<CutoverValidationResult.Failure> failures = new LinkedHashSet<>();
