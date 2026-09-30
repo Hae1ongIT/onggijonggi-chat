@@ -51,8 +51,9 @@ class WorkspaceAuthorizerTest {
 	private final OrgUnitRepository orgUnits = mock(OrgUnitRepository.class);
 	private final CasbinRuleLoader loader = mock(CasbinRuleLoader.class);
 	private final CasbinClient client = mock(CasbinClient.class);
+	private final RbacPolicyRefresh policyRefresh = mock(RbacPolicyRefresh.class);
 	private final WorkspaceAuthorizer authorizer = new WorkspaceAuthorizer(rbac, nodes, members, tenants, orgUnits, loader, client,
-			new JsonMapper());
+			new JsonMapper(), policyRefresh);
 
 	private WorkspaceNode root;
 	private WorkspaceNode hr;

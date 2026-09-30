@@ -27,6 +27,8 @@ public interface ThrRepository extends JpaRepository<Thr, UUID> {
 	/** Workspace 노드가 Thread에 쓰이는지 — 쓰이는 노드는 reparent할 수 없다(0001 6.4). */
 	boolean existsByWorkspaceNodeId(UUID workspaceNodeId);
 
+	List<Thr> findByWorkspaceNodeIdAndKind(UUID workspaceNodeId, ThrKind kind);
+
 	/** 기존 1:1 목록 호환 경로는 DIRECT 소유 Thread만 생성 시각 역순으로 읽는다. */
 	List<Thr> findByKindAndDrcOwnUserIdOrderByCreatedAtDesc(ThrKind kind, UUID drcOwnUserId);
 

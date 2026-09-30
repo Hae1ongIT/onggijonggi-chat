@@ -1,5 +1,6 @@
 package com.onggijonggi.api.common;
 
+import com.onggijonggi.api.authz.RbacStateConflictException;
 import com.onggijonggi.api.chat.IdempotencyKeyConflictException;
 import com.onggijonggi.api.chat.InviteeOutsideWorkspaceException;
 import com.onggijonggi.api.chat.MsgFileRejectedException;
@@ -93,6 +94,14 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleMsgFileRejected(MsgFileRejectedException ex, ServerWebExchange exchange) {
 		return ResponseEntity.status(ex.getStatus())
 				.body(ErrorResponse.of(ex.getCode(), ex.getMessage(), traceId(exchange)));
+	}
+
+	/** Workspace·부여·org-unit 관리(#260)가 현재 권한 구성 상태 때문에 거부된 경우(선언 리소스, 마지막 ADMIN, 남은 방 등).
+	 * 참여자 상태 충돌과 원인이 달라 별도 코드를 붙인다 — 같은 코드면 화면이 "참여자 정보가 바뀌었다"고 잘못 안내한다. */
+	@ExceptionHandler(RbacStateConflictException.class)
+	public ResponseEntity<ErrorResponse> handleRbacStateConflict(RbacStateConflictException ex, ServerWebExchange exchange) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(ErrorResponse.of("RBAC_STATE_CONFLICT", "권한 구성 상태 때문에 요청을 처리할 수 없습니다.", traceId(exchange)));
 	}
 
 	/** ThrMbr.ver(이슈 #137) 같은 낙관적 잠금 필드가 읽은 뒤 다른 트랜잭션에 덮어써졌을 때. 같은

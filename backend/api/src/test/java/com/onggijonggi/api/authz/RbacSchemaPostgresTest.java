@@ -195,6 +195,53 @@ class RbacSchemaPostgresTest {
 		}
 	}
 
+	@Test
+	void grantedLeafCanMoveOnlyWhenGrantsAreRestoredInTheSameTransaction() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "grant-move");
+			UUID root = root(c, tenant);
+			UUID oldParent = node(c, tenant, root, "old", "ORG", "Old");
+			UUID newParent = node(c, tenant, root, "new", "ORG", "New");
+			UUID leaf = node(c, tenant, oldParent, "leaf", "WORK", "Leaf");
+			UUID unit = orgUnit(c, tenant, "unit");
+			UUID grantId = grant(c, tenant, unit, leaf, "ADMIN");
+
+			c.setAutoCommit(false);
+			try {
+				execute(c, "delete from wrk_grn where id = ?", grantId);
+				move(c, leaf, newParent);
+				execute(c, "insert into wrk_grn (id, tnn_id, org_unit_id, wrk_node_id, role) values (?, ?, ?, ?, 'ADMIN')",
+						grantId, tenant, unit, leaf);
+				c.commit();
+			} finally {
+				c.rollback();
+				c.setAutoCommit(true);
+			}
+			assertThat(pathLength(c, leaf)).isEqualTo(3);
+			assertThat(query(c, "select prn_id from wrk_node where id = ?", leaf)).isEqualTo(newParent);
+			assertThat(count(c, "wrk_grn", "id", grantId)).isEqualTo(1);
+
+			UUID otherLeaf = node(c, tenant, oldParent, "other", "WORK", "Other");
+			UUID inactiveUnit = orgUnit(c, tenant, "inactive");
+			UUID inactiveGrant = grant(c, tenant, inactiveUnit, otherLeaf, "ADMIN");
+			execute(c, "update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?", inactiveUnit);
+			c.setAutoCommit(false);
+			try {
+				execute(c, "delete from wrk_grn where id = ?", inactiveGrant);
+				move(c, otherLeaf, newParent);
+				assertRejected("P0001", "active organization unit", () -> execute(c,
+						"insert into wrk_grn (id, tnn_id, org_unit_id, wrk_node_id, role) values (?, ?, ?, ?, 'ADMIN')",
+						inactiveGrant, tenant, inactiveUnit, otherLeaf));
+			} finally {
+				c.rollback();
+				c.setAutoCommit(true);
+			}
+			assertThat(pathLength(c, otherLeaf)).isEqualTo(3);
+			assertThat(query(c, "select prn_id from wrk_node where id = ?", otherLeaf)).isEqualTo(oldParent);
+			assertThat(count(c, "wrk_grn", "id", inactiveGrant)).isEqualTo(1);
+		}
+	}
+
 	// ------------------------------------------------------------------ 부여
 
 	@Test

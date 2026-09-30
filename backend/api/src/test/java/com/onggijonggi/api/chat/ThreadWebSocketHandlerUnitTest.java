@@ -220,12 +220,15 @@ class ThreadWebSocketHandlerUnitTest {
 		var handlerSubscription = handler.handle(session).subscribe();
 		try {
 			assertThat(slowJoined.await(1, TimeUnit.SECONDS)).isTrue();
-			for (int i = 0; i < 1000 && slowLeft.getCount() > 0; i++) {
+			// 러너가 느려 버퍼가 차기 전에 반복이 끝나는 경우가 있어, 퇴장 통보가 올 때까지 제한 시간 안에서 계속 방송한다.
+			long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+			for (int i = 0; slowLeft.getCount() > 0 && System.nanoTime() < deadline; i++) {
 				registry.broadcastIfCurrent(threadId, observer.generation(),
 						new ChatMessageFrame(threadId, UUID.randomUUID(), null, null, 0L, "someone", "누군가", "message-" + i, List.of()));
+				if (i % 1000 == 999) Thread.sleep(20);
 			}
 
-			assertThat(slowLeft.await(2, TimeUnit.SECONDS)).isTrue();
+			assertThat(slowLeft.await(5, TimeUnit.SECONDS)).isTrue();
 			verify(session, never()).close(any(CloseStatus.class));
 		} finally {
 			handlerSubscription.dispose();
