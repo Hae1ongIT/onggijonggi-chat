@@ -320,6 +320,9 @@ function ChatSession({
   const lastSentRef = useRef<{ content: string; clientMsgId: string } | null>(
     null,
   );
+  // 새 대화의 첫 발화를 보냈지만 서버 에코를 아직 못 받아 로컬 세션을 만들지 않은 상태.
+  const sessionPendingRef = useRef(false);
+  const sessionTitleRef = useRef('');
 
   const sendTurn = useCallback(
     (
@@ -366,6 +369,8 @@ function ChatSession({
       // 첨부만 보낸 발화는 첨부를 다시 실을 수 없어 다시 보내지 않는다.
       const lastSent = lastSentRef.current;
       if (lastSent && lastSent.content.trim() !== '') {
+        sessionPendingRef.current = true;
+        sessionTitleRef.current = lastSent.content;
         sendTurn(lastSent.content, lastSent.clientMsgId);
       }
       return;
@@ -414,24 +419,40 @@ function ChatSession({
   // 만든다(draft 화면 새로고침으로 빈 세션이 쌓이지 않도록).
   const handleSend = useCallback(
     (content: string, attachments: MessageAttachment[]) => {
-      const { sessions, createSession, applyFirstMessageTitle } =
+      const { sessions, applyFirstMessageTitle } =
         useChatSessionsStore.getState();
-      if (!sessions.some((session) => session.id === id)) {
-        createSession({ id, modelId: modelIdRef.current });
-      }
-      // 서버도 첫 발화로 제목을 정하지만 사이드바는 마운트당 한 번만 서버 목록을 읽는다 —
-      // 여기서 정해 두지 않으면 새 대화가 새로고침 전까지 "새 대화"로 남는다. 첨부만 보냈으면
-      // 서버와 같이 첫 파일 이름을 제목으로 쓴다.
-      applyFirstMessageTitle(
-        id,
+      // 첨부만 보냈으면 서버와 같이 첫 파일 이름을 제목으로 쓴다.
+      const title =
         content.trim() === '' && attachments.length > 0
           ? attachments[0].fileName
-          : content,
-      );
+          : content;
+      if (sessions.some((session) => session.id === id)) {
+        applyFirstMessageTitle(id, title);
+      } else {
+        // 새 대화의 세션은 서버가 첫 발화를 받아 에코한 뒤에 만든다(아래 effect). 지금 만들면 첫 발화가
+        // 거부됐을 때(권한·서버 설정) 서버에는 없는 방이 사이드바에 남는다.
+        sessionPendingRef.current = true;
+        sessionTitleRef.current = title;
+      }
       sendTurn(content, undefined, attachments);
     },
     [id, sendTurn],
   );
+
+  // 새 대화의 로컬 세션은 첫 사람 발화의 에코가 온 뒤에 만든다. 서버도 첫 발화로 제목을 정하지만 사이드바는
+  // 마운트당 한 번만 서버 목록을 읽으므로, 여기서 제목을 정해 두지 않으면 새로고침 전까지 "새 대화"로 남는다.
+  useEffect(() => {
+    if (!sessionPendingRef.current) return;
+    const first = renderedMessages.find((message) => message.role === 'user');
+    if (!first) return;
+    sessionPendingRef.current = false;
+    const { sessions, createSession, applyFirstMessageTitle } =
+      useChatSessionsStore.getState();
+    if (!sessions.some((session) => session.id === id)) {
+      createSession({ id, modelId: modelIdRef.current });
+    }
+    applyFirstMessageTitle(id, sessionTitleRef.current || first.content);
+  }, [renderedMessages, id]);
 
   const stop = useCallback(() => {
     if (cancellableTurnId !== null) cancel(cancellableTurnId);
