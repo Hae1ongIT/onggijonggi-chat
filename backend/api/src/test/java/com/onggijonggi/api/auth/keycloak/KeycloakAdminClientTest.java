@@ -297,6 +297,43 @@ class KeycloakAdminClientTest {
 		assertThat(firstValues).containsExactly("0");
 	}
 
+	/** 서비스 계정은 사람의 조직 배정 대상이 아니다. 이름이 없거나 subject가 빈 행은 검증 경계로 그대로 보낸다. */
+	@Test
+	void excludesOnlyIdentifiedServiceAccountsFromCutoverSubjects() {
+		KeycloakAdminClient client = clientServingRawUserPages("""
+				[
+				  { "id": "service", "username": "service-account-ogjg-bff" },
+				  { "id": "person", "username": "appuser" },
+				  { "id": "unknown-name" },
+				  { "id": "", "username": "malformed-person" }
+				]
+				""");
+
+		assertThat(client.listEnabledUserSubjects().block()).containsExactly("person", "unknown-name", "");
+	}
+
+	/** 필터 뒤 목록이 비어도 원본 페이지가 가득 찼으면 다음 페이지의 사람을 빠뜨리지 않는다. */
+	@Test
+	void continuesPastAFullPageOfServiceAccounts() {
+		List<String> firstValues = new ArrayList<>();
+		String services = java.util.stream.IntStream.range(0, 100)
+				.mapToObj(index -> "{\"id\":\"service-%d\",\"username\":\"service-account-client-%d\"}".formatted(index, index))
+				.collect(java.util.stream.Collectors.joining(",", "[", "]"));
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().toString().endsWith("/protocol/openid-connect/token")) {
+				return Mono.just(jsonResponse("{\"access_token\":\"t\",\"expires_in\":60}"));
+			}
+			String first = queryValue(request, "first");
+			firstValues.add(first);
+			return Mono.just(jsonResponse(first.equals("0") ? services : "[{\"id\":\"person\",\"username\":\"appuser\"}]"));
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ofMinutes(5));
+
+		assertThat(client.listEnabledUserSubjects().block()).containsExactly("person");
+		assertThat(firstValues).containsExactly("0", "100");
+	}
+
 	/** 절체 검증에는 활성 사용자 subject만 필요하므로 간략 표현을 요청한다. */
 	@Test
 	void requestsOnlyEnabledUsersWithBriefRepresentation() {
@@ -388,4 +425,163 @@ class KeycloakAdminClientTest {
 		throw new IllegalStateException("쿼리에 " + name + "이 없다");
 	}
 
+
+	// ------------------------------------------------------------------ 설정 문제 분류(#326)
+
+	/** 토큰 요청에 tokenStatus, Admin API 요청에 adminStatus로 답하는 클라이언트. 200이면 정상 응답이다. */
+	private KeycloakAdminClient clientWithStatuses(HttpStatus tokenStatus, HttpStatus adminStatus) {
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				tokenRequests.incrementAndGet();
+				return Mono.just(tokenStatus == HttpStatus.OK
+						? jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 60 }")
+						: ClientResponse.create(tokenStatus).header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+								.body("{\"error\":\"unauthorized_client\",\"error_description\":\"secret detail\"}").build());
+			}
+			return Mono.just(adminStatus == HttpStatus.OK ? jsonResponse("[]") : ClientResponse.create(adminStatus).build());
+		});
+		return new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET, Duration.ZERO);
+	}
+
+	/** 토큰 발급 거부(id·secret 틀림, 서비스 계정 꺼짐)는 다시 시도해도 풀리지 않는 설정 문제다. 응답 본문은 싣지 않는다. */
+	@Test
+	void aRejectedTokenRequestIsAConfigurationProblem() {
+		for (HttpStatus status : List.of(HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED)) {
+			StepVerifier.create(clientWithStatuses(status, HttpStatus.OK).listPeople(10))
+					.expectErrorSatisfies(error -> {
+						assertThat(error).isInstanceOf(KeycloakAdminUnavailableException.class);
+						KeycloakAdminUnavailableException unavailable = (KeycloakAdminUnavailableException) error;
+						assertThat(unavailable.reason()).isEqualTo(KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED);
+						assertThat(unavailable.getStatusCode().value()).isEqualTo(503);
+						assertThat(unavailable.getMessage()).doesNotContain("secret detail");
+						assertThat(unavailable.summary())
+								.isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인, " + status.value() + ")");
+					})
+					.verify();
+		}
+	}
+
+	/** Admin API 403은 서비스 계정 역할 누락이다. 사람 목록·검색·실존 확인·활성 계정·이메일 조회 모두 같은 예외로 알린다. */
+	@Test
+	void aForbiddenAdminCallIsAConfigurationProblemEverywhere() {
+		KeycloakAdminClient client = clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN);
+
+		for (Mono<?> call : List.of(client.listPeople(10), client.search("kim", 10), client.exists(SUBJECT),
+				client.listEnabledUserSubjects(), client.subjectsByEmail("a@example.com"), client.eventsConfig())) {
+			StepVerifier.create(call)
+					.expectErrorSatisfies(error -> assertThat(error)
+							.isInstanceOfSatisfying(KeycloakAdminUnavailableException.class, unavailable -> {
+								assertThat(unavailable.reason()).isEqualTo(KeycloakAdminUnavailableException.Reason.FORBIDDEN);
+								assertThat(unavailable.summary()).startsWith("Keycloak 관리 권한 부족(/admin/realms/app-realm/");
+							}))
+					.verify();
+		}
+	}
+
+	/** 일시 장애는 설정 문제로 단정하지 않는다 — Admin API 401(토큰이 먼저 무효화됨)과 5xx는 원래 예외 그대로다. */
+	@Test
+	void transientFailuresStayAsTheyAre() {
+		for (HttpStatus status : List.of(HttpStatus.UNAUTHORIZED, HttpStatus.INTERNAL_SERVER_ERROR,
+				HttpStatus.SERVICE_UNAVAILABLE)) {
+			StepVerifier.create(clientWithStatuses(HttpStatus.OK, status).listPeople(10))
+					.expectErrorSatisfies(error -> assertThat(error)
+							.isInstanceOf(org.springframework.web.reactive.function.client.WebClientResponseException.class)
+							.isNotInstanceOf(KeycloakAdminUnavailableException.class))
+					.verify();
+		}
+		StepVerifier.create(clientWithStatuses(HttpStatus.INTERNAL_SERVER_ERROR, HttpStatus.OK).listPeople(10))
+				.expectError(org.springframework.web.reactive.function.client.WebClientResponseException.class).verify();
+	}
+
+	/** 분류는 경로와 상태를 함께 본다 — 토큰 엔드포인트의 403, Admin API의 400은 설정 문제로 단정하지 않는다. */
+	@Test
+	void onlyTheExpectedStatusOnTheExpectedPathIsAConfigurationProblem() {
+		StepVerifier.create(clientWithStatuses(HttpStatus.FORBIDDEN, HttpStatus.OK).listPeople(10))
+				.expectErrorSatisfies(error -> assertThat(error).isNotInstanceOf(KeycloakAdminUnavailableException.class))
+				.verify();
+		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.BAD_REQUEST).listPeople(10))
+				.expectErrorSatisfies(error -> assertThat(error).isNotInstanceOf(KeycloakAdminUnavailableException.class))
+				.verify();
+	}
+
+	/** 거부된 토큰 요청은 잠시 기억해 Keycloak에 같은 요청을 거듭 보내지 않는다(이름 목록이 사람 수만큼 부르는 경우). */
+	@Test
+	void aRejectedTokenRequestIsRememberedForAWhile() {
+		KeycloakAdminClient client = clientWithStatuses(HttpStatus.UNAUTHORIZED, HttpStatus.OK);
+
+		for (int call = 0; call < 3; call++) {
+			StepVerifier.create(client.listPeople(10)).expectError(KeycloakAdminUnavailableException.class).verify();
+		}
+
+		assertThat(tokenRequests.get()).isEqualTo(1);
+	}
+
+	/**
+	 * Admin API 401(Keycloak이 토큰을 먼저 무효화함)과 403(토큰의 역할이 모자람 — 역할을 고친 뒤에도 캐시한 토큰은 옛 역할)이면
+	 * 캐시를 비워 다음 요청이 새 토큰을 받는다.
+	 */
+	@org.junit.jupiter.params.ParameterizedTest
+	@org.junit.jupiter.params.provider.EnumSource(value = HttpStatus.class, names = { "UNAUTHORIZED", "FORBIDDEN" })
+	void anAdminUnauthorizedOrForbiddenDropsTheCachedTokenForTheNextCall(HttpStatus failure) {
+		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(failure);
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				tokenRequests.incrementAndGet();
+				return Mono.just(jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 3600 }"));
+			}
+			return Mono.just(adminStatus.get() == HttpStatus.OK ? jsonResponse("[]")
+					: ClientResponse.create(adminStatus.get()).build());
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ZERO);
+
+		StepVerifier.create(client.listPeople(10)).expectError().verify();
+		adminStatus.set(HttpStatus.OK);
+		StepVerifier.create(client.listPeople(10)).expectNext(List.of()).verifyComplete();
+
+		assertThat(tokenRequests.get()).isEqualTo(2);
+	}
+
+	/** 표시 이름은 설정 문제여도 지금처럼 빈 값으로 삼킨다 — 이름 하나 때문에 화면 전체가 깨지면 안 된다. */
+	@Test
+	void displayNameSwallowsAConfigurationProblem() {
+		StepVerifier.create(clientWithStatuses(HttpStatus.UNAUTHORIZED, HttpStatus.OK).displayName(SUBJECT))
+				.expectNext(Optional.empty()).verifyComplete();
+		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN).displayName(SUBJECT))
+				.expectNext(Optional.empty()).verifyComplete();
+	}
+
+	/** 이름이 모두 비는 원인을 찾을 수 있게 설정 문제는 남기되, 같은 상태가 이어지는 동안 다시 남기지 않는다. */
+	@Test
+	void displayNameWarnsOnceWhileTheConfigurationProblemLasts() {
+		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(HttpStatus.FORBIDDEN);
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				return Mono.just(jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 3600 }"));
+			}
+			return Mono.just(adminStatus.get() == HttpStatus.OK
+					? jsonResponse("{ \"id\": \"" + SUBJECT + "\", \"username\": \"sujin\" }")
+					: ClientResponse.create(adminStatus.get()).build());
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ZERO);
+		ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(KeycloakAdminClient.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			client.displayName("first").block();
+			client.displayName("second").block();
+			assertThat(appender.list).hasSize(1);
+			// 회복하면 풀리고, 다시 문제가 생기면 다시 남긴다.
+			adminStatus.set(HttpStatus.OK);
+			client.displayName("third").block();
+			adminStatus.set(HttpStatus.FORBIDDEN);
+			client.displayName("fourth").block();
+		} finally {
+			logger.detachAppender(appender);
+		}
+		assertThat(appender.list).hasSize(2).allSatisfy(event -> assertThat(event.getFormattedMessage())
+				.contains("Keycloak 관리 권한 부족("));
+	}
 }

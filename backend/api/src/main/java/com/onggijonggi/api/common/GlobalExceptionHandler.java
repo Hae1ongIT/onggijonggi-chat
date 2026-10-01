@@ -1,5 +1,6 @@
 package com.onggijonggi.api.common;
 
+import com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException;
 import com.onggijonggi.api.authz.RbacStateConflictException;
 import com.onggijonggi.api.chat.IdempotencyKeyConflictException;
 import com.onggijonggi.api.chat.InviteeOutsideWorkspaceException;
@@ -110,6 +111,19 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleRbacStateConflict(RbacStateConflictException ex, ServerWebExchange exchange) {
 		return ResponseEntity.status(HttpStatus.CONFLICT)
 				.body(ErrorResponse.of("RBAC_STATE_CONFLICT", "권한 구성 상태 때문에 요청을 처리할 수 없습니다.", traceId(exchange)));
+	}
+
+	/**
+	* BFF 전용 Keycloak 관리 클라이언트로 관리 조회를 할 수 없는 설정 문제(#326) — 토큰 발급 거부, Admin API 403.
+	* 다시 시도해도 풀리지 않아 일반 오류("잠시 후 다시")와 다른 코드를 붙이고, 문구는 CLIENT가 고른다. 운영자가 고쳐야
+	* 하는 서버 설정이라 요지를 warn으로 남긴다(비밀값·Keycloak 응답 본문 없음).
+	*/
+	@ExceptionHandler(KeycloakAdminUnavailableException.class)
+	public ResponseEntity<ErrorResponse> handleKeycloakAdminUnavailable(KeycloakAdminUnavailableException ex,
+			ServerWebExchange exchange) {
+		log.warn("Keycloak 관리 조회를 할 수 없다(traceId={}): {}", traceId(exchange), ex.summary());
+		return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+				.body(ErrorResponse.of("KEYCLOAK_ADMIN_UNAVAILABLE", "사용자 정보를 불러올 수 없습니다.", traceId(exchange)));
 	}
 
 	/** ThrMbr.ver(이슈 #137) 같은 낙관적 잠금 필드가 읽은 뒤 다른 트랜잭션에 덮어써졌을 때. 같은

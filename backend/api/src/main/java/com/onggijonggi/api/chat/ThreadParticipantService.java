@@ -208,7 +208,8 @@ public class ThreadParticipantService {
 	*
 	* Keycloak에 실재하는 계정인지 먼저 확인한다. 확인 없이 받아주면 오타 하나가 영원히 발동하지 않는
 	* 초대로 남는다. exists()는 404만 "없음"으로 보고 나머지 오류는 전파하므로, Admin API 장애가
-	* 정상 초대를 조용히 거부하는 일은 없다.
+	* 정상 초대를 조용히 거부하는 일은 없다. Keycloak 관리 클라이언트 설정 문제(#326)는 503
+	* KEYCLOAK_ADMIN_UNAVAILABLE로 나가 화면이 관리자에게 문의하라고 안내한다.
 	*/
 	private Mono<Void> inviteForFirstLogin(UUID threadId, UUID actorUserId, String inviteeSubject) {
 		return keycloakAdminClient.exists(inviteeSubject)

@@ -1,6 +1,7 @@
 package com.onggijonggi.api.authz;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
+import com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException;
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient.KeycloakAdminEvent;
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient.KeycloakEventsConfig;
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient.KeycloakGroup;
@@ -389,6 +390,7 @@ public class KeycloakAuditCollector {
 	 * Keycloak 응답은 상태와 경로만, 이 클래스가 직접 만든 설명(CollectorProblem)은 문장 그대로, 나머지는 예외 종류만 남긴다.
 	 */
 	static String summary(RuntimeException failure) {
+		if (failure instanceof KeycloakAdminUnavailableException unavailable) return unavailable.summary();
 		if (failure instanceof WebClientResponseException response) {
 			String path = response.getRequest() == null ? "" : " " + response.getRequest().getURI().getPath();
 			return "Keycloak " + response.getStatusCode().value() + path;

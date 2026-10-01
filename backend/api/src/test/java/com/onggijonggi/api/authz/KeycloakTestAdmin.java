@@ -85,6 +85,38 @@ final class KeycloakTestAdmin {
 		return createAndReturnId(realmPath("/groups/" + parentId + "/children"), Map.of("name", name));
 	}
 
+	/** 로그인 흐름 없이 서비스 계정만 쓰는 confidential 클라이언트를 만든다(#326 전환 절차의 전용 관리 클라이언트). */
+	void createServiceClient(String clientId, String secret) {
+		send("POST", realmPath("/clients"), Map.of("clientId", clientId, "secret", secret, "publicClient", false,
+				"serviceAccountsEnabled", true, "standardFlowEnabled", false, "directAccessGrantsEnabled", false));
+	}
+
+	/** 클라이언트 표현(설정 확인용). */
+	Map<?, ?> client(String clientId) {
+		return object(send("GET", realmPath("/clients/" + clientUuid(clientId)), null));
+	}
+
+	/** 클라이언트 설정 일부를 바꾼다. 받은 표현에 덮어써 보낸다 — 빠진 필드가 기본값으로 돌아가지 않게. */
+	void updateClient(String clientId, Map<String, Object> changes) {
+		java.util.Map<String, Object> changed = new java.util.LinkedHashMap<>();
+		client(clientId).forEach((key, value) -> changed.put(String.valueOf(key), value));
+		changed.putAll(changes);
+		send("PUT", realmPath("/clients/" + clientUuid(clientId)), changed);
+	}
+
+	/** 서비스 계정 사용자 id. 없으면(서비스 계정을 끈 뒤 등) 빈 값. */
+	java.util.Optional<String> serviceAccountUserId(String clientId) {
+		List<?> found = list(send("GET", realmPath("/users?exact=true&username=" + encode("service-account-" + clientId)), null));
+		return found.isEmpty() ? java.util.Optional.empty()
+				: java.util.Optional.of(String.valueOf(((Map<?, ?>) found.get(0)).get("id")));
+	}
+
+	/** 사용자에게 직접 붙은 realm-management 역할 이름. */
+	List<String> managementRoles(String userId) {
+		return list(send("GET", realmPath("/users/" + userId + "/role-mappings/clients/" + clientUuid("realm-management")), null))
+				.stream().map(item -> String.valueOf(((Map<?, ?>) item).get("name"))).toList();
+	}
+
 	String clientUuid(String clientId) {
 		return (String) list(send("GET", realmPath("/clients?clientId=" + encode(clientId)), null)).stream()
 				.map(item -> (Map<?, ?>) item).filter(item -> clientId.equals(item.get("clientId"))).findFirst()

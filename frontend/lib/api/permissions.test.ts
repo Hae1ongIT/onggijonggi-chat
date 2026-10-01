@@ -35,6 +35,25 @@ describe('permissions API errors', () => {
     );
   });
 
+  it('tells the operator to fix the Keycloak admin client instead of retrying', async () => {
+    mockedAuthFetch.mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            code: 'KEYCLOAK_ADMIN_UNAVAILABLE',
+            message:
+              'TOKEN_REJECTED 401 /realms/app-realm/protocol/openid-connect/token',
+          },
+        },
+        { status: 503 },
+      ),
+    );
+
+    await expect(fetchPermissionsOverview()).rejects.toThrow(
+      '지금은 사용자 정보를 불러올 수 없어요. 서버의 Keycloak 관리 연결 설정을 확인해야 하니 관리자에게 문의해 주세요.',
+    );
+  });
+
   it('uses a generic message for unknown server errors', async () => {
     mockedAuthFetch.mockResolvedValue(
       Response.json(

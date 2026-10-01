@@ -6,10 +6,12 @@
 //
 // bff의 casbin 프로필이 켜져 있어야 한다(infra/.env에 SPRING_PROFILE=prod,casbin). 꺼져 있으면 임포트 주소가 없다(404).
 // 한 줄이라도 틀리면 아무것도 저장하지 않고 틀린 줄을 모두 보여준다. CSV에 없는 사람의 배정은 지우지 않는다.
-// 로그인하는 계정에 Keycloak PLATFORM_ADMIN 역할이 있어야 한다(없으면 403). 이력에는 그 사람이 행위자로 남는다.
-// 기본은 infra/.env의 APP_USER(이 역할을 가진다)이고
-// IMPORT_USER·IMPORT_PASSWORD로 바꿀 수 있다. 주소는 BFF_URL(기본 http://localhost:8090)과
-// KEYCLOAK_URL(기본 http://localhost:8081)로 바꿀 수 있다.
+// 대화형 전용이다 — 로그인은 브라우저로 한다(device flow) — 스크립트가 주소와 코드를 보여 주면 브라우저에서 PLATFORM_ADMIN 역할이 있는
+// 계정(예: infra/.env의 APP_USER)으로 로그인해 승인한다. 없으면 403이고, 이력에는 그 사람이 행위자로 남는다.
+// 비밀번호는 스크립트와 .env를 거치지 않는다. 로그인 클라이언트(ogjg-client)는 비밀번호를 받는 흐름(password grant)이 꺼져 있고
+// 그 secret은 프론트에도 있어 쓰지 않는다 — secret 없는 스크립트 전용 클라이언트 ogjg-cli를 쓴다(INSTALL「Keycloak 관리
+// 클라이언트와 권한 변경 감사」). 주소는 BFF_URL(기본 http://localhost:8090)과 KEYCLOAK_URL(기본 http://localhost:8081)로,
+// 클라이언트는 CLI_CLIENT_ID(기본 ogjg-cli)로 바꿀 수 있다.
 //
 // 의존성 없음(node 내장만) — 저장소 스크립트의 무설치 단독 실행 전제를 따른다.
 
@@ -31,21 +33,45 @@ function readEnv(path) {
 	return values;
 }
 
+function form(values) {
+	return { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(values) };
+}
+
+const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+
+/** 브라우저 로그인(OAuth device authorization grant). 승인될 때까지 Keycloak이 알려 준 간격으로 묻는다. */
 async function login(keycloak, env) {
-	const response = await fetch(`${keycloak}/realms/${env.KEYCLOAK_REALM || 'app-realm'}/protocol/openid-connect/token`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({
-			grant_type: 'password',
-			client_id: env.KEYCLOAK_CLIENT_ID || 'ogjg-client',
-			client_secret: env.KEYCLOAK_CLIENT_SECRET,
-			username: process.env.IMPORT_USER || env.APP_USER || 'appuser',
-			password: process.env.IMPORT_PASSWORD || env.APP_USER_PASSWORD,
-			scope: 'openid',
-		}),
-	});
-	if (!response.ok) throw new Error(`로그인하지 못했다 → ${response.status} ${await response.text()}`);
-	return (await response.json()).access_token;
+	const oidc = `${keycloak}/realms/${env.KEYCLOAK_REALM || 'app-realm'}/protocol/openid-connect`;
+	const clientId = process.env.CLI_CLIENT_ID || 'ogjg-cli';
+	const started = await fetch(`${oidc}/auth/device`, form({ client_id: clientId, scope: 'openid' }));
+	if (!started.ok) {
+		throw new Error(`브라우저 로그인을 시작하지 못했다 → ${started.status} ${await started.text()}\n`
+			+ `Keycloak에 ${clientId} 클라이언트가 있고 켜져 있는지 확인한다 — 기본으로 꺼져 있다(INSTALL「Keycloak 관리 클라이언트와 권한 변경 감사」 8단계).`);
+	}
+	const device = await started.json();
+	console.log(`브라우저에서 아래 주소를 열고 PLATFORM_ADMIN 역할이 있는 계정(예: ${env.APP_USER || 'appuser'})으로 로그인하고, 접근 허용 화면에서 Yes를 누른다.`);
+	console.log(`  ${device.verification_uri_complete || device.verification_uri}`);
+	console.log(`  코드: ${device.user_code}`);
+	console.log('  브라우저 주소의 user_code(또는 코드를 넣는 화면에 넣는 값)가 위 코드와 같은지 확인한다. 직접 실행하지 않은 스크립트의 코드라면 승인하지 않는다.\n');
+	let interval = device.interval || 5;
+	const deadline = Date.now() + (device.expires_in || 600) * 1000;
+	while (Date.now() < deadline) {
+		await sleep(interval);
+		const response = await fetch(`${oidc}/token`, form({
+			grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+			device_code: device.device_code,
+			client_id: clientId,
+		}));
+		const body = await response.json().catch(() => ({}));
+		if (response.ok) return body.access_token;
+		if (body.error === 'authorization_pending') continue;
+		if (body.error === 'slow_down') {
+			interval += 5;
+			continue;
+		}
+		throw new Error(`로그인하지 못했다 → ${response.status} ${body.error || ''} ${body.error_description || ''}`.trim());
+	}
+	throw new Error('로그인 승인 시간이 지났다. 다시 실행한다.');
 }
 
 async function main() {
@@ -64,7 +90,7 @@ async function main() {
 		body: csv,
 	});
 	if (response.status === 404) throw new Error('임포트 주소가 없다 — bff의 casbin 프로필이 켜져 있는지 확인한다(SPRING_PROFILE=prod,casbin)');
-	if (response.status === 403) throw new Error('권한이 없다 — 로그인한 계정에 Keycloak PLATFORM_ADMIN 역할이 필요하다(IMPORT_USER 확인)');
+	if (response.status === 403) throw new Error('권한이 없다 — 브라우저에서 승인한 계정에 Keycloak PLATFORM_ADMIN 역할이 필요하다');
 	if (!response.ok) throw new Error(`임포트 실패 → ${response.status} ${await response.text()}`);
 	const report = await response.json();
 
@@ -83,6 +109,7 @@ async function main() {
 	const changed = report.rows.some((row) => row.outcome !== 'UNCHANGED');
 	if (!report.applied) console.log('미리보기다. 저장하려면 --apply를 붙인다.');
 	else console.log(changed ? '저장했다.' : '바뀐 것이 없어 이력도 남기지 않았다.');
+	console.log('ogjg-cli를 다 썼으면 끈다 — node scripts/casbin-demo-accounts.mjs --disable-cli (또는 관리 콘솔)');
 }
 
 main().catch((error) => {

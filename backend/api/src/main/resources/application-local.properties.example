@@ -13,7 +13,8 @@ spring.datasource.password=여기에_실제_비밀번호_입력
 # frontend/.env.local과 동일 값 재사용 가능
 spring.ai.openai.api-key=여기에_실제_LiteLLM_키_입력
 
-# infra/.env의 KEYCLOAK_CLIENT_SECRET과 동일 — 참여자 표시 이름을 Keycloak Admin API로 조회할 때 쓴다
+# infra/.env의 KEYCLOAK_BFF_CLIENT_SECRET과 동일(BFF 전용 관리 클라이언트 ogjg-bff) — 표시 이름·사람 목록·권한 변경 감사를
+# Keycloak Admin API로 읽을 때 쓴다. 로그인 secret(KEYCLOAK_CLIENT_SECRET)이 아니다.
 app.keycloak.admin.client-secret=여기에_실제_시크릿_입력
 
 # --- 공용 호스트 오버라이드: DB·LLM (주소값 — 비밀 아님) ---

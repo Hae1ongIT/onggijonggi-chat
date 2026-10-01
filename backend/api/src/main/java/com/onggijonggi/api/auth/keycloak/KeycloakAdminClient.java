@@ -8,12 +8,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ClientResponse;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -25,8 +31,10 @@ import reactor.core.publisher.Mono;
  * Description : 다른 사용자의 표시 이름 조회(이슈 #128)와 실존 확인(이슈 #127)을 Keycloak Admin
  *               API로 한다. 요청의 JWT는
  *               호출자 본인의 claim만 담고 있어, 협업 스레드의 다른 참가자 이름은 이 경로로만 얻을 수
- *               있다. 로그인에 쓰는 것과 같은 클라이언트의 서비스 계정(client_credentials)으로 admin
- *               토큰을 받고, 만료 30초 전까지는 재사용한다.
+ *               있다. BFF 전용 관리 클라이언트의 서비스 계정(client_credentials)으로 admin 토큰을 받고, 만료
+ *               30초 전까지는 재사용한다(#326). 로그인 클라이언트는 secret이 프론트에도 있어 관리 권한을 붙이지 않는다.
+ *               다시 시도해도 풀리지 않는 실패(토큰 발급 거부, Admin API 403)는 KeycloakAdminUnavailableException으로
+ *               바꿔 화면이 설정 문제로 안내하게 한다.
  *
  *               표시 이름도 짧은 TTL로 캐시한다(이슈 #200). 호출부(협업 스레드 목록·참여자 관리·
  *               메시지 이력)가 화면을 그릴 때마다 사람 수만큼 Admin API를 두드리던 것을 줄이기
@@ -36,7 +44,20 @@ import reactor.core.publisher.Mono;
 @Component
 public class KeycloakAdminClient {
 
+	private static final Logger log = LoggerFactory.getLogger(KeycloakAdminClient.class);
+
 	private static final Duration EXPIRY_SAFETY_MARGIN = Duration.ofSeconds(30);
+
+	/** 설정 문제 분류(rejectConfigurationFailure)가 보는 경로 표지. 요청 주소를 바꾸면 여기도 맞춘다. */
+	private static final String TOKEN_PATH_SUFFIX = "/protocol/openid-connect/token";
+	private static final String ADMIN_PATH_MARKER = "/admin/realms/";
+
+	/**
+	 * 설정 문제로 거부된 토큰 요청을 기억하는 시간. 그동안은 Keycloak에 다시 묻지 않고 같은 예외를 낸다 — 이름 목록처럼 한 화면이
+	 * 사람 수만큼 부르면 요청마다 거부되는 토큰 요청과 Keycloak 로그인 오류 이벤트가 쌓인다. 설정을 고치면 BFF를 다시 만들므로
+	 * 그때 사라진다.
+	 */
+	private static final Duration REJECTION_MEMORY = Duration.ofSeconds(30);
 
 	/**
 	* 캐시가 무한히 자라지 않게 하는 상한. realm의 사용자 수가 자연스러운 경계지만, 그 수를
@@ -50,10 +71,14 @@ public class KeycloakAdminClient {
 	private final String clientId;
 	private final String clientSecret;
 	private final AtomicReference<CachedToken> cachedToken = new AtomicReference<>();
+	private final AtomicReference<RememberedRejection> rejectedToken = new AtomicReference<>();
 
 	private final Map<String, CachedName> cachedNames = new ConcurrentHashMap<>();
 
 	private final Duration displayNameTtl;
+
+	/** 표시 이름이 설정 문제로 비고 있음을 이미 경고했는지. 같은 상태에서는 다시 남기지 않고, 조회가 성공하면 풀린다. */
+	private final AtomicBoolean displayNameProblemLogged = new AtomicBoolean();
 
 	public KeycloakAdminClient(WebClient.Builder webClientBuilder,
 			@Value("${app.keycloak.internal-url}") String internalUrl,
@@ -63,7 +88,9 @@ public class KeycloakAdminClient {
 			@Value("${app.keycloak.admin.display-name-ttl:5m}") Duration displayNameTtl) {
 		// admin event 상세처럼 큰 응답이 기본 한도(256KB)에 걸려 한 건이 수집 전체를 막지 않게 넉넉히 둔다.
 		this.webClient = webClientBuilder.baseUrl(internalUrl)
-				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)).build();
+				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
+				.filter(configurationFailureFilter())
+				.build();
 		this.realm = realm;
 		this.clientId = clientId;
 		this.clientSecret = clientSecret;
@@ -88,14 +115,24 @@ public class KeycloakAdminClient {
 		}
 		return adminToken()
 				.flatMap(token -> lookupUser(subject, token))
-				.doOnNext(name -> cacheName(subject, name))
+				.doOnNext(name -> {
+					cacheName(subject, name);
+					displayNameProblemLogged.set(false);
+				})
 				.onErrorResume(WebClientResponseException.NotFound.class, ignored -> {
 					// 탈퇴처럼 확정적인 "없음"은 캐시해도 된다 — 장애와 달리 다시 물어도 답이 같고,
 					// 캐시하지 않으면 떠난 사람의 옛 메시지가 볼 때마다 조회를 한 번씩 더 부른다.
 					cacheName(subject, Optional.empty());
 					return Mono.just(Optional.empty());
 				})
-				.onErrorResume(WebClientException.class, ignored -> Mono.just(Optional.empty()));
+				.onErrorResume(WebClientException.class, ignored -> Mono.just(Optional.empty()))
+				.onErrorResume(KeycloakAdminUnavailableException.class, problem -> {
+					// 화면 하나를 깨지 않으려 빈 값으로 삼키되, 이름이 모두 비는 원인을 찾을 수 있게 상태가 바뀔 때 한 번 남긴다.
+					if (displayNameProblemLogged.compareAndSet(false, true)) {
+						log.warn("표시 이름을 조회하지 못해 빈 이름으로 보인다: {}", problem.summary());
+					}
+					return Mono.just(Optional.empty());
+				});
 	}
 
 	private void cacheName(String subject, Optional<String> name) {
@@ -241,10 +278,12 @@ public class KeycloakAdminClient {
 
 	/**
 	 * 절체 사전 검증용으로 Keycloak에서 활성 사용자 subject를 페이지 단위로 모두 읽는다.
-	 * Tenant는 DB 소속에서 판정하며, 로컬 사용자를 만들거나 token claim을 바꾸지 않는다.
+	 * 서비스 계정은 조직 배정 대상이 아니므로 제외한다. Tenant는 DB 소속에서 판정하며,
+	 * 로컬 사용자를 만들거나 token claim을 바꾸지 않는다.
 	 */
 	public Mono<List<String>> listEnabledUserSubjects() {
 		return adminToken().flatMapMany(token -> enabledUsers(token, 0))
+				.filter(user -> user.username() == null || !user.username().startsWith("service-account-"))
 				.map(AdminUserRepresentation::id)
 				.collectList();
 	}
@@ -397,6 +436,35 @@ public class KeycloakAdminClient {
 				.collectList());
 	}
 
+	/**
+	 * 다시 시도해도 풀리지 않는 응답을 설정 문제로 바꾼다(#326) — 토큰 엔드포인트의 400·401(클라이언트 id·secret이 틀리거나
+	 * 서비스 계정이 꺼짐)과 Admin API의 403(역할 누락). Admin API의 401은 Keycloak이 토큰을 먼저 무효화한 일시 상황이라
+	 * 그대로 둔다. 응답 본문은 버린다 — Keycloak 오류 설명을 예외·로그에 싣지 않는다.
+	 */
+	private ExchangeFilterFunction configurationFailureFilter() {
+		return (request, next) -> next.exchange(request).flatMap(response -> {
+			// Admin API 401은 Keycloak이 토큰을 먼저 무효화한 것이다(재시작 등). 403은 토큰에 담긴 역할이 모자란 것이라, 운영자가
+			// 역할을 고쳐도 캐시한 토큰은 만료(기본 5분)까지 옛 역할 그대로다(실측). 둘 다 이 요청은 실패하고, 다음 요청이 새 토큰을
+			// 받게 캐시를 비운다 — 감사 수집기만 비우면 수집을 끈 배포는 토큰 만료까지 계속 실패한다.
+			int status = response.statusCode().value();
+			if ((status == 401 || status == 403) && request.url().getPath().contains(ADMIN_PATH_MARKER)) invalidateToken();
+			return rejectConfigurationFailure(request, response);
+		});
+	}
+
+	static Mono<ClientResponse> rejectConfigurationFailure(ClientRequest request, ClientResponse response) {
+		int status = response.statusCode().value();
+		String path = request.url().getPath();
+		KeycloakAdminUnavailableException.Reason reason = null;
+		if (path.endsWith(TOKEN_PATH_SUFFIX) && (status == 400 || status == 401)) {
+			reason = KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED;
+		} else if (path.contains(ADMIN_PATH_MARKER) && status == 403) {
+			reason = KeycloakAdminUnavailableException.Reason.FORBIDDEN;
+		}
+		if (reason == null) return Mono.just(response);
+		return response.releaseBody().then(Mono.error(new KeycloakAdminUnavailableException(reason, status, path)));
+	}
+
 	/** Keycloak이 재시작 등으로 토큰을 먼저 무효화했을 때(401) 다음 호출이 새 토큰을 받게 한다. */
 	public void invalidateToken() {
 		cachedToken.set(null);
@@ -460,7 +528,24 @@ public class KeycloakAdminClient {
 		if (cached != null && cached.isValidAt(Instant.now())) {
 			return Mono.just(cached.value());
 		}
-		return fetchToken().doOnNext(cachedToken::set).map(CachedToken::value);
+		RememberedRejection rejected = rejectedToken.get();
+		if (rejected != null && rejected.isValidAt(Instant.now())) {
+			return Mono.error(rejected.rejection().again());
+		}
+		return fetchToken()
+				.doOnNext(token -> {
+					cachedToken.set(token);
+					rejectedToken.set(null);
+				})
+				.doOnError(KeycloakAdminUnavailableException.class, rejection -> rejectedToken
+						.set(new RememberedRejection(rejection, Instant.now().plus(REJECTION_MEMORY))))
+				.map(CachedToken::value);
+	}
+
+	private record RememberedRejection(KeycloakAdminUnavailableException rejection, Instant until) {
+		boolean isValidAt(Instant now) {
+			return now.isBefore(until);
+		}
 	}
 
 	private Mono<CachedToken> fetchToken() {
@@ -469,7 +554,7 @@ public class KeycloakAdminClient {
 		form.add("client_id", clientId);
 		form.add("client_secret", clientSecret);
 		return webClient.post()
-				.uri("/realms/{realm}/protocol/openid-connect/token", realm)
+				.uri("/realms/{realm}" + TOKEN_PATH_SUFFIX, realm)
 				.body(BodyInserters.fromFormData(form))
 				.retrieve()
 				.bodyToMono(TokenResponse.class)
@@ -502,8 +587,8 @@ public class KeycloakAdminClient {
 	private record SearchedUser(String id, String username) {
 	}
 
-	/** PLATFORM_ADMIN 절체 사전 검증에서 활성 사용자 subject만 읽는 간략 표현. */
-	private record AdminUserRepresentation(String id) {
+	/** 사용자 식별자와 서비스 계정 구분에 필요한 이름만 읽는 간략 표현. */
+	private record AdminUserRepresentation(String id, String username) {
 	}
 
 }

@@ -59,10 +59,23 @@ export interface ImportReport {
   problems: { line: number; message: string }[];
 }
 
+/** 화면이 코드별로 안내를 고를 수 있게 서버 코드를 함께 싣는다. 문구는 code로 고른 것이고 서버 message는 싣지 않는다. */
+export class PermissionsApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
+
 async function failWith(res: Response): Promise<never> {
   const envelope = parseErrorEnvelope(await res.text());
   const trace = envelope?.traceId ? ` (추적 ID: ${envelope.traceId})` : '';
-  throw new Error(`${friendlyMessageForCode(envelope?.code)}${trace}`);
+  throw new PermissionsApiError(
+    `${friendlyMessageForCode(envelope?.code)}${trace}`,
+    envelope?.code,
+  );
 }
 
 /** 권한 기능(casbin 프로필)이 켜져 있는지. 404면 꺼진 것이고, 그 밖의 실패도 메뉴를 숨기는 쪽으로 본다. */

@@ -75,7 +75,7 @@ cd onggijonggi-chat\infra
 Copy-Item .env.example .env
 ```
 
-> ⚠️ **`.env`의 자격증명은 저장소에 공개된 고정값이다.** 로그인 `appuser`/`appuser`, Keycloak 관리자 `admin`/`admin`. 혼자 시험하는 범위를 넘어선다면 반드시 바꾼다.
+> ⚠️ **`.env`의 자격증명은 저장소에 공개된 고정값이다.** 로그인 `appuser`/`appuser`, Keycloak 관리자 `admin`/`admin`. 특히 `KEYCLOAK_BFF_CLIENT_SECRET`은 모든 계정 목록·관리자 변경 이력을 읽는 권한이 붙은 값이라 Keycloak 포트(8081)에 닿는 누구나 쓸 수 있다. 혼자 시험하는 범위를 넘어선다면 반드시 바꾼다.
 
 > 💡 `.env.example`은 **Gemini에 붙는 기본 템플릿**이다. Ollama나 사내 서버를 쓸 거라면 나중에 [다른 템플릿](INSTALL_models.md)으로 갈아탄다 — 지금은 그냥 복사하고 넘어가도 된다.
 
@@ -237,7 +237,7 @@ node scripts/casbin-demo-accounts.mjs
 node scripts/import-members.mjs infra/config/demo-members.csv --apply
 ```
 
-첫 줄은 `demo1`~`demo7` 계정(비밀번호는 계정 이름과 같다)을 Keycloak에 만들고, 둘째 줄은 `APP_USER`로 로그인해 `demo1`~`demo6`의 팀·직급을 넣는다. `demo7`은 배정하지 않은 사람을 확인하는 계정이다 — 권한 기능이 켜져 있으면 조직 배정이 없는 사람은 1:1 채팅도 쓸 수 없다. 임포트는 `--apply`를 빼면 미리보기만 한다.
+첫 줄은 `demo1`~`demo7` 계정(비밀번호는 계정 이름과 같다)을 Keycloak에 만들고 배정 스크립트용 `ogjg-cli` 클라이언트를 켠다(평소에는 꺼져 있다 — 데모가 끝나면 `node scripts/casbin-demo-accounts.mjs --disable-cli`로 끈다). 둘째 줄은 `demo1`~`demo6`의 팀·직급을 넣는다. 이 줄은 주소와 코드를 보여 주고 기다린다 — 브라우저에서 그 주소를 열어 `APP_USER`로 로그인하고 접근 허용 화면(*Grant Access to ogjg-cli*)에서 *Yes*를 누르면 이어서 진행한다. 브라우저 주소의 `user_code`가 스크립트가 보여 준 코드와 같은지 확인하고(접근 허용 화면에는 코드가 나오지 않는다), 직접 실행하지 않은 스크립트의 코드는 승인하지 않는다(비밀번호는 스크립트를 거치지 않는다). `demo7`은 배정하지 않은 사람을 확인하는 계정이다 — 권한 기능이 켜져 있으면 조직 배정이 없는 사람은 1:1 채팅도 쓸 수 없다. 임포트는 `--apply`를 빼면 미리보기만 한다.
 
 **3. 화면에서 확인한다.** `APP_USER`로 로그인하면 사이드바에 **권한 관리**가 생긴다(`demo` 계정은 일반 사용자라 메뉴가 없다)(<http://localhost:3010/admin/permissions>). 사람마다 팀·직급을 바꾸면 "누가 무엇을 보나" 표가 실제 판정 결과로 바뀐다.
 
@@ -245,18 +245,37 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 
 ---
 
-## Keycloak 권한 변경 감사
+## Keycloak 관리 클라이언트와 권한 변경 감사
 
-누가 언제 누구에게 `PLATFORM_ADMIN`(권한 관리 화면·API를 여는 역할)을 줬는지, 계정을 언제 끄고 지웠는지를 BFF가 1분마다 Keycloak에서 읽어 DB에 지울 수 없는 기록으로 남긴다. 그룹 가입이나 복합 역할처럼 역할을 직접 붙이지 않고 권한을 얻는 경로와, 역할을 줄 수 있는 관리 권한(`realm-management`)도 함께 남는다. 처음 수집할 때는 그 시점에 이미 권한을 가진 사람을 한 번 기록한다.
+BFF는 Keycloak에서 사람 목록·표시 이름을 읽고, 누가 언제 누구에게 `PLATFORM_ADMIN`(권한 관리 화면·API를 여는 역할)을 줬는지·계정을 언제 끄고 지웠는지를 1분마다 읽어 DB에 지울 수 없는 기록으로 남긴다. 그룹 가입이나 복합 역할처럼 역할을 직접 붙이지 않고 권한을 얻는 경로와, 역할을 줄 수 있는 관리 권한(`realm-management`)도 함께 남는다. 처음 수집할 때는 그 시점에 이미 권한을 가진 사람을 한 번 기록한다.
 
-**새로 띄우는 환경은 할 일이 없다.** 로그인 설정 파일(`infra/config/realm-app.json`)이 이벤트 저장과 수집 권한을 켠 채로 realm을 만든다.
+이 조회는 **BFF 전용 관리 클라이언트 `ogjg-bff`**(`KEYCLOAK_BFF_CLIENT_ID`)로 한다. 로그인 클라이언트 `ogjg-client`의 secret은 프론트에도 있어서, 거기에 관리 권한을 붙이면 프론트 서버가 침해될 때 전체 계정 목록과 관리 이력이 함께 샌다. 그래서 로그인 클라이언트에는 서비스 계정이 없다. 저장소 스크립트(`scripts/import-members.mjs`)는 secret 없는 `ogjg-cli` 클라이언트로 브라우저 로그인을 한다.
 
-**이미 띄운 환경은 한 번 켠다.** 이 파일은 realm이 처음 만들어질 때만 적용되기 때문이다. `http://localhost:8081`(관리 콘솔) → `app-realm`에서:
+**새로 띄우는 환경은 할 일이 없다.** 로그인 설정 파일(`infra/config/realm-app.json`)이 이벤트 저장, 세 클라이언트, 수집 권한을 갖춘 realm을 만든다.
+
+**이미 띄운 환경은 한 번 전환한다.** 이 파일은 realm이 처음 만들어질 때만 적용되기 때문이다. **새 버전을 받은 뒤 이 절차 없이 `docker compose up -d`만 하면** BFF는 뜨지만 표시 이름·사람 목록·초대 검색·권한 변경 감사가 모두 동작하지 않는다(`.env`에 전용 클라이언트 값이 없다). v0.2에서 올리는 중이면 아래 1~4단계를 새 이미지를 띄우기 **전에** 한다(아래「v0.2에서 올릴 때」0단계). `http://localhost:8081`(관리 콘솔) → `app-realm`에서:
 
 1. **Realm settings → Events → Admin events settings**에서 *Save events*와 *Include representation*을 켜고, *Expiration*을 1년(365일)으로 둔 뒤 저장한다.
-2. **Clients → `ogjg-client`(`KEYCLOAK_CLIENT_ID`) → Service account roles → Assign role**에서 `realm-management`의 `view-events`·`view-realm`을 추가한다(`view-users`는 이미 있다). 이벤트를 지우는 `manage-events`와, 모든 클라이언트의 secret까지 읽히는 `view-clients`는 주지 않는다.
+2. **Clients → Create client**: Client ID `ogjg-bff`, *Client authentication* 켬, *Service accounts roles*만 켬(*Standard flow*·*Direct access grants* 끔).
+3. 그 클라이언트 → **Service account roles → Assign role**에서 `realm-management`의 `view-users`·`view-events`·`view-realm`을 준다. 이벤트를 지우는 `manage-events`와, 모든 클라이언트의 secret까지 읽히는 `view-clients`는 주지 않는다.
+4. 그 클라이언트 → **Credentials**의 *Client secret*을 `infra/.env`의 `KEYCLOAK_BFF_CLIENT_SECRET`에 넣고 `KEYCLOAK_BFF_CLIENT_ID=ogjg-bff`를 확인한다. 이미 새 버전이면 `docker compose up -d bff`로 BFF를 다시 만든다. 나중에 이 secret을 재발급하면 `.env`를 고치고 곧바로 `docker compose up -d bff`를 한다 — BFF는 다시 만들어야 새 값을 읽고, 그 사이(캐시한 토큰이 끝나는 몇 분 뒤부터) 이름·검색·감사가 `KEYCLOAK_ADMIN_UNAVAILABLE`로 실패한다.
+5. **확인**: 먼저 BFF가 새 클라이언트를 쓰는지 본다 — `docker compose exec bff env | grep APP_KEYCLOAK_ADMIN_CLIENT_ID`가 `ogjg-bff`여야 한다(`docker-compose.override.yml`이나 셸 환경 변수로 `APP_KEYCLOAK_ADMIN_*`를 따로 줬다면 지운다 — 남아 있으면 이 확인이 예전 클라이언트로 통과하고 6단계 뒤에 끊긴다). 그다음 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)의 `collector`에서 `lastSuccessAt`이 `lastErrorAt`보다 늦고(또는 `lastErrorAt`이 비어 있고) `adminEventsEnabled`가 `true`면 정상이다. 협업방 참가자 이름도 보인다.
+6. **Clients → `ogjg-client` → Settings**에서 *Service accounts roles*를 끄고 저장한다. Keycloak이 그 서비스 계정을 지우므로 붙어 있던 관리 역할도 함께 사라진다. 이 단계는 5단계를 확인한 **뒤에** 한다 — 그래야 관리 조회가 끊기는 구간이 없다.
+7. **확인**: 로그인 secret으로 관리 토큰을 받을 수 없어야 한다(아래 `ogjg-client`는 `KEYCLOAK_CLIENT_ID` 값이다). 응답에 **`Client not enabled to retrieve service account`**가 나오면 정상이다. `Invalid client or Invalid client credentials`가 나오면 secret을 잘못 넣은 것이라 이 확인이 되지 않은 것이다 — 다시 한다. secret이 셸 기록에 남지 않게 입력으로 받는다. 브라우저 로그인·로그아웃은 그대로 된다.
 
-**✅ 확인**: 아무 계정에 역할을 붙였다 떼고 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)에 두 행이 보인다. 응답의 `collector`에서 `lastSuccessAt`이 `lastErrorAt`보다 늦고(또는 `lastErrorAt`이 비어 있고) `adminEventsEnabled`가 `true`면 정상이다. `lastError`는 회복한 뒤에도 마지막 오류로 남아 있으므로 비어 있는지로 판단하지 않는다. 권한을 아직 안 줬으면 BFF는 멈추지 않고 `lastError`(예: `Keycloak 403 …/events/config`)로 알린다.
+   ```bash
+   read -rs S && curl -s --data-urlencode "client_secret=$S" -d "grant_type=client_credentials&client_id=ogjg-client" http://localhost:8081/realms/app-realm/protocol/openid-connect/token; unset S
+   ```
+8. (`import-members.mjs`를 쓸 때만) **Clients → Create client**: Client ID `ogjg-cli`, *Client authentication* 끔, *OAuth 2.0 Device Authorization Grant*만 켬, *Consent required* 켬. 그 클라이언트 → **Client scopes → ogjg-cli-dedicated → Configure a new mapper → Audience**에서 *Included Client Audience*를 `ogjg-client`(`KEYCLOAK_CLIENT_ID` 값)로, *Add to access token*을 켜고 저장한다. **평소에는 꺼 둔다**(클라이언트 상세 화면 맨 위의 *Enabled* 토글) — 켜 두면 누구나 승인 코드를 받아 관리자에게 승인을 유도할 수 있다(device code 피싱). 스크립트를 쓸 때만 켜고 끝나면 끈다. 새로 만든 realm에는 꺼진 채로 이미 있다. (선택) 같은 클라이언트 → **Advanced**에서 *Access Token Lifespan*을 5분으로, *Use refresh tokens*를 끄면 새 realm과 같아진다.
+9. (선택) **로그인 secret 재발급**: 6단계로 이 secret의 관리 권한은 이미 사라졌으므로 필수는 아니다. `.env.example`의 공개 기본값을 그대로 쓰거나 침해가 의심되면 `ogjg-client` → **Credentials → Regenerate** → `infra/.env`의 `KEYCLOAK_CLIENT_SECRET` 교체 → 곧바로 `docker compose up -d nextjs`(그 전까지는 새 로그인과 토큰 갱신이 실패한다). 로그인한 사용자는 다시 로그인해야 한다.
+
+앱은 6단계를 빠뜨렸는지 알아채지 못한다 — 7단계 확인이 유일한 점검이다. 2·3단계의 역할 부여가 권한 변경 감사에 `MANAGEMENT_ROLE_GRANTED` 행으로 남는 것은 정상이다. 6단계로 로그인 서비스 계정의 역할이 함께 사라지는 것은 역할 해제가 아니라 클라이언트 설정 변경이라 역할 해제 행으로 남지 않는다.
+
+**되돌리기**: 6단계 뒤에 이전 이미지로 돌아가야 하면 `ogjg-client` → Settings에서 *Service accounts roles*를 다시 켜고, **Service account roles → Assign role**에서 `realm-management`의 `view-users`·`view-events`·`view-realm`을 다시 준다 — 서비스 계정을 끌 때 역할도 함께 지워졌기 때문이다. 이전 compose는 `KEYCLOAK_CLIENT_SECRET`을 관리 secret으로 쓰므로 9단계로 바꿨다면 `.env` 값이 콘솔과 같은지 본다. 되돌릴 가능성이 있으면 6단계는 새 버전이 안정된 뒤에 한다.
+
+**설정이 틀리면**: BFF는 멈추지 않고 로그인 클라이언트로 대신 조회하지도 않는다. BFF 헬스 체크(`/actuator/health`)에는 드러나지 않는다 — 알림은 기동 경고, 화면 문구, 감사 수집 상태, 로그뿐이다. 기동 로그에 경고가 한 번 남고, 권한 관리 화면·초대 검색은 "Keycloak 관리 연결 설정을 확인" 문구를, 감사 응답의 `lastError`는 `Keycloak 관리 클라이언트 인증 실패(설정 확인, 401)`(id·secret이 틀렸거나 그 클라이언트의 서비스 계정이 꺼져 있음 — Keycloak은 둘 다 401이라 콘솔에서 확인한다) 또는 `Keycloak 관리 권한 부족(…)`(역할 누락)을 보인다. `lastError`는 회복한 뒤에도 마지막 오류로 남으므로 비어 있는지로 판단하지 않는다.
+
+**빈 secret**: `.env`에 `KEYCLOAK_BFF_CLIENT_SECRET`(또는 `KEYCLOAK_CLIENT_SECRET`)이 비어 있는 채로 realm이 처음 만들어지면, Keycloak이 빈 secret을 그대로 받아들여 누구나 빈 값으로 토큰을 받게 된다. 그래서 Keycloak은 빈 값을 아무도 모르는 무작위 값으로 채운 뒤 뜬다(로그에 `[경고]`). 그 경우 BFF의 관리 조회는 물론, `KEYCLOAK_CLIENT_SECRET`이 비었다면 **로그인도 되지 않는다** — 4단계처럼 콘솔에서 secret을 확인(또는 재발급)해 `.env`에 넣는다. `.env`는 항상 `.env.example` 복사나 `init-env`로 만든다.
 
 **개인정보**: 이 설정으로 Keycloak은 관리자 변경의 상세(계정 생성·수정 시 이메일·이름 등)를 1년 보관한다. 앱 DB에는 상세를 옮기지 않고 계정 id·역할·그룹 경로만 영구 보존한다(권한 변경 감사가 목적이라 지우지 않는다). 기록을 지울 수 없다는 보장은 BFF가 쓰는 DB 계정이 테이블 소유자·슈퍼유저가 아닐 때만 성립한다 — 기본 compose는 같은 계정을 쓰므로, 운영에서는 migration 계정과 BFF 실행 계정을 나누길 권한다.
 
@@ -267,6 +286,8 @@ node scripts/import-members.mjs infra/config/demo-members.csv --apply
 ## v0.2에서 올릴 때 (대화가 이미 있을 때)
 
 새 버전은 모든 대화를 고객사(Tenant)의 공용 공간에 귀속시키는 스키마 변경을 포함한다. **대화가 이미 있는데 고객사가 아직 없으면** 서버가 뜨면서 실행하는 Flyway가 `thread cutover requires exactly one ACTIVE tenant`로 멈추고 BFF가 기동하지 못한다. 이 migration은 통째로 되돌려져 대화 데이터는 그대로지만, 그 앞의 v0.3 migration은 이미 적용된 상태로 남고 BFF는 뜨지 못한다. 고객사는 BFF가 뜬 뒤에 만들어지니, 다음 순서로 올린다.
+
+**0. Keycloak을 먼저 준비한다.** v0.2가 도는 채로「Keycloak 관리 클라이언트와 권한 변경 감사」의 1~4단계(admin event 켜기, `ogjg-bff` 클라이언트와 역할, `.env`의 `KEYCLOAK_BFF_CLIENT_ID`·`KEYCLOAK_BFF_CLIENT_SECRET`)를 한다. v0.2는 이 값을 쓰지 않아 영향이 없고, 새 BFF는 뜨자마자 이 클라이언트로 조회한다. 그 절의 5~7단계(확인 뒤 로그인 서비스 계정 끄기)는 아래 3단계까지 마쳐 BFF가 새 이미지로 뜨고 `collector.lastSuccessAt`이 갱신된 뒤에 한다. 0단계 없이 새 이미지를 띄우면 BFF의 Keycloak 관리 기능이 동작하지 않는다.
 
 **1. 쓰기를 멈춘다.** 올리는 동안 사용자가 대화를 만들지 않게 한다(점검 시간).
 
@@ -311,7 +332,7 @@ docker compose down -v    # 볼륨까지 삭제 (계정·대화 전부 삭제)
 
 - **HTTPS가 아니다.** 브라우저가 "안전하지 않음"으로 표시하는 게 정상이다. 자물쇠가 필요하면 [INSTALL_r-proxy.md](INSTALL_r-proxy.md)로 caddy를 얹는다.
 - **이 PC에서만 접속된다.** 기본 주소가 `localhost` 기준이라 그렇다 — 다른 기기에서 열려면 1단계의 접힌 절을 본다.
-- **자격증명이 공개값이다.** `.env.example`에 그대로 적혀 있다. 직접 정한 값으로 바꾸려면 `infra/utils/init-env.ps1`(Windows) 또는 `infra/utils/init-env.sh`(macOS·Linux)로 `.env`를 만든다 — 비밀번호 2개만 입력받고 나머지 5개는 무작위로 채운다. **최초 기동 전에** 해야 한다(이미 띄운 뒤에 바꾸면 Keycloak·DB에 저장된 값과 어긋나 로그인이 막힌다).
+- **자격증명이 공개값이다.** `.env.example`에 그대로 적혀 있다. 직접 정한 값으로 바꾸려면 `infra/utils/init-env.ps1`(Windows) 또는 `infra/utils/init-env.sh`(macOS·Linux)로 `.env`를 만든다 — 비밀번호 2개만 입력받고 나머지 6개는 무작위로 채운다. **최초 기동 전에** 해야 한다(이미 띄운 뒤에 바꾸면 Keycloak·DB에 저장된 값과 어긋나 로그인이 막힌다).
 - **Keycloak이 개발 모드(`start-dev`)로 뜬다.** 평문 HTTP를 허용하는 구성이다.
 - **DB·게이트웨이 포트가 호스트의 모든 인터페이스에 열린다**(`5442` `4000` `8090` `8081`). 신뢰할 수 없는 네트워크에 물린 PC라면 방화벽으로 막는다.
 
