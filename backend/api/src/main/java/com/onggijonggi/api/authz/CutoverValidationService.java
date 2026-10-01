@@ -4,7 +4,6 @@ import com.onggijonggi.common.authz.OrgUnit;
 import com.onggijonggi.common.authz.OrgUnitMember;
 import com.onggijonggi.common.authz.OrgUnitMemberRepository;
 import com.onggijonggi.common.authz.OrgUnitRepository;
-import com.onggijonggi.common.authz.OrgUnitStatus;
 import com.onggijonggi.common.authz.RankGrant;
 import com.onggijonggi.common.authz.RankGrantRepository;
 import com.onggijonggi.common.authz.Tenant;
@@ -205,7 +204,7 @@ public class CutoverValidationService {
 		boolean hasValidAssignment(OrgUnitMember member) {
 			if (member == null || !tenantId.equals(member.getTenantId())) return false;
 			OrgUnit unit = unitById.get(member.getOrgUnitId());
-			return unit != null && tenantId.equals(unit.getTenantId()) && unit.getStatus() == OrgUnitStatus.ACTIVE;
+			return unit != null && unit.isActiveIn(tenantId);
 		}
 
 		void checkActor(Actor actor, UUID nodeId, Set<CutoverValidationResult.Failure> failures) {
