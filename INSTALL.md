@@ -273,7 +273,7 @@ BFF는 Keycloak에서 사람 목록·표시 이름을 읽고, 누가 언제 누�
 
 **설정이 틀리면**: BFF는 멈추지 않고 로그인 클라이언트로 대신 조회하지도 않는다. 기동 로그에 경고가 한 번 남고, 권한 관리 화면·초대 검색은 "Keycloak 관리 연결 설정을 확인" 문구를, 감사 응답의 `lastError`는 `Keycloak 관리 클라이언트 인증 실패(설정 확인, 401)`(id·secret이 틀림, 400이면 서비스 계정이 꺼져 있음) 또는 `Keycloak 관리 권한 부족(…)`(역할 누락)을 보인다. `lastError`는 회복한 뒤에도 마지막 오류로 남으므로 비어 있는지로 판단하지 않는다.
 
-**빈 secret**: `.env`에 `KEYCLOAK_BFF_CLIENT_SECRET`(또는 `KEYCLOAK_CLIENT_SECRET`)이 비어 있는 채로 realm이 처음 만들어지면, Keycloak이 빈 secret을 그대로 받아들여 누구나 빈 값으로 토큰을 받게 된다. 그래서 Keycloak은 빈 값을 아무도 모르는 무작위 값으로 채운 뒤 뜬다(로그에 `[경고]`). 그랬다면 4단계처럼 콘솔에서 secret을 확인(또는 재발급)해 `.env`에 넣는다.
+**빈 secret**: `.env`에 `KEYCLOAK_BFF_CLIENT_SECRET`(또는 `KEYCLOAK_CLIENT_SECRET`)이 비어 있는 채로 realm이 처음 만들어지면, Keycloak이 빈 secret을 그대로 받아들여 누구나 빈 값으로 토큰을 받게 된다. 그래서 Keycloak은 빈 값을 아무도 모르는 무작위 값으로 채운 뒤 뜬다(로그에 `[경고]`). 그 경우 BFF의 관리 조회는 물론, `KEYCLOAK_CLIENT_SECRET`이 비었다면 **로그인도 되지 않는다** — 4단계처럼 콘솔에서 secret을 확인(또는 재발급)해 `.env`에 넣는다. `.env`는 항상 `.env.example` 복사나 `init-env`로 만든다.
 
 **개인정보**: 이 설정으로 Keycloak은 관리자 변경의 상세(계정 생성·수정 시 이메일·이름 등)를 1년 보관한다. 앱 DB에는 상세를 옮기지 않고 계정 id·역할·그룹 경로만 영구 보존한다(권한 변경 감사가 목적이라 지우지 않는다). 기록을 지울 수 없다는 보장은 BFF가 쓰는 DB 계정이 테이블 소유자·슈퍼유저가 아닐 때만 성립한다 — 기본 compose는 같은 계정을 쓰므로, 운영에서는 migration 계정과 BFF 실행 계정을 나누길 권한다.
 

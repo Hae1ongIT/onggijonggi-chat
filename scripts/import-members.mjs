@@ -6,7 +6,7 @@
 //
 // bff의 casbin 프로필이 켜져 있어야 한다(infra/.env에 SPRING_PROFILE=prod,casbin). 꺼져 있으면 임포트 주소가 없다(404).
 // 한 줄이라도 틀리면 아무것도 저장하지 않고 틀린 줄을 모두 보여준다. CSV에 없는 사람의 배정은 지우지 않는다.
-// 로그인은 브라우저로 한다(device flow) — 스크립트가 주소와 코드를 보여 주면 브라우저에서 PLATFORM_ADMIN 역할이 있는
+// 대화형 전용이다 — 로그인은 브라우저로 한다(device flow) — 스크립트가 주소와 코드를 보여 주면 브라우저에서 PLATFORM_ADMIN 역할이 있는
 // 계정(예: infra/.env의 APP_USER)으로 로그인해 승인한다. 없으면 403이고, 이력에는 그 사람이 행위자로 남는다.
 // 비밀번호는 스크립트와 .env를 거치지 않는다. 로그인 클라이언트(ogjg-client)는 비밀번호를 받는 흐름(password grant)이 꺼져 있고
 // 그 secret은 프론트에도 있어 쓰지 않는다 — secret 없는 스크립트 전용 클라이언트 ogjg-cli를 쓴다(INSTALL「Keycloak 관리
