@@ -21,7 +21,10 @@ const mocks = vi.hoisted(() => ({
   toastWarning: vi.fn(),
 }));
 
-vi.mock('@/lib/api/permissions', () => ({
+vi.mock('@/lib/api/permissions', async (importOriginal) => ({
+  PermissionsApiError: (
+    await importOriginal<typeof import('@/lib/api/permissions')>()
+  ).PermissionsApiError,
   fetchPermissionsOverview: mocks.overview,
   importMembersCsv: mocks.importCsv,
   saveAssignment: mocks.save,
@@ -196,6 +199,29 @@ it('배정 저장 뒤 조회 실패는 저장 실패로 바꾸지 않고 이전 
   fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
   await screen.findByRole('combobox', { name: 'A 팀' });
   expect(mocks.save).toHaveBeenCalledTimes(1);
+});
+
+it('Keycloak 관리 연결 설정 문제에는 권한 기능·역할 확인 안내를 붙이지 않는다', async () => {
+  const { PermissionsApiError } = await import('@/lib/api/permissions');
+  mocks.overview.mockRejectedValueOnce(
+    new PermissionsApiError(
+      '관리 연결 설정 문구',
+      'KEYCLOAK_ADMIN_UNAVAILABLE',
+    ),
+  );
+  render(<PermissionsAdmin embedded />);
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('관리 연결 설정 문구');
+  expect(alert.textContent).not.toContain('PLATFORM_ADMIN');
+
+  cleanup();
+  mocks.overview.mockRejectedValueOnce(
+    new PermissionsApiError('권한 없음 문구', 'FORBIDDEN'),
+  );
+  render(<PermissionsAdmin embedded />);
+  expect((await screen.findByRole('alert')).textContent).toContain(
+    'PLATFORM_ADMIN',
+  );
 });
 
 afterEach(() => {

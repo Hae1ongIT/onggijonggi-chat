@@ -14,6 +14,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -25,8 +27,10 @@ import reactor.core.publisher.Mono;
  * Description : 다른 사용자의 표시 이름 조회(이슈 #128)와 실존 확인(이슈 #127)을 Keycloak Admin
  *               API로 한다. 요청의 JWT는
  *               호출자 본인의 claim만 담고 있어, 협업 스레드의 다른 참가자 이름은 이 경로로만 얻을 수
- *               있다. 로그인에 쓰는 것과 같은 클라이언트의 서비스 계정(client_credentials)으로 admin
- *               토큰을 받고, 만료 30초 전까지는 재사용한다.
+ *               있다. BFF 전용 관리 클라이언트의 서비스 계정(client_credentials)으로 admin 토큰을 받고, 만료
+ *               30초 전까지는 재사용한다(#326). 로그인 클라이언트는 secret이 프론트에도 있어 관리 권한을 붙이지 않는다.
+ *               다시 시도해도 풀리지 않는 실패(토큰 발급 거부, Admin API 403)는 KeycloakAdminUnavailableException으로
+ *               바꿔 화면이 설정 문제로 안내하게 한다.
  *
  *               표시 이름도 짧은 TTL로 캐시한다(이슈 #200). 호출부(협업 스레드 목록·참여자 관리·
  *               메시지 이력)가 화면을 그릴 때마다 사람 수만큼 Admin API를 두드리던 것을 줄이기
@@ -63,7 +67,9 @@ public class KeycloakAdminClient {
 			@Value("${app.keycloak.admin.display-name-ttl:5m}") Duration displayNameTtl) {
 		// admin event 상세처럼 큰 응답이 기본 한도(256KB)에 걸려 한 건이 수집 전체를 막지 않게 넉넉히 둔다.
 		this.webClient = webClientBuilder.baseUrl(internalUrl)
-				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)).build();
+				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
+				.filter((request, next) -> next.exchange(request).flatMap(response -> rejectConfigurationFailure(request, response)))
+				.build();
 		this.realm = realm;
 		this.clientId = clientId;
 		this.clientSecret = clientSecret;
@@ -95,7 +101,8 @@ public class KeycloakAdminClient {
 					cacheName(subject, Optional.empty());
 					return Mono.just(Optional.empty());
 				})
-				.onErrorResume(WebClientException.class, ignored -> Mono.just(Optional.empty()));
+				.onErrorResume(WebClientException.class, ignored -> Mono.just(Optional.empty()))
+				.onErrorResume(KeycloakAdminUnavailableException.class, ignored -> Mono.just(Optional.empty()));
 	}
 
 	private void cacheName(String subject, Optional<String> name) {
@@ -395,6 +402,24 @@ public class KeycloakAdminClient {
 				.bodyToFlux(KeycloakRole.class)
 				.map(KeycloakRole::name)
 				.collectList());
+	}
+
+	/**
+	 * 다시 시도해도 풀리지 않는 응답을 설정 문제로 바꾼다(#326) — 토큰 엔드포인트의 400·401(클라이언트 id·secret이 틀리거나
+	 * 서비스 계정이 꺼짐)과 Admin API의 403(역할 누락). Admin API의 401은 Keycloak이 토큰을 먼저 무효화한 일시 상황이라
+	 * 그대로 둔다. 응답 본문은 버린다 — Keycloak 오류 설명을 예외·로그에 싣지 않는다.
+	 */
+	static Mono<ClientResponse> rejectConfigurationFailure(ClientRequest request, ClientResponse response) {
+		int status = response.statusCode().value();
+		String path = request.url().getPath();
+		KeycloakAdminUnavailableException.Reason reason = null;
+		if (path.endsWith("/protocol/openid-connect/token") && (status == 400 || status == 401)) {
+			reason = KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED;
+		} else if (path.contains("/admin/realms/") && status == 403) {
+			reason = KeycloakAdminUnavailableException.Reason.FORBIDDEN;
+		}
+		if (reason == null) return Mono.just(response);
+		return response.releaseBody().then(Mono.error(new KeycloakAdminUnavailableException(reason, status, path)));
 	}
 
 	/** Keycloak이 재시작 등으로 토큰을 먼저 무효화했을 때(401) 다음 호출이 새 토큰을 받게 한다. */

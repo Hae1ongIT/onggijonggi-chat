@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import {
   type ImportReport,
   type PermissionsOverview,
+  PermissionsApiError,
   fetchPermissionsOverview,
   importMembersCsv,
   saveAssignment,
@@ -40,6 +41,8 @@ const OUTCOME_LABELS: Record<string, string> = {
 export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
   const [overview, setOverview] = useState<PermissionsOverview | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  // Keycloak 관리 연결 설정 문제(#326)는 권한 기능·역할과 무관하니 그 안내를 붙이지 않는다.
+  const [failedCode, setFailedCode] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   const mutationBusy = useRef(false);
   const sequence = useRef(0);
@@ -55,6 +58,9 @@ export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
       if (request === sequence.current) {
         setOverview(null);
         setFailed(error instanceof Error ? error.message : '');
+        setFailedCode(
+          error instanceof PermissionsApiError ? error.code : undefined,
+        );
         throw error;
       }
     }
@@ -124,8 +130,10 @@ export function PermissionsAdmin({ embedded = false }: { embedded?: boolean }) {
 
         {failed !== null && (
           <p className="rounded-lg bg-muted px-4 py-3 text-sm" role="alert">
-            불러오지 못했습니다. 권한 기능이 켜져 있고 PLATFORM_ADMIN 권한이
-            있는지 확인해 주세요. {failed}
+            불러오지 못했습니다.{' '}
+            {failedCode !== 'KEYCLOAK_ADMIN_UNAVAILABLE' &&
+              '권한 기능이 켜져 있고 PLATFORM_ADMIN 권한이 있는지 확인해 주세요. '}
+            {failed}
           </p>
         )}
         {failed === null && overview === null && (

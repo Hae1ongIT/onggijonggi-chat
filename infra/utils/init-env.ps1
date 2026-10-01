@@ -6,7 +6,7 @@
     ※ 이 파일은 반드시 UTF-8 BOM으로 저장한다. Windows PowerShell 5.1은 BOM이 없으면
       시스템 코드페이지(한국어 Windows는 949)로 읽어 한글이 깨지고 구문 오류가 난다.
 
-    프로그램끼리만 주고받는 비밀값 5개는 무작위로 채운다 — 사람이 볼 일이 없고,
+    프로그램끼리만 주고받는 비밀값 6개는 무작위로 채운다 — 사람이 볼 일이 없고,
     눈으로 옮겨 적다 틀리는 것이 이 설치에서 가장 흔한 실패였다.
     사람이 로그인할 때 실제로 입력하는 비밀번호 2개만 직접 받는다.
 
@@ -65,6 +65,7 @@ $values = [ordered]@{
     'LITELLM_SALT_KEY'        = New-Secret
     'NEXTAUTH_SECRET'         = New-Secret
     'KEYCLOAK_CLIENT_SECRET'  = New-Secret
+    'KEYCLOAK_BFF_CLIENT_SECRET' = New-Secret
     'KEYCLOAK_ADMIN_PASSWORD' = $adminPw
     'APP_USER_PASSWORD'       = $userPw
 }
@@ -91,7 +92,7 @@ if ($missing.Count -gt 0) {
 [System.IO.File]::WriteAllLines($target, $out, (New-Object System.Text.UTF8Encoding $false))
 
 Write-Host ""
-Write-Host "[완료] .env 를 만들었습니다. 무작위 비밀값 5개는 자동으로 채웠습니다." -ForegroundColor Green
+Write-Host "[완료] .env 를 만들었습니다. 무작위 비밀값 6개는 자동으로 채웠습니다." -ForegroundColor Green
 Write-Host ""
 Write-Host "  8단계에서 채팅에 로그인할 값 - 메모해 두세요"
 Write-Host "    아이디   : $appUser"

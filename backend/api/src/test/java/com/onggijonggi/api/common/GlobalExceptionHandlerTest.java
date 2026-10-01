@@ -2,6 +2,7 @@ package com.onggijonggi.api.common;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
@@ -32,6 +33,19 @@ class GlobalExceptionHandlerTest {
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		assertThat(response.getBody().error().code()).isEqualTo("PARTICIPANT_STATE_CONFLICT");
+	}
+
+	/** Keycloak 관리 클라이언트 설정 문제(#326)는 "잠시 후 다시"와 다른 코드로 나가고, 사유·경로는 응답에 싣지 않는다. */
+	@Test
+	void mapsAKeycloakAdminConfigurationProblemToItsOwnCode() {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/api/x"));
+
+		var response = handler.handleKeycloakAdminUnavailable(new KeycloakAdminUnavailableException(
+				KeycloakAdminUnavailableException.Reason.FORBIDDEN, 403, "/admin/realms/app-realm/users"), exchange);
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		assertThat(response.getBody().error().code()).isEqualTo("KEYCLOAK_ADMIN_UNAVAILABLE");
+		assertThat(response.getBody().error().message()).doesNotContain("/admin/").doesNotContain("FORBIDDEN");
 	}
 
 	/** 새 대화를 놓을 Tenant를 정할 수 없을 때(503)와 워크스페이스 누락(400)이 화면이 문구를 고를 수 있는 코드로 나간다. */

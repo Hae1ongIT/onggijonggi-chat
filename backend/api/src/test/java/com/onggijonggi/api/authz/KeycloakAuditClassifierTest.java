@@ -199,6 +199,9 @@ class KeycloakAuditClassifierTest {
 				"Failing row contains (secret-subject, PLATFORM_ADMIN)"))).isEqualTo("DataIntegrityViolationException");
 		assertThat(KeycloakAuditCollector.summary(new IllegalStateException("connect to 10.0.0.5 failed")))
 				.isEqualTo("IllegalStateException");
+		assertThat(KeycloakAuditCollector.summary(new com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException(
+				com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED, 401,
+				"/realms/app-realm/protocol/openid-connect/token"))).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인)");
 		assertThat(KeycloakAuditCollector.summary(new KeycloakAuditCollector.CollectorProblem("view-users 권한 확인")))
 				.isEqualTo("view-users 권한 확인");
 	}

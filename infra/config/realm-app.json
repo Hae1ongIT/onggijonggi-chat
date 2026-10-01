@@ -36,9 +36,9 @@
       "realmRoles": ["USER", "PLATFORM_ADMIN"]
     },
     {
-      "username": "service-account-${KEYCLOAK_CLIENT_ID}",
+      "username": "service-account-${KEYCLOAK_BFF_CLIENT_ID}",
       "enabled": true,
-      "serviceAccountClientId": "${KEYCLOAK_CLIENT_ID}",
+      "serviceAccountClientId": "${KEYCLOAK_BFF_CLIENT_ID}",
       "clientRoles": {
         "realm-management": ["view-users", "view-events", "view-realm"]
       }
@@ -50,12 +50,47 @@
       "enabled": true,
       "publicClient": false,
       "standardFlowEnabled": true,
-      "serviceAccountsEnabled": true,
+      "serviceAccountsEnabled": false,
       "secret": "${KEYCLOAK_CLIENT_SECRET}",
       "redirectUris": ["${PUBLIC_FRONTEND_URL}/api/auth/callback/keycloak"],
       "webOrigins": ["${PUBLIC_FRONTEND_URL}"],
       "attributes": {
         "post.logout.redirect.uris": "${PUBLIC_FRONTEND_URL}"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "${KEYCLOAK_CLIENT_ID}",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "${KEYCLOAK_BFF_CLIENT_ID}",
+      "description": "BFF 전용 Keycloak 관리 조회(서비스 계정만). secret은 BFF에만 둔다 — 로그인 클라이언트의 secret은 프론트에도 있다.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "${KEYCLOAK_BFF_CLIENT_SECRET}"
+    },
+    {
+      "clientId": "ogjg-cli",
+      "description": "저장소 스크립트(scripts/import-members.mjs)의 브라우저 로그인(device flow) 전용. secret이 없고 비밀번호를 받는 흐름(password grant)도 없다. BFF가 받아들이도록 aud에 로그인 client id를 넣는다.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
       },
       "protocolMappers": [
         {

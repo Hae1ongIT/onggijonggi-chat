@@ -315,7 +315,8 @@ class KeycloakAuditKeycloakTest {
 		setup.collector().runOnce();
 
 		KeycloakAuditStore.CollectorState state = setup.state();
-		assertThat(state.lastError()).startsWith("Keycloak 403").contains("/events/config");
+		// 역할 누락(403)은 다시 시도해도 풀리지 않는 설정 문제로 요약된다(#326).
+		assertThat(state.lastError()).startsWith("Keycloak 관리 권한 부족(").contains("/events/config");
 		assertThat(state.lastSuccessAt()).isNull();
 		assertThat(total(setup.jdbc())).isZero();
 		KeycloakAuditPage page = setup.queries().page(KeycloakAuditQuery.parse(null, null, null, null, null, null, null, null))

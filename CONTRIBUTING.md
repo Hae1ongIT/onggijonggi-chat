@@ -221,6 +221,7 @@ docker run -d --name dev-keycloak -p 8081:8080 \
   -e KEYCLOAK_REALM=app-realm \
   -e KEYCLOAK_CLIENT_ID=ogjg-client \
   -e KEYCLOAK_CLIENT_SECRET=devsecret \
+  -e KEYCLOAK_BFF_CLIENT_ID=ogjg-bff -e KEYCLOAK_BFF_CLIENT_SECRET=devbffsecret \
   -e PUBLIC_FRONTEND_URL=http://localhost:3000 \
   -e APP_USER=devuser -e APP_USER_PASSWORD=devpass123 \
   -v "$(pwd)/infra/config/realm-app.json:/opt/keycloak/data/import/realm-app.json:ro" \
@@ -235,6 +236,7 @@ docker run -d --name dev-keycloak -p 8081:8080 `
   -e KEYCLOAK_REALM=app-realm `
   -e KEYCLOAK_CLIENT_ID=ogjg-client `
   -e KEYCLOAK_CLIENT_SECRET=devsecret `
+  -e KEYCLOAK_BFF_CLIENT_ID=ogjg-bff -e KEYCLOAK_BFF_CLIENT_SECRET=devbffsecret `
   -e PUBLIC_FRONTEND_URL=http://localhost:3000 `
   -e APP_USER=devuser -e APP_USER_PASSWORD=devpass123 `
   -v "${PWD}/infra/config/realm-app.json:/opt/keycloak/data/import/realm-app.json:ro" `
@@ -242,6 +244,8 @@ docker run -d --name dev-keycloak -p 8081:8080 `
 ```
 
 `http://localhost:8081/realms/app-realm/.well-known/openid-configuration`이 응답하면 준비된 것이다.
+
+`ogjg-bff`는 BFF만 쓰는 Keycloak 관리 조회 클라이언트다(로그인 클라이언트 `ogjg-client`의 secret은 프론트에도 있어 관리 권한을 붙이지 않는다). 그 secret(`devbffsecret`)은 BFF의 `application-local.properties`에만 넣는다. realm 파일은 realm을 처음 만들 때만 적용되므로, 이 변경 전에 만든 `dev-keycloak`이 있다면 `docker rm -f dev-keycloak` 뒤 위 명령으로 다시 만든다(개발용이라 계정이 지워져도 된다. 지우기 싫으면 INSTALL.md「Keycloak 관리 클라이언트와 권한 변경 감사」의 전환 절차를 따른다).
 
 `PUBLIC_FRONTEND_URL`이 리다이렉트 주소가 되므로 프론트를 다른 포트로 띄운다면 여기서 맞춘다.
 realm은 최초 기동 때만 만들어진다 — 값을 바꾸려면 `docker rm -f dev-keycloak` 후 다시 띄운다.

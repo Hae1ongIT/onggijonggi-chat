@@ -4,7 +4,7 @@
 #
 # macOS·Linux 전용이다. Windows는 같은 폴더의 init-env.ps1 을 쓴다.
 #
-# 프로그램끼리만 주고받는 비밀값 5개는 무작위로 채운다 — 사람이 볼 일이 없고,
+# 프로그램끼리만 주고받는 비밀값 6개는 무작위로 채운다 — 사람이 볼 일이 없고,
 # 눈으로 옮겨 적다 틀리는 것이 이 설치에서 가장 흔한 실패였다.
 # 사람이 로그인할 때 실제로 입력하는 비밀번호 2개만 직접 받는다.
 #
@@ -77,13 +77,14 @@ fi
 adminPw=$(read_required_password "  1) 관리자 화면 비밀번호" "$adminPassword")
 userPw=$(read_required_password "  2) 채팅 로그인 비밀번호" "$userPassword")
 
-keys='POSTGRES_PASSWORD LITELLM_MASTER_KEY LITELLM_SALT_KEY NEXTAUTH_SECRET KEYCLOAK_CLIENT_SECRET KEYCLOAK_ADMIN_PASSWORD APP_USER_PASSWORD'
+keys='POSTGRES_PASSWORD LITELLM_MASTER_KEY LITELLM_SALT_KEY NEXTAUTH_SECRET KEYCLOAK_CLIENT_SECRET KEYCLOAK_BFF_CLIENT_SECRET KEYCLOAK_ADMIN_PASSWORD APP_USER_PASSWORD'
 
 value_POSTGRES_PASSWORD=$(new_secret)
 value_LITELLM_MASTER_KEY="sk-$(new_secret)"
 value_LITELLM_SALT_KEY=$(new_secret)
 value_NEXTAUTH_SECRET=$(new_secret)
 value_KEYCLOAK_CLIENT_SECRET=$(new_secret)
+value_KEYCLOAK_BFF_CLIENT_SECRET=$(new_secret)
 value_KEYCLOAK_ADMIN_PASSWORD=$adminPw
 value_APP_USER_PASSWORD=$userPw
 
@@ -129,7 +130,7 @@ fi
 mv "$tmp" "$target"
 
 echo ""
-echo "[완료] .env 를 만들었습니다. 무작위 비밀값 5개는 자동으로 채웠습니다."
+echo "[완료] .env 를 만들었습니다. 무작위 비밀값 6개는 자동으로 채웠습니다."
 echo ""
 echo "  8단계에서 채팅에 로그인할 값 - 메모해 두세요"
 echo "    아이디   : $appUser"

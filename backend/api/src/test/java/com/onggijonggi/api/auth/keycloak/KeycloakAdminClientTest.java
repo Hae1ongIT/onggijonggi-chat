@@ -388,4 +388,78 @@ class KeycloakAdminClientTest {
 		throw new IllegalStateException("쿼리에 " + name + "이 없다");
 	}
 
+
+	// ------------------------------------------------------------------ 설정 문제 분류(#326)
+
+	/** 토큰 요청에 tokenStatus, Admin API 요청에 adminStatus로 답하는 클라이언트. 200이면 정상 응답이다. */
+	private KeycloakAdminClient clientWithStatuses(HttpStatus tokenStatus, HttpStatus adminStatus) {
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				return Mono.just(tokenStatus == HttpStatus.OK
+						? jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 60 }")
+						: ClientResponse.create(tokenStatus).header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+								.body("{\"error\":\"unauthorized_client\",\"error_description\":\"secret detail\"}").build());
+			}
+			return Mono.just(adminStatus == HttpStatus.OK ? jsonResponse("[]") : ClientResponse.create(adminStatus).build());
+		});
+		return new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET, Duration.ZERO);
+	}
+
+	/** 토큰 발급 거부(id·secret 틀림, 서비스 계정 꺼짐)는 다시 시도해도 풀리지 않는 설정 문제다. 응답 본문은 싣지 않는다. */
+	@Test
+	void aRejectedTokenRequestIsAConfigurationProblem() {
+		for (HttpStatus status : List.of(HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED)) {
+			StepVerifier.create(clientWithStatuses(status, HttpStatus.OK).listPeople(10))
+					.expectErrorSatisfies(error -> {
+						assertThat(error).isInstanceOf(KeycloakAdminUnavailableException.class);
+						KeycloakAdminUnavailableException unavailable = (KeycloakAdminUnavailableException) error;
+						assertThat(unavailable.reason()).isEqualTo(KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED);
+						assertThat(unavailable.getStatusCode().value()).isEqualTo(503);
+						assertThat(unavailable.getMessage()).doesNotContain("secret detail");
+						assertThat(unavailable.summary()).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인)");
+					})
+					.verify();
+		}
+	}
+
+	/** Admin API 403은 서비스 계정 역할 누락이다. 사람 목록·검색·실존 확인·활성 계정·이메일 조회 모두 같은 예외로 알린다. */
+	@Test
+	void aForbiddenAdminCallIsAConfigurationProblemEverywhere() {
+		KeycloakAdminClient client = clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN);
+
+		for (Mono<?> call : List.of(client.listPeople(10), client.search("kim", 10), client.exists(SUBJECT),
+				client.listEnabledUserSubjects(), client.subjectsByEmail("a@example.com"), client.eventsConfig())) {
+			StepVerifier.create(call)
+					.expectErrorSatisfies(error -> assertThat(error)
+							.isInstanceOfSatisfying(KeycloakAdminUnavailableException.class, unavailable -> {
+								assertThat(unavailable.reason()).isEqualTo(KeycloakAdminUnavailableException.Reason.FORBIDDEN);
+								assertThat(unavailable.summary()).startsWith("Keycloak 관리 권한 부족(/admin/realms/app-realm/");
+							}))
+					.verify();
+		}
+	}
+
+	/** 일시 장애는 설정 문제로 단정하지 않는다 — Admin API 401(토큰이 먼저 무효화됨)과 5xx는 원래 예외 그대로다. */
+	@Test
+	void transientFailuresStayAsTheyAre() {
+		for (HttpStatus status : List.of(HttpStatus.UNAUTHORIZED, HttpStatus.INTERNAL_SERVER_ERROR,
+				HttpStatus.SERVICE_UNAVAILABLE)) {
+			StepVerifier.create(clientWithStatuses(HttpStatus.OK, status).listPeople(10))
+					.expectErrorSatisfies(error -> assertThat(error)
+							.isInstanceOf(org.springframework.web.reactive.function.client.WebClientResponseException.class)
+							.isNotInstanceOf(KeycloakAdminUnavailableException.class))
+					.verify();
+		}
+		StepVerifier.create(clientWithStatuses(HttpStatus.INTERNAL_SERVER_ERROR, HttpStatus.OK).listPeople(10))
+				.expectError(org.springframework.web.reactive.function.client.WebClientResponseException.class).verify();
+	}
+
+	/** 표시 이름은 설정 문제여도 지금처럼 빈 값으로 삼킨다 — 이름 하나 때문에 화면 전체가 깨지면 안 된다. */
+	@Test
+	void displayNameSwallowsAConfigurationProblem() {
+		StepVerifier.create(clientWithStatuses(HttpStatus.UNAUTHORIZED, HttpStatus.OK).displayName(SUBJECT))
+				.expectNext(Optional.empty()).verifyComplete();
+		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN).displayName(SUBJECT))
+				.expectNext(Optional.empty()).verifyComplete();
+	}
 }
