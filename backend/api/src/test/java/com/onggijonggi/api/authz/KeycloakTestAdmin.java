@@ -135,6 +135,10 @@ final class KeycloakTestAdmin {
 		send("POST", realmPath("/roles"), Map.of("name", name));
 	}
 
+	void createManagementRole(String name) {
+		send("POST", realmPath("/clients/" + clientUuid("realm-management") + "/roles"), Map.of("name", name));
+	}
+
 	void addComposite(String role, String child) {
 		send("POST", realmPath("/roles/" + encode(role) + "/composites"), List.of(role(child)));
 	}

@@ -252,6 +252,27 @@ class KeycloakAuditKeycloakTest {
 	}
 
 	@Test
+	void longManagementRolesInOneEventRemainDistinctWhenCollectedAgain() {
+		Setup setup = setup(COLLECTOR_ROLES);
+		KeycloakTestAdmin admin = setup.admin();
+		setup.collector().runOnce();
+		String user = admin.createUser(Map.of("username", "long-roles", "enabled", true));
+		String prefix = "r".repeat(238);
+		admin.createManagementRole(prefix + "A");
+		admin.createManagementRole(prefix + "B");
+		admin.grantManagementRoles(user, List.of(prefix + "A", prefix + "B"));
+
+		setup.collector().runOnce();
+		setup.collector().runOnce();
+
+		assertThat(setup.state().lastError()).isNull();
+		assertThat(admin.effectiveClientRoles(user, admin.clientUuid("realm-management")))
+				.contains(prefix + "A", prefix + "B");
+		assertThat(setup.jdbc().queryForObject("select count(*) from keycloak_adt"
+				+ " where evt_kind = 'MANAGEMENT_ROLE_GRANTED' and trg_subj = ?", Integer.class, user)).isEqualTo(2);
+	}
+
+	@Test
 	void aRealmWithoutThePlatformAdminRoleStillRecordsTheBaselineAndCollects() {
 		Setup setup = setup(COLLECTOR_ROLES);
 		setup.admin().deleteRole("PLATFORM_ADMIN");

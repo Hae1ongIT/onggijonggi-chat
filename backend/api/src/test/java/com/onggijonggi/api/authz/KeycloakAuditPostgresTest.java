@@ -202,6 +202,22 @@ class KeycloakAuditPostgresTest {
 	}
 
 	@Test
+	void oversizedIdentityValuesDoNotCollapseDistinctRowsOnReplay() {
+		Instant at = Instant.now();
+		String prefix = "p".repeat(1024);
+		List<KeycloakAuditRow> rows = List.of(
+				new KeycloakAuditRow("same-event", KeycloakAuditEventKind.USER_CREATED_WITH_ACCESS, at, null, Map.of(),
+						"u1", null, prefix + "A", Map.of()),
+				new KeycloakAuditRow("same-event", KeycloakAuditEventKind.USER_CREATED_WITH_ACCESS, at, null, Map.of(),
+						"u1", null, prefix + "B", Map.of()));
+		assertThat(store.insert(rows)).isEqualTo(2);
+		assertThat(store.insert(rows)).isZero();
+		assertThat(jdbc.queryForObject("select count(*) from keycloak_adt", Integer.class)).isEqualTo(2);
+		assertThat(page(KeycloakAuditQuery.parse(null, null, null, null, null, null, null, null)).items())
+				.allSatisfy(item -> assertThat(item.reference()).doesNotContainKey("targetPathTruncated"));
+	}
+
+	@Test
 	void truncationHashesRemainStoredButAreNotReturnedByTheQuery() {
 		store.insert(List.of(new KeycloakAuditRow("event-" + "e".repeat(255),
 				KeycloakAuditEventKind.ROLE_GRANTED, Instant.now(), "a".repeat(256), Map.of(),

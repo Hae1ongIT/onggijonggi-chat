@@ -59,8 +59,23 @@ public class KeycloakAuditStore {
 		String targetSubject = fit(row.targetSubject(), TEXT, "targetSubject", reference);
 		String actorSubject = fit(row.actorSubject(), TEXT, "actorSubject", reference);
 		String eventId = fit(row.keycloakEventId(), TEXT, "keycloakEventId", reference);
+		// 표시값을 잘라도 원래 unique tuple은 구분한다. 해시는 응답에 포함되지 않는 이벤트 키에만 쓴다.
+		if (oversized(row.keycloakEventId(), TEXT) || oversized(row.targetSubject(), TEXT)
+				|| oversized(row.role(), TEXT) || oversized(row.targetPath(), PATH)) {
+			eventId = "fitted:" + sha256(keyPart(row.keycloakEventId()) + keyPart(row.targetSubject())
+					+ keyPart(row.targetPath()) + keyPart(row.role()));
+		}
 		return new KeycloakAuditRow(eventId, row.kind(), row.occurredAt(), actorSubject, row.actor(), targetSubject, role,
 				targetPath, reference);
+	}
+
+	private static boolean oversized(String value, int limit) {
+		return value != null && value.length() > limit;
+	}
+
+	/** null·빈 문자열·구분 문자를 구별해 원래 unique tuple을 모호성 없이 연결한다. */
+	private static String keyPart(String value) {
+		return value == null ? "-1:" : value.length() + ":" + value;
 	}
 
 	/**
