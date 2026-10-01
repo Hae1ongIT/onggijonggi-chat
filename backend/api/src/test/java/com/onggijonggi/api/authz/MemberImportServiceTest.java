@@ -55,6 +55,17 @@ class MemberImportServiceTest {
 		return service.run(csv, apply, ACTOR).block();
 	}
 
+	/** Keycloak 관리 연결 설정 문제(#326)를 "없는 이메일"로 바꾸지 않고 그대로 올린다 — 멀쩡한 줄을 틀렸다고 보이지 않게. */
+	@Test
+	void aKeycloakConfigurationProblemIsNotReportedAsMissingEmails() {
+		when(keycloak.subjectsByEmail(any())).thenReturn(Mono.error(new com.onggijonggi.api.auth.keycloak
+				.KeycloakAdminUnavailableException(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.Reason
+						.TOKEN_REJECTED, 401, "/realms/app-realm/protocol/openid-connect/token")));
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> run("email,team,rank\nkim@example.com,hr,TL", false))
+				.isInstanceOf(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.class);
+	}
+
 	@Test
 	void everyBadLineIsReportedAndNothingIsSavedEvenWithApply() {
 		String csv = String.join("\n", "email,team,rank",

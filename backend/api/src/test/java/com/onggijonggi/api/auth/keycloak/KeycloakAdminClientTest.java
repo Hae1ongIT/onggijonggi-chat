@@ -455,6 +455,17 @@ class KeycloakAdminClientTest {
 				.expectError(org.springframework.web.reactive.function.client.WebClientResponseException.class).verify();
 	}
 
+	/** 분류는 경로와 상태를 함께 본다 — 토큰 엔드포인트의 403, Admin API의 400은 설정 문제로 단정하지 않는다. */
+	@Test
+	void onlyTheExpectedStatusOnTheExpectedPathIsAConfigurationProblem() {
+		StepVerifier.create(clientWithStatuses(HttpStatus.FORBIDDEN, HttpStatus.OK).listPeople(10))
+				.expectErrorSatisfies(error -> assertThat(error).isNotInstanceOf(KeycloakAdminUnavailableException.class))
+				.verify();
+		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.BAD_REQUEST).listPeople(10))
+				.expectErrorSatisfies(error -> assertThat(error).isNotInstanceOf(KeycloakAdminUnavailableException.class))
+				.verify();
+	}
+
 	/** 표시 이름은 설정 문제여도 지금처럼 빈 값으로 삼킨다 — 이름 하나 때문에 화면 전체가 깨지면 안 된다. */
 	@Test
 	void displayNameSwallowsAConfigurationProblem() {
@@ -467,18 +478,34 @@ class KeycloakAdminClientTest {
 	/** 이름이 모두 비는 원인을 찾을 수 있게 설정 문제는 남기되, 같은 상태가 이어지는 동안 다시 남기지 않는다. */
 	@Test
 	void displayNameWarnsOnceWhileTheConfigurationProblemLasts() {
+		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(HttpStatus.FORBIDDEN);
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				return Mono.just(jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 3600 }"));
+			}
+			return Mono.just(adminStatus.get() == HttpStatus.OK
+					? jsonResponse("{ \"id\": \"" + SUBJECT + "\", \"username\": \"sujin\" }")
+					: ClientResponse.create(adminStatus.get()).build());
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ZERO);
 		ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(KeycloakAdminClient.class);
 		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
 		appender.start();
 		logger.addAppender(appender);
 		try {
-			KeycloakAdminClient client = clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN);
-			client.displayName(SUBJECT).block();
-			client.displayName("other-subject").block();
+			client.displayName("first").block();
+			client.displayName("second").block();
+			assertThat(appender.list).hasSize(1);
+			// 회복하면 풀리고, 다시 문제가 생기면 다시 남긴다.
+			adminStatus.set(HttpStatus.OK);
+			client.displayName("third").block();
+			adminStatus.set(HttpStatus.FORBIDDEN);
+			client.displayName("fourth").block();
 		} finally {
 			logger.detachAppender(appender);
 		}
-		assertThat(appender.list).singleElement().extracting(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
-				.asString().contains("Keycloak 관리 권한 부족(");
+		assertThat(appender.list).hasSize(2).allSatisfy(event -> assertThat(event.getFormattedMessage())
+				.contains("Keycloak 관리 권한 부족("));
 	}
 }

@@ -47,6 +47,17 @@ class PermissionAdminServiceTest {
 	private final PermissionAdminService service = new PermissionAdminService(keycloak, orgUnits, members, nodes, authorizer,
 			memberService, appUsers);
 
+	/** Keycloak 관리 연결 설정 문제(#326)는 빈 사람 목록으로 바꾸지 않고 그대로 올린다 — 화면이 전용 문구를 보이게. */
+	@Test
+	void aKeycloakConfigurationProblemIsNotSwallowed() {
+		when(keycloak.listPeople(any(Integer.class))).thenReturn(Mono.error(new com.onggijonggi.api.auth.keycloak
+				.KeycloakAdminUnavailableException(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.Reason.FORBIDDEN,
+						403, "/admin/realms/app-realm/users")));
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.overview().block())
+				.isInstanceOf(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.class);
+	}
+
 	@Test
 	void theOverviewListsEveryoneAndAsksTheAuthorizerForEachWorkspace() {
 		OrgUnit hr = new OrgUnit(TENANT, "hr", "인사팀", OrgUnitStatus.ACTIVE);

@@ -159,6 +159,7 @@ class KeycloakRealmFileTest {
 		KeycloakTestAdmin admin = new KeycloakTestAdmin(baseUrl(), legacy);
 		admin.createRealm(LOGIN_CLIENT, LOGIN_SECRET);
 		admin.grantServiceAccount(LOGIN_CLIENT, List.of("view-users", "view-events", "view-realm"));
+		String person = admin.createUser(Map.of("username", "legacy-person", "enabled", true));
 		assertThat(token(legacy, Map.of("grant_type", "client_credentials", "client_id", LOGIN_CLIENT,
 				"client_secret", LOGIN_SECRET)).statusCode()).isEqualTo(200);
 
@@ -167,7 +168,7 @@ class KeycloakRealmFileTest {
 		admin.grantServiceAccount(BFF_CLIENT, List.of("view-users", "view-events", "view-realm"));
 		KeycloakAdminClient bff = new KeycloakAdminClient(WebClient.builder(), baseUrl(), legacy, BFF_CLIENT, BFF_SECRET,
 				Duration.ZERO);
-		assertThat(bff.listEnabledUserSubjects().block()).isNotNull();
+		assertThat(bff.listEnabledUserSubjects().block()).contains(person);
 
 		// 6단계: 로그인 서비스 계정 끄기. Keycloak이 서비스 계정 사용자를 지우므로 남은 관리 역할도 함께 사라진다.
 		String loginServiceAccount = admin.serviceAccountUserId(LOGIN_CLIENT).orElseThrow();
@@ -178,7 +179,7 @@ class KeycloakRealmFileTest {
 		// 7단계 확인.
 		assertThat(token(legacy, Map.of("grant_type", "client_credentials", "client_id", LOGIN_CLIENT,
 				"client_secret", LOGIN_SECRET)).statusCode()).isIn(400, 401);
-		assertThat(bff.listEnabledUserSubjects().block()).isNotNull();
+		assertThat(bff.listEnabledUserSubjects().block()).contains(person);
 	}
 
 	/**
@@ -197,6 +198,8 @@ class KeycloakRealmFileTest {
 		assertThat(cli.get("fullScopeAllowed")).isEqualTo(true);
 		assertThat(((Map<?, ?>) cli.get("attributes")).get("use.refresh.tokens")).isEqualTo("false");
 		admin.updateClient(CLI_CLIENT, Map.of("enabled", true));
+		cli = admin.client(CLI_CLIENT);
+		assertThat(cli.get("enabled")).isEqualTo(true);
 		assertThat(cli.get("publicClient")).isEqualTo(true);
 		assertThat(cli.get("directAccessGrantsEnabled")).isEqualTo(false);
 		assertThat(cli.get("standardFlowEnabled")).isEqualTo(false);
@@ -211,10 +214,13 @@ class KeycloakRealmFileTest {
 		assertThat(token(REALM, poll).body()).contains("authorization_pending");
 
 		approveInBrowser(String.valueOf(device.get("verification_uri_complete")));
-		// Keycloak이 알려 준 간격보다 빨리 다시 물으면 slow_down이다.
-		Thread.sleep(((Number) device.get("interval")).longValue() * 1000);
-
-		HttpResponse<String> approved = token(REALM, poll);
+		// Keycloak이 알려 준 간격보다 빨리 다시 물으면 slow_down이다. 승인 직후 잠깐 pending일 수 있어 몇 번 더 묻는다.
+		long interval = ((Number) device.get("interval")).longValue() * 1000;
+		HttpResponse<String> approved = null;
+		for (int attempt = 0; attempt < 3 && (approved == null || approved.statusCode() != 200); attempt++) {
+			Thread.sleep(interval);
+			approved = token(REALM, poll);
+		}
 		assertThat(approved.statusCode()).isEqualTo(200);
 		assertThat(approved.body()).doesNotContain("refresh_token");
 		// BFF가 PLATFORM_ADMIN을 토큰의 realm 역할로 판정하므로 역할이 실려 있어야 한다(콘솔로 만든 클라이언트와 같게).
@@ -237,17 +243,18 @@ class KeycloakRealmFileTest {
 		String page = visit(browser, cookies, URI.create(verificationUri), null);
 		for (int step = 0; step < 5; step++) {
 			java.util.regex.Matcher action = java.util.regex.Pattern.compile("<form[^>]*action=\"([^\"]+)\"").matcher(page);
-			if (!action.find()) return;
+			if (!action.find()) return; // 폼이 없는 화면 = 승인 완료 안내
 			Map<String, String> fields;
 			if (page.contains("name=\"username\"")) {
 				fields = Map.of("username", APP_USER, "password", APP_USER_PASSWORD);
 			} else if (page.contains("name=\"accept\"")) {
 				fields = Map.of("accept", "Yes");
 			} else {
-				return;
+				throw new AssertionError("예상하지 못한 Keycloak 화면이다: " + page.substring(0, Math.min(300, page.length())));
 			}
 			page = visit(browser, cookies, URI.create(baseUrl()).resolve(action.group(1).replace("&amp;", "&")), fields);
 		}
+		throw new AssertionError("다섯 화면 안에 승인을 마치지 못했다");
 	}
 
 	/** 요청 하나를 보내고 리다이렉트를 따라가며 Set-Cookie를 모아 다음 요청에 싣는다. 마지막 화면의 HTML을 돌려준다. */

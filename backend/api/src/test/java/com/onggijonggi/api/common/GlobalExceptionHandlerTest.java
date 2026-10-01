@@ -39,13 +39,15 @@ class GlobalExceptionHandlerTest {
 	@Test
 	void mapsAKeycloakAdminConfigurationProblemToItsOwnCode() {
 		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/api/x"));
+		exchange.getAttributes().put(TraceIdWebFilter.TRACE_ID_ATTR, "trace-1");
 
 		var response = handler.handleKeycloakAdminUnavailable(new KeycloakAdminUnavailableException(
 				KeycloakAdminUnavailableException.Reason.FORBIDDEN, 403, "/admin/realms/app-realm/users"), exchange);
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
 		assertThat(response.getBody().error().code()).isEqualTo("KEYCLOAK_ADMIN_UNAVAILABLE");
-		assertThat(response.getBody().error().message()).doesNotContain("/admin/").doesNotContain("FORBIDDEN");
+		assertThat(response.getBody().error().message()).isEqualTo("사용자 정보를 불러올 수 없습니다.");
+		assertThat(response.getBody().error().traceId()).isEqualTo("trace-1");
 	}
 
 	/** 새 대화를 놓을 Tenant를 정할 수 없을 때(503)와 워크스페이스 누락(400)이 화면이 문구를 고를 수 있는 코드로 나간다. */

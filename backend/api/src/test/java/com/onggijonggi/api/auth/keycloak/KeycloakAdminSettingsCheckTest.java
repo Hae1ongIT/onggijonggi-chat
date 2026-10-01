@@ -11,6 +11,26 @@ import org.junit.jupiter.api.Test;
  */
 class KeycloakAdminSettingsCheckTest {
 
+	/** 기동 완료 이벤트에 걸려 있고, 문제마다 warn을 한 번씩 남긴다. */
+	@Test
+	void itRunsOnApplicationReadyAndWarnsForEachProblem() throws Exception {
+		assertThat(KeycloakAdminSettingsCheck.class.getMethod("warnOnce")
+				.getAnnotation(org.springframework.context.event.EventListener.class).value())
+				.containsExactly(org.springframework.boot.context.event.ApplicationReadyEvent.class);
+		ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+				.getLogger(KeycloakAdminSettingsCheck.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			new KeycloakAdminSettingsCheck("ogjg-client", "", "ogjg-client").warnOnce();
+		} finally {
+			logger.detachAppender(appender);
+		}
+		assertThat(appender.list).hasSize(2)
+				.allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.WARN));
+	}
+
 	@Test
 	void aDedicatedClientWithASecretHasNoProblem() {
 		assertThat(KeycloakAdminSettingsCheck.problems("ogjg-bff", "bff-secret", "ogjg-client")).isEmpty();

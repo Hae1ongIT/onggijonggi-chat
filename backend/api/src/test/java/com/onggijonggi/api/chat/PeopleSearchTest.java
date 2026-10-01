@@ -54,6 +54,17 @@ class PeopleSearchTest {
 		name("sub-yoon", "윤여정");
 	}
 
+	/** 초대 검색은 Keycloak 관리 연결 설정 문제(#326)를 "그런 사람 없음"으로 바꾸지 않고 그대로 올린다. */
+	@Test
+	void aKeycloakConfigurationProblemIsNotAnEmptyResult() {
+		when(keycloak.search(any(), anyInt())).thenReturn(Mono.error(new com.onggijonggi.api.auth.keycloak
+				.KeycloakAdminUnavailableException(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.Reason.FORBIDDEN,
+						403, "/admin/realms/app-realm/users")));
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> search.search("송강호", 10).collectList().block())
+				.isInstanceOf(com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.class);
+	}
+
 	@Test
 	void rankAloneFindsEveryoneWithThatRank() {
 		assertThat(subjects("대리")).containsExactlyInAnyOrder("sub-hwang", "sub-yoon");
