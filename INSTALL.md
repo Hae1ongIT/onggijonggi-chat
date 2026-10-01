@@ -237,7 +237,7 @@ node scripts/casbin-demo-accounts.mjs
 node scripts/import-members.mjs infra/config/demo-members.csv --apply
 ```
 
-첫 줄은 `demo1`~`demo7` 계정(비밀번호는 계정 이름과 같다)을 Keycloak에 만들고, 둘째 줄은 `demo1`~`demo6`의 팀·직급을 넣는다. 둘째 줄은 주소와 코드를 보여 주고 기다린다 — 브라우저에서 그 주소를 열어 `APP_USER`로 로그인하고 접근 허용 화면(*Grant Access to ogjg-cli*)에서 *Yes*를 누르면 이어서 진행한다(비밀번호는 스크립트를 거치지 않는다). `demo7`은 배정하지 않은 사람을 확인하는 계정이다 — 권한 기능이 켜져 있으면 조직 배정이 없는 사람은 1:1 채팅도 쓸 수 없다. 임포트는 `--apply`를 빼면 미리보기만 한다.
+첫 줄은 `demo1`~`demo7` 계정(비밀번호는 계정 이름과 같다)을 Keycloak에 만들고 배정 스크립트용 `ogjg-cli` 클라이언트를 켠다(평소에는 꺼져 있다 — 데모가 끝나면 관리 콘솔에서 끈다). 둘째 줄은 `demo1`~`demo6`의 팀·직급을 넣는다. 둘째 줄은 주소와 코드를 보여 주고 기다린다 — 브라우저에서 그 주소를 열어 `APP_USER`로 로그인하고 접근 허용 화면(*Grant Access to ogjg-cli*)에서 *Yes*를 누르면 이어서 진행한다. 승인 화면의 코드가 스크립트가 보여 준 코드와 같은지 확인하고, 직접 실행하지 않은 스크립트의 코드는 승인하지 않는다(비밀번호는 스크립트를 거치지 않는다). `demo7`은 배정하지 않은 사람을 확인하는 계정이다 — 권한 기능이 켜져 있으면 조직 배정이 없는 사람은 1:1 채팅도 쓸 수 없다. 임포트는 `--apply`를 빼면 미리보기만 한다.
 
 **3. 화면에서 확인한다.** `APP_USER`로 로그인하면 사이드바에 **권한 관리**가 생긴다(`demo` 계정은 일반 사용자라 메뉴가 없다)(<http://localhost:3010/admin/permissions>). 사람마다 팀·직급을 바꾸면 "누가 무엇을 보나" 표가 실제 판정 결과로 바뀐다.
 
@@ -261,12 +261,12 @@ BFF는 Keycloak에서 사람 목록·표시 이름을 읽고, 누가 언제 누�
 4. 그 클라이언트 → **Credentials**의 *Client secret*을 `infra/.env`의 `KEYCLOAK_BFF_CLIENT_SECRET`에 넣고 `KEYCLOAK_BFF_CLIENT_ID=ogjg-bff`를 확인한다. 이미 새 버전이면 `docker compose up -d bff`로 BFF를 다시 만든다.
 5. **확인**: 1분 뒤 `GET /api/platform/rbac/keycloak-audits`(PLATFORM_ADMIN)의 `collector`에서 `lastSuccessAt`이 `lastErrorAt`보다 늦고(또는 `lastErrorAt`이 비어 있고) `adminEventsEnabled`가 `true`면 정상이다. 협업방 참가자 이름도 보인다.
 6. **Clients → `ogjg-client` → Settings**에서 *Service accounts roles*를 끄고 저장한다. Keycloak이 그 서비스 계정을 지우므로 붙어 있던 관리 역할도 함께 사라진다. 이 단계는 5단계를 확인한 **뒤에** 한다 — 그래야 관리 조회가 끊기는 구간이 없다.
-7. **확인**: 로그인 secret으로 관리 토큰을 받을 수 없어야 한다. `unauthorized_client`가 나오면 정상이다. 브라우저 로그인·로그아웃은 그대로 된다.
+7. **확인**: 로그인 secret으로 관리 토큰을 받을 수 없어야 한다. 응답에 **`Client not enabled to retrieve service account`**가 나오면 정상이다. `Invalid client or Invalid client credentials`가 나오면 secret을 잘못 넣은 것이라 이 확인이 되지 않은 것이다 — 다시 한다. secret이 셸 기록에 남지 않게 입력으로 받는다. 브라우저 로그인·로그아웃은 그대로 된다.
 
    ```bash
-   curl -s -d "grant_type=client_credentials&client_id=ogjg-client&client_secret=<infra/.env의 KEYCLOAK_CLIENT_SECRET>" http://localhost:8081/realms/app-realm/protocol/openid-connect/token
+   read -rs S && curl -s --data-urlencode "client_secret=$S" -d "grant_type=client_credentials&client_id=ogjg-client" http://localhost:8081/realms/app-realm/protocol/openid-connect/token; unset S
    ```
-8. (`import-members.mjs`를 쓸 때만) **Clients → Create client**: Client ID `ogjg-cli`, *Client authentication* 끔, *OAuth 2.0 Device Authorization Grant*만 켬. 그 클라이언트 → **Client scopes → ogjg-cli-dedicated → Configure a new mapper → Audience**에서 *Included Client Audience*를 `ogjg-client`로, *Add to access token*을 켜고 저장한다.
+8. (`import-members.mjs`를 쓸 때만) **Clients → Create client**: Client ID `ogjg-cli`, *Client authentication* 끔, *OAuth 2.0 Device Authorization Grant*만 켬, *Consent required* 켬. 그 클라이언트 → **Client scopes → ogjg-cli-dedicated → Configure a new mapper → Audience**에서 *Included Client Audience*를 `ogjg-client`로, *Add to access token*을 켜고 저장한다. **평소에는 꺼 둔다**(Settings → *Enabled* 끔) — 켜 두면 누구나 승인 코드를 받아 관리자에게 승인을 유도할 수 있다(device code 피싱). 스크립트를 쓸 때만 켜고 끝나면 끈다. 새로 만든 realm에는 꺼진 채로 이미 있다.
 9. (선택) **로그인 secret 재발급**: 6단계로 이 secret의 관리 권한은 이미 사라졌으므로 필수는 아니다. `.env.example`의 공개 기본값을 그대로 쓰거나 침해가 의심되면 `ogjg-client` → **Credentials → Regenerate** → `infra/.env`의 `KEYCLOAK_CLIENT_SECRET` 교체 → `docker compose up -d nextjs`. 로그인한 사용자는 다시 로그인해야 한다.
 
 앱은 6단계를 빠뜨렸는지 알아채지 못한다 — 7단계 확인이 유일한 점검이다. 2·3·6단계의 역할 부여·해제가 권한 변경 감사에 행으로 남는 것은 정상이다.

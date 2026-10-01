@@ -2,8 +2,9 @@
 // casbin 프로필을 켜고 권한 판정을 확인할 시험 계정(demo1~demo7)을 로컬 Keycloak에 만든다.
 // 사용: node scripts/casbin-demo-accounts.mjs
 //
-// 계정만 만든다. 팀·직급 배정은 따로 넣는다 — node scripts/import-members.mjs infra/config/demo-members.csv --apply
-// (demo7은 미배정 확인용이라 CSV에 없다).
+// 계정을 만들고, 배정 스크립트가 브라우저 로그인에 쓰는 ogjg-cli 클라이언트를 켠다(realm 파일은 꺼진 채 만든다 —
+// 켜 두면 device code 피싱 경로가 되므로 데모에서만 켠다). 팀·직급 배정은 따로 넣는다 —
+// node scripts/import-members.mjs infra/config/demo-members.csv --apply (demo7은 미배정 확인용이라 CSV에 없다).
 // 이미 있는 계정은 이메일·이름·비밀번호를 아래 표대로 덮어쓰고 USER 역할을 붙인다 — 여러 번 돌려도 결과가 같다.
 // 비밀번호는 계정 이름과 같다. realm-app.json에 적지 않은 이유: 이미 만든 로컬 realm에는 반영되지 않아서다.
 //
@@ -93,6 +94,19 @@ async function main() {
 		// 새 사용자에게 USER가 자동으로 붙지 않는다(realm에 defaultRole 설정이 없다). 이미 있으면 Keycloak이 그대로 둔다.
 		await call('POST', `${api}/users/${id}/role-mappings/realm`, token, [userRole]);
 	}
+	await enableScriptClient(api, token);
+}
+
+/** 배정 스크립트의 브라우저 로그인용 ogjg-cli를 켠다. 없으면(이 클라이언트가 생기기 전에 만든 realm) 만드는 방법을 알린다. */
+async function enableScriptClient(api, token) {
+	const clientId = process.env.CLI_CLIENT_ID || 'ogjg-cli';
+	const [client] = await (await call('GET', `${api}/clients?clientId=${encodeURIComponent(clientId)}`, token)).json();
+	if (!client) {
+		console.log(`${clientId} 클라이언트가 없다 — INSTALL.md「Keycloak 관리 클라이언트와 권한 변경 감사」 8단계로 만든다.`);
+		return;
+	}
+	if (!client.enabled) await call('PUT', `${api}/clients/${client.id}`, token, { ...client, enabled: true });
+	console.log(`${clientId}: 켬 (데모가 끝나면 관리 콘솔에서 끈다)`);
 }
 
 main().catch((error) => {

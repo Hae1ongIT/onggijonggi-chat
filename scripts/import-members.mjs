@@ -46,12 +46,13 @@ async function login(keycloak, env) {
 	const started = await fetch(`${oidc}/auth/device`, form({ client_id: clientId, scope: 'openid' }));
 	if (!started.ok) {
 		throw new Error(`브라우저 로그인을 시작하지 못했다 → ${started.status} ${await started.text()}\n`
-			+ `Keycloak에 ${clientId} 클라이언트가 있는지 확인한다(이미 띄운 환경은 INSTALL「Keycloak 관리 클라이언트와 권한 변경 감사」).`);
+			+ `Keycloak에 ${clientId} 클라이언트가 있고 켜져 있는지 확인한다 — 기본으로 꺼져 있다(INSTALL「Keycloak 관리 클라이언트와 권한 변경 감사」 8단계).`);
 	}
 	const device = await started.json();
 	console.log(`브라우저에서 아래 주소를 열고 PLATFORM_ADMIN 역할이 있는 계정(예: ${env.APP_USER || 'appuser'})으로 로그인하고, 접근 허용 화면에서 Yes를 누른다.`);
 	console.log(`  ${device.verification_uri_complete || device.verification_uri}`);
-	console.log(`  코드: ${device.user_code}\n`);
+	console.log(`  코드: ${device.user_code}`);
+	console.log('  승인 화면의 코드가 위 코드와 같은지 확인한다. 직접 실행하지 않은 스크립트의 코드라면 승인하지 않는다.\n');
 	let interval = device.interval || 5;
 	const deadline = Date.now() + (device.expires_in || 600) * 1000;
 	while (Date.now() < deadline) {

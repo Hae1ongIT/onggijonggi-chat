@@ -187,7 +187,14 @@ class KeycloakRealmFileTest {
 	 */
 	@Test
 	void theScriptClientLogsInThroughTheBrowserOnly() throws Exception {
-		Map<?, ?> cli = new KeycloakTestAdmin(baseUrl(), REALM).client(CLI_CLIENT);
+		KeycloakTestAdmin admin = new KeycloakTestAdmin(baseUrl(), REALM);
+		Map<?, ?> cli = admin.client(CLI_CLIENT);
+		// 꺼진 채 만든다 — 켜 두면 누구나 승인 코드를 받아 관리자에게 승인을 유도할 수 있다(device code 피싱).
+		assertThat(cli.get("enabled")).isEqualTo(false);
+		assertThat(post(oidc() + "/auth/device", Map.of("client_id", CLI_CLIENT)).statusCode()).isGreaterThanOrEqualTo(400);
+		assertThat(cli.get("consentRequired")).isEqualTo(true);
+		assertThat(((Map<?, ?>) cli.get("attributes")).get("use.refresh.tokens")).isEqualTo("false");
+		admin.updateClient(CLI_CLIENT, Map.of("enabled", true));
 		assertThat(cli.get("publicClient")).isEqualTo(true);
 		assertThat(cli.get("directAccessGrantsEnabled")).isEqualTo(false);
 		assertThat(cli.get("standardFlowEnabled")).isEqualTo(false);
@@ -207,6 +214,7 @@ class KeycloakRealmFileTest {
 
 		HttpResponse<String> approved = token(REALM, poll);
 		assertThat(approved.statusCode()).isEqualTo(200);
+		assertThat(approved.body()).doesNotContain("refresh_token");
 		assertThat(audiences(String.valueOf(json.readValue(approved.body(), Map.class).get("access_token"))))
 				.contains(LOGIN_CLIENT);
 	}

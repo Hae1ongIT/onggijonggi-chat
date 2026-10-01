@@ -82,15 +82,18 @@
     },
     {
       "clientId": "ogjg-cli",
-      "description": "저장소 스크립트(scripts/import-members.mjs)의 브라우저 로그인(device flow) 전용. secret이 없고 비밀번호를 받는 흐름(password grant)도 없다. BFF가 받아들이도록 aud에 로그인 client id를 넣는다.",
-      "enabled": true,
+      "description": "scripts/import-members.mjs의 브라우저 로그인(device flow) 전용. secret·password grant 없음. 켜 두면 device code 피싱 경로라 꺼진 채 만들고 쓸 때만 켠다.",
+      "enabled": false,
       "publicClient": true,
+      "consentRequired": true,
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "attributes": {
-        "oauth2.device.authorization.grant.enabled": "true"
+        "oauth2.device.authorization.grant.enabled": "true",
+        "access.token.lifespan": "300",
+        "use.refresh.tokens": "false"
       },
       "protocolMappers": [
         {
