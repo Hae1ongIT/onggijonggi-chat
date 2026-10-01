@@ -479,10 +479,14 @@ class KeycloakAdminClientTest {
 		assertThat(tokenRequests.get()).isEqualTo(1);
 	}
 
-	/** Admin API 401(Keycloak이 토큰을 먼저 무효화함)이면 캐시를 비워 다음 요청이 새 토큰을 받는다. */
-	@Test
-	void anAdminUnauthorizedDropsTheCachedTokenForTheNextCall() {
-		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(HttpStatus.UNAUTHORIZED);
+	/**
+	 * Admin API 401(Keycloak이 토큰을 먼저 무효화함)과 403(토큰의 역할이 모자람 — 역할을 고친 뒤에도 캐시한 토큰은 옛 역할)이면
+	 * 캐시를 비워 다음 요청이 새 토큰을 받는다.
+	 */
+	@org.junit.jupiter.params.ParameterizedTest
+	@org.junit.jupiter.params.provider.EnumSource(value = HttpStatus.class, names = { "UNAUTHORIZED", "FORBIDDEN" })
+	void anAdminUnauthorizedOrForbiddenDropsTheCachedTokenForTheNextCall(HttpStatus failure) {
+		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(failure);
 		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
 			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
 				tokenRequests.incrementAndGet();

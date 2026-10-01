@@ -441,9 +441,11 @@ public class KeycloakAdminClient {
 	 */
 	private ExchangeFilterFunction configurationFailureFilter() {
 		return (request, next) -> next.exchange(request).flatMap(response -> {
-			// Admin API 401은 Keycloak이 토큰을 먼저 무효화한 것이다(재시작 등). 이 요청은 일시 오류로 실패하고, 다음 요청이
-			// 새 토큰을 받게 캐시를 비운다 — 감사 수집기만 비우면 수집을 끈 배포는 토큰 만료까지 계속 실패한다.
-			if (response.statusCode().value() == 401 && request.url().getPath().contains(ADMIN_PATH_MARKER)) invalidateToken();
+			// Admin API 401은 Keycloak이 토큰을 먼저 무효화한 것이다(재시작 등). 403은 토큰에 담긴 역할이 모자란 것이라, 운영자가
+			// 역할을 고쳐도 캐시한 토큰은 만료(기본 5분)까지 옛 역할 그대로다(실측). 둘 다 이 요청은 실패하고, 다음 요청이 새 토큰을
+			// 받게 캐시를 비운다 — 감사 수집기만 비우면 수집을 끈 배포는 토큰 만료까지 계속 실패한다.
+			int status = response.statusCode().value();
+			if ((status == 401 || status == 403) && request.url().getPath().contains(ADMIN_PATH_MARKER)) invalidateToken();
 			return rejectConfigurationFailure(request, response);
 		});
 	}

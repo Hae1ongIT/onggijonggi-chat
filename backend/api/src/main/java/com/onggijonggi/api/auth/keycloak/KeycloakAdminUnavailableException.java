@@ -41,8 +41,9 @@ public class KeycloakAdminUnavailableException extends ResponseStatusException {
 	}
 
 	/**
-	 * 수집 상태·로그에 남길 요지. 비밀값과 Keycloak 응답 본문은 넣지 않는다. 토큰 거부는 상태로 원인이 갈린다 —
-	 * 401은 client id·secret이 틀림, 400은 서비스 계정이 꺼졌거나 그 흐름이 허용되지 않음.
+	 * 수집 상태·로그에 남길 요지. 비밀값과 Keycloak 응답 본문은 넣지 않는다. 토큰 거부의 상태는 받은 그대로 적는다 —
+	 * Keycloak 26은 id·secret이 틀릴 때, 서비스 계정이 꺼졌을 때, 없는 클라이언트일 때 모두 401이라(실측) 상태로 원인을
+	 * 가를 수는 없다. 원인은 콘솔에서 확인한다.
 	 */
 	public String summary() {
 		return reason == Reason.TOKEN_REJECTED ? "Keycloak 관리 클라이언트 인증 실패(설정 확인, " + keycloakStatus + ")"
