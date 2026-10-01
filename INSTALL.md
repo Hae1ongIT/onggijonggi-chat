@@ -266,7 +266,7 @@ BFF는 Keycloak에서 사람 목록·표시 이름을 읽고, 누가 언제 누�
    ```bash
    read -rs S && curl -s --data-urlencode "client_secret=$S" -d "grant_type=client_credentials&client_id=ogjg-client" http://localhost:8081/realms/app-realm/protocol/openid-connect/token; unset S
    ```
-8. (`import-members.mjs`를 쓸 때만) **Clients → Create client**: Client ID `ogjg-cli`, *Client authentication* 끔, *OAuth 2.0 Device Authorization Grant*만 켬, *Consent required* 켬. 그 클라이언트 → **Client scopes → ogjg-cli-dedicated → Configure a new mapper → Audience**에서 *Included Client Audience*를 `ogjg-client`(`KEYCLOAK_CLIENT_ID` 값)로, *Add to access token*을 켜고 저장한다. **평소에는 꺼 둔다**(클라이언트 상세 화면 맨 위의 *Enabled* 토글) — 켜 두면 누구나 승인 코드를 받아 관리자에게 승인을 유도할 수 있다(device code 피싱). 스크립트를 쓸 때만 켜고 끝나면 끈다. 새로 만든 realm에는 꺼진 채로 이미 있다.
+8. (`import-members.mjs`를 쓸 때만) **Clients → Create client**: Client ID `ogjg-cli`, *Client authentication* 끔, *OAuth 2.0 Device Authorization Grant*만 켬, *Consent required* 켬. 그 클라이언트 → **Client scopes → ogjg-cli-dedicated → Configure a new mapper → Audience**에서 *Included Client Audience*를 `ogjg-client`(`KEYCLOAK_CLIENT_ID` 값)로, *Add to access token*을 켜고 저장한다. **평소에는 꺼 둔다**(클라이언트 상세 화면 맨 위의 *Enabled* 토글) — 켜 두면 누구나 승인 코드를 받아 관리자에게 승인을 유도할 수 있다(device code 피싱). 스크립트를 쓸 때만 켜고 끝나면 끈다. 새로 만든 realm에는 꺼진 채로 이미 있다. (선택) 같은 클라이언트 → **Advanced**에서 *Access Token Lifespan*을 5분으로, *Use refresh tokens*를 끄면 새 realm과 같아진다.
 9. (선택) **로그인 secret 재발급**: 6단계로 이 secret의 관리 권한은 이미 사라졌으므로 필수는 아니다. `.env.example`의 공개 기본값을 그대로 쓰거나 침해가 의심되면 `ogjg-client` → **Credentials → Regenerate** → `infra/.env`의 `KEYCLOAK_CLIENT_SECRET` 교체 → `docker compose up -d nextjs`. 로그인한 사용자는 다시 로그인해야 한다.
 
 앱은 6단계를 빠뜨렸는지 알아채지 못한다 — 7단계 확인이 유일한 점검이다. 2·3·6단계의 역할 부여·해제가 권한 변경 감사에 행으로 남는 것은 정상이다.

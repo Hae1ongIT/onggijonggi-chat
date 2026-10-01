@@ -8,7 +8,7 @@
 // 이미 있는 계정은 이메일·이름·비밀번호를 아래 표대로 덮어쓰고 USER 역할을 붙인다 — 여러 번 돌려도 결과가 같다.
 // 비밀번호는 계정 이름과 같다. realm-app.json에 적지 않은 이유: 이미 만든 로컬 realm에는 반영되지 않아서다.
 //
-// 계정을 만들려면 manage-users 권한이 필요한데 bff의 서비스 계정은 view-users뿐이라, Keycloak 관리자
+// 계정을 만들려면 manage-users 권한이 필요한데 bff의 서비스 계정(ogjg-bff)은 조회 역할(view-*)뿐이라, Keycloak 관리자
 // (infra/.env의 KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD)로 master realm에서 토큰을 받는다.
 // Keycloak 주소는 KEYCLOAK_URL로 바꿀 수 있고 기본은 compose가 여는 http://localhost:8081이다.
 //

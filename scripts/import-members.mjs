@@ -90,7 +90,7 @@ async function main() {
 		body: csv,
 	});
 	if (response.status === 404) throw new Error('임포트 주소가 없다 — bff의 casbin 프로필이 켜져 있는지 확인한다(SPRING_PROFILE=prod,casbin)');
-	if (response.status === 403) throw new Error('권한이 없다 — 로그인한 계정에 Keycloak PLATFORM_ADMIN 역할이 필요하다(IMPORT_USER 확인)');
+	if (response.status === 403) throw new Error('권한이 없다 — 브라우저에서 승인한 계정에 Keycloak PLATFORM_ADMIN 역할이 필요하다');
 	if (!response.ok) throw new Error(`임포트 실패 → ${response.status} ${await response.text()}`);
 	const report = await response.json();
 
