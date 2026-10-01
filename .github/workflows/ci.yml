@@ -38,6 +38,9 @@ jobs:
       - name: Flyway migration 검사 테스트
         run: node --test scripts/validate-flyway-migrations.test.mjs scripts/flyway-migration.test.mjs
 
+      - name: 개발 환경 초기 설정 검사 테스트
+        run: node --test scripts/setup-dev-rbac.test.mjs
+
       - name: Flyway migration 버전 검사
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then

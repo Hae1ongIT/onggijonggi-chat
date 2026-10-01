@@ -17,7 +17,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_PATH = join(ROOT, 'infra', '.env');
@@ -40,9 +40,8 @@ function form(values) {
 const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
 /** 브라우저 로그인(OAuth device authorization grant). 승인될 때까지 Keycloak이 알려 준 간격으로 묻는다. */
-async function login(keycloak, env) {
+export async function deviceLogin(keycloak, env, clientId = process.env.CLI_CLIENT_ID || 'ogjg-cli') {
 	const oidc = `${keycloak}/realms/${env.KEYCLOAK_REALM || 'app-realm'}/protocol/openid-connect`;
-	const clientId = process.env.CLI_CLIENT_ID || 'ogjg-cli';
 	const started = await fetch(`${oidc}/auth/device`, form({ client_id: clientId, scope: 'openid' }));
 	if (!started.ok) {
 		throw new Error(`브라우저 로그인을 시작하지 못했다 → ${started.status} ${await started.text()}\n`
@@ -82,7 +81,7 @@ async function main() {
 	const csv = readFileSync(file, 'utf8');
 	const env = readEnv(ENV_PATH);
 	const bff = (process.env.BFF_URL || 'http://localhost:8090').replace(/\/$/, '');
-	const token = await login((process.env.KEYCLOAK_URL || 'http://localhost:8081').replace(/\/$/, ''), env);
+	const token = await deviceLogin((process.env.KEYCLOAK_URL || 'http://localhost:8081').replace(/\/$/, ''), env);
 
 	const response = await fetch(`${bff}/api/platform/rbac/members/import?apply=${apply}`, {
 		method: 'POST',
@@ -112,7 +111,9 @@ async function main() {
 	console.log('ogjg-cli를 다 썼으면 끈다 — node scripts/casbin-demo-accounts.mjs --disable-cli (또는 관리 콘솔)');
 }
 
-main().catch((error) => {
-	console.error(error.message);
-	process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	main().catch((error) => {
+		console.error(error.message);
+		process.exitCode = 1;
+	});
+}

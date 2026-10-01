@@ -8,6 +8,61 @@
 
 ---
 
+## 개발 서버 RBAC 예시까지 한 번에 준비하기
+
+Docker Compose와 Node.js 22 이상을 설치하고 저장소 루트에서 실행한다. 아래 수동 설치 절차 대신 사용할 수 있는 **개발·평가 전용** 명령이다. 운영 DB의 점검창 절체를 대신하지 않는다.
+
+### 자동 비밀번호 모드 — 기본값
+
+```bash
+node -- scripts/setup-dev-rbac.mjs
+```
+
+`infra/.env`가 없으면 템플릿을 복사하면서 비밀번호·secret을 자동 생성한다. PostgreSQL·Keycloak·LiteLLM·Casbin·BFF·프런트와 기본 문서 워커/파일 저장소를 올리고, BFF 전용 조회 클라이언트·감사 이벤트·예시 계정·조직/직급 배정을 준비한다. 최초 이미지 빌드에는 시간이 걸린다.
+
+스크립트가 출력한 device 승인 주소에서 `APP_USER`로 **한 번 로그인·승인**한다. 비밀번호는 `infra/.env`의 `APP_USER_PASSWORD`에서 확인한다. 로그인 클라이언트의 password grant나 상시 특권 서비스 계정으로 이 승인을 우회하지 않는다.
+
+### 직접 비밀번호 지정 모드
+
+`infra/.env.setup-passwords.example`을 `infra/.env.setup-passwords.json`으로 복사해 값을 바꾼 뒤 실행한다. Windows는 `Copy-Item`, macOS/Linux는 `cp`를 사용한다.
+
+```bash
+node -- scripts/setup-dev-rbac.mjs --password-mode manual --password-file infra/.env.setup-passwords.json
+```
+
+이 모드는 새 Keycloak 관리자·앱 로그인·예시 계정 비밀번호를 입력 파일에서 읽는다. 앱/Keycloak 관리자 비밀번호는 12자 이상이며 영문·숫자·`_!@%+=:.,/-`만 사용한다(Compose의 `$` 치환과 주석 해석 방지). 예시 계정 비밀번호는 12자 이상이고 줄바꿈을 넣지 않는다. 다른 시스템 secret은 자동 생성한다. 입력 파일은 공개 예제값 그대로 사용하지 않는다.
+
+두 모드 모두 기존 `infra/.env`·사용자 비밀번호를 덮어쓰지 않는다. **직접 지정 모드는 기존 계정 비밀번호 변경 명령이 아니다.** 비밀번호를 바꿔 재실행하더라도 기존 계정은 유지된다. 다른 비밀번호로 새로 만들려면 별도 새 `--env-file infra/.env.new-demo`와 직접 지정 파일을 사용하고, 아래 프로젝트 확인 옵션으로 기존 개발 DB를 명시 초기화한다. 기존 env/상태 파일은 백업으로 보존한다.
+
+### 완료 결과와 재실행
+
+| 계정 | 기본 배정·가능 작업 |
+| --- | --- |
+| `APP_USER`(기본 `appuser`) | PLATFORM_ADMIN + 인사팀 TL. 플랫폼 관리와 Workspace 관리 |
+| `rbac-admin` | 인사팀 TL. Workspace 관리, 플랫폼 관리 불가 |
+| `rbac-finance` | 재무팀 B. 재무 Workspace 관리, 플랫폼 관리 불가 |
+| `rbac-viewer` | 예시 일반 사용자 조직 S. COMMON·인사팀·직급 규칙으로 허용된 Workspace 조회, 관리 불가 |
+
+화면: `http://localhost:3010/admin/permissions`. 자동/직접 지정 예시 계정의 실제 비밀번호는 `infra/.env.dev-setup.json`에 저장한다. `infra/.env`·상태 파일·직접 지정 파일은 Git에서 제외돼야 하며 스크립트가 이를 확인한다. 로그에는 비밀번호·token·secret을 출력하지 않는다. POSIX에서는 파일 모드를 `0600`으로 쓰지만 Windows에서는 파일을 보관한 디렉터리의 ACL도 확인한다.
+
+같은 명령을 다시 실행하면 기존 예시 비밀번호·데이터를 보존한다. 예시 계정과 이름이 충돌하는 일반 사용자, 다른 기존 조직 배정, 비활성/다른 Tenant, 절체 전 DB는 임의 보정하지 않고 중단한다. 부분 실패 후 원인을 해결하고 재실행할 수 있다. 여러 API를 순차 호출하므로 전체 설치가 하나의 DB 트랜잭션은 아니다. CLI는 작업 성공·실패 뒤 원래 활성 상태로 돌아간다.
+
+BFF 관리 조회가 성공한 뒤에만 옛 로그인 클라이언트의 서비스 계정을 끈다. 권한 배정·VIEW·관리 권한·절체 사전 검증이 통과해야 완료를 표시한다. 운영 절체 완료 표지는 만들지 않는다.
+
+LLM API 키와 모델은 자동 발급하지 않는다. 기존 `infra/.env`의 모델 설정은 보존하며 실제 AI 답변에는 [모델 설정](INSTALL_models.md)이 필요하다. 새 env를 다른 모델 템플릿으로 만들려면 `--env-template infra/.env.ollama.example` 등을 사용한다. 기존 env에는 템플릿을 다시 덮어쓰지 않는다. 도메인/IP를 바꿀 때는 env의 공개 주소 네 개를 먼저 맞춘다.
+
+### 개발 데이터 명시 초기화 — 선택 사항
+
+기존 개발 데이터를 버리고 새로 시작하려는 경우에만 실행한다.
+
+```bash
+node -- scripts/setup-dev-rbac.mjs --reset --confirm-reset ogjg-chat
+```
+
+현재 Compose 프로젝트와 PostgreSQL 볼륨 소유를 확인한 뒤 해당 프로젝트를 내리고 **그 PostgreSQL 볼륨만** 삭제한다. 앱 대화·권한 데이터와 Keycloak 계정이 삭제되며 백업 없이는 복구할 수 없다. 파일 저장소·다른 프로젝트 볼륨은 지우지 않는다. env와 예시 비밀번호 파일은 유지해 동일 자격증명으로 다시 만든다. 직접 지정 파일의 새 비밀번호로 다시 시작하려면 기존 env/상태 파일의 보존 규칙도 함께 확인한다. 초기화 확인값이 없거나 프로젝트/볼륨이 다르면 중단한다.
+
+---
+
 ## 0. 준비물
 
 | | 필요한 것 |
