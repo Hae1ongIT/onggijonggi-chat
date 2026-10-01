@@ -297,6 +297,43 @@ class KeycloakAdminClientTest {
 		assertThat(firstValues).containsExactly("0");
 	}
 
+	/** 서비스 계정은 사람의 조직 배정 대상이 아니다. 이름이 없거나 subject가 빈 행은 검증 경계로 그대로 보낸다. */
+	@Test
+	void excludesOnlyIdentifiedServiceAccountsFromCutoverSubjects() {
+		KeycloakAdminClient client = clientServingRawUserPages("""
+				[
+				  { "id": "service", "username": "service-account-ogjg-bff" },
+				  { "id": "person", "username": "appuser" },
+				  { "id": "unknown-name" },
+				  { "id": "", "username": "malformed-person" }
+				]
+				""");
+
+		assertThat(client.listEnabledUserSubjects().block()).containsExactly("person", "unknown-name", "");
+	}
+
+	/** 필터 뒤 목록이 비어도 원본 페이지가 가득 찼으면 다음 페이지의 사람을 빠뜨리지 않는다. */
+	@Test
+	void continuesPastAFullPageOfServiceAccounts() {
+		List<String> firstValues = new ArrayList<>();
+		String services = java.util.stream.IntStream.range(0, 100)
+				.mapToObj(index -> "{\"id\":\"service-%d\",\"username\":\"service-account-client-%d\"}".formatted(index, index))
+				.collect(java.util.stream.Collectors.joining(",", "[", "]"));
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().toString().endsWith("/protocol/openid-connect/token")) {
+				return Mono.just(jsonResponse("{\"access_token\":\"t\",\"expires_in\":60}"));
+			}
+			String first = queryValue(request, "first");
+			firstValues.add(first);
+			return Mono.just(jsonResponse(first.equals("0") ? services : "[{\"id\":\"person\",\"username\":\"appuser\"}]"));
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ofMinutes(5));
+
+		assertThat(client.listEnabledUserSubjects().block()).containsExactly("person");
+		assertThat(firstValues).containsExactly("0", "100");
+	}
+
 	/** 절체 검증에는 활성 사용자 subject만 필요하므로 간략 표현을 요청한다. */
 	@Test
 	void requestsOnlyEnabledUsersWithBriefRepresentation() {

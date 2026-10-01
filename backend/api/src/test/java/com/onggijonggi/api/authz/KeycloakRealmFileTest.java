@@ -87,7 +87,8 @@ class KeycloakRealmFileTest {
 		String appUser = people.stream().filter(person -> person.username().equals(APP_USER)).findFirst().orElseThrow()
 				.subject();
 		assertThat(bff.displayName(appUser).block()).isPresent();
-		assertThat(bff.listEnabledUserSubjects().block()).contains(appUser);
+		String serviceUser = new KeycloakTestAdmin(baseUrl(), REALM).serviceAccountUserId(BFF_CLIENT).orElseThrow();
+		assertThat(bff.listEnabledUserSubjects().block()).contains(appUser).doesNotContain(serviceUser);
 		assertThat(bff.search(APP_USER, 10).block()).isNotEmpty();
 		assertThat(bff.realmManagementUuid().block()).isPresent();
 

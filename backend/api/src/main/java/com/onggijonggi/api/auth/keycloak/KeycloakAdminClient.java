@@ -278,10 +278,12 @@ public class KeycloakAdminClient {
 
 	/**
 	 * 절체 사전 검증용으로 Keycloak에서 활성 사용자 subject를 페이지 단위로 모두 읽는다.
-	 * Tenant는 DB 소속에서 판정하며, 로컬 사용자를 만들거나 token claim을 바꾸지 않는다.
+	 * 서비스 계정은 조직 배정 대상이 아니므로 제외한다. Tenant는 DB 소속에서 판정하며,
+	 * 로컬 사용자를 만들거나 token claim을 바꾸지 않는다.
 	 */
 	public Mono<List<String>> listEnabledUserSubjects() {
 		return adminToken().flatMapMany(token -> enabledUsers(token, 0))
+				.filter(user -> user.username() == null || !user.username().startsWith("service-account-"))
 				.map(AdminUserRepresentation::id)
 				.collectList();
 	}
@@ -585,8 +587,8 @@ public class KeycloakAdminClient {
 	private record SearchedUser(String id, String username) {
 	}
 
-	/** PLATFORM_ADMIN 절체 사전 검증에서 활성 사용자 subject만 읽는 간략 표현. */
-	private record AdminUserRepresentation(String id) {
+	/** 사용자 식별자와 서비스 계정 구분에 필요한 이름만 읽는 간략 표현. */
+	private record AdminUserRepresentation(String id, String username) {
 	}
 
 }
