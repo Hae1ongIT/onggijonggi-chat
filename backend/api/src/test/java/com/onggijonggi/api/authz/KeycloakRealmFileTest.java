@@ -193,6 +193,8 @@ class KeycloakRealmFileTest {
 		assertThat(cli.get("enabled")).isEqualTo(false);
 		assertThat(post(oidc() + "/auth/device", Map.of("client_id", CLI_CLIENT)).statusCode()).isGreaterThanOrEqualTo(400);
 		assertThat(cli.get("consentRequired")).isEqualTo(true);
+		// consentRequired면 Keycloak이 fullScopeAllowed를 false로 가져와 토큰에서 realm 역할이 빠진다(실측) — 명시해 둔다.
+		assertThat(cli.get("fullScopeAllowed")).isEqualTo(true);
 		assertThat(((Map<?, ?>) cli.get("attributes")).get("use.refresh.tokens")).isEqualTo("false");
 		admin.updateClient(CLI_CLIENT, Map.of("enabled", true));
 		assertThat(cli.get("publicClient")).isEqualTo(true);
@@ -215,6 +217,10 @@ class KeycloakRealmFileTest {
 		HttpResponse<String> approved = token(REALM, poll);
 		assertThat(approved.statusCode()).isEqualTo(200);
 		assertThat(approved.body()).doesNotContain("refresh_token");
+		// BFF가 PLATFORM_ADMIN을 토큰의 realm 역할로 판정하므로 역할이 실려 있어야 한다(콘솔로 만든 클라이언트와 같게).
+		String approvedToken = String.valueOf(json.readValue(approved.body(), Map.class).get("access_token"));
+		assertThat(String.valueOf(json.readValue(Base64.getUrlDecoder().decode(approvedToken.split("\\.")[1]), Map.class)
+				.get("realm_access"))).contains("PLATFORM_ADMIN");
 		assertThat(audiences(String.valueOf(json.readValue(approved.body(), Map.class).get("access_token"))))
 				.contains(LOGIN_CLIENT);
 	}
