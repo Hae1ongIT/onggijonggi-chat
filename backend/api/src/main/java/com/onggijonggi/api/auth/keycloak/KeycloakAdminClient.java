@@ -8,7 +8,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
@@ -16,6 +19,7 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ClientResponse;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -40,7 +44,13 @@ import reactor.core.publisher.Mono;
 @Component
 public class KeycloakAdminClient {
 
+	private static final Logger log = LoggerFactory.getLogger(KeycloakAdminClient.class);
+
 	private static final Duration EXPIRY_SAFETY_MARGIN = Duration.ofSeconds(30);
+
+	/** 설정 문제 분류(rejectConfigurationFailure)가 보는 경로 표지. 요청 주소를 바꾸면 여기도 맞춘다. */
+	private static final String TOKEN_PATH_SUFFIX = "/protocol/openid-connect/token";
+	private static final String ADMIN_PATH_MARKER = "/admin/realms/";
 
 	/**
 	* 캐시가 무한히 자라지 않게 하는 상한. realm의 사용자 수가 자연스러운 경계지만, 그 수를
@@ -59,6 +69,9 @@ public class KeycloakAdminClient {
 
 	private final Duration displayNameTtl;
 
+	/** 표시 이름이 설정 문제로 비고 있음을 이미 경고했는지. 같은 상태에서는 다시 남기지 않고, 조회가 성공하면 풀린다. */
+	private final AtomicBoolean displayNameProblemLogged = new AtomicBoolean();
+
 	public KeycloakAdminClient(WebClient.Builder webClientBuilder,
 			@Value("${app.keycloak.internal-url}") String internalUrl,
 			@Value("${app.keycloak.realm}") String realm,
@@ -68,7 +81,7 @@ public class KeycloakAdminClient {
 		// admin event 상세처럼 큰 응답이 기본 한도(256KB)에 걸려 한 건이 수집 전체를 막지 않게 넉넉히 둔다.
 		this.webClient = webClientBuilder.baseUrl(internalUrl)
 				.codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
-				.filter((request, next) -> next.exchange(request).flatMap(response -> rejectConfigurationFailure(request, response)))
+				.filter(configurationFailureFilter())
 				.build();
 		this.realm = realm;
 		this.clientId = clientId;
@@ -94,7 +107,10 @@ public class KeycloakAdminClient {
 		}
 		return adminToken()
 				.flatMap(token -> lookupUser(subject, token))
-				.doOnNext(name -> cacheName(subject, name))
+				.doOnNext(name -> {
+					cacheName(subject, name);
+					displayNameProblemLogged.set(false);
+				})
 				.onErrorResume(WebClientResponseException.NotFound.class, ignored -> {
 					// 탈퇴처럼 확정적인 "없음"은 캐시해도 된다 — 장애와 달리 다시 물어도 답이 같고,
 					// 캐시하지 않으면 떠난 사람의 옛 메시지가 볼 때마다 조회를 한 번씩 더 부른다.
@@ -102,7 +118,13 @@ public class KeycloakAdminClient {
 					return Mono.just(Optional.empty());
 				})
 				.onErrorResume(WebClientException.class, ignored -> Mono.just(Optional.empty()))
-				.onErrorResume(KeycloakAdminUnavailableException.class, ignored -> Mono.just(Optional.empty()));
+				.onErrorResume(KeycloakAdminUnavailableException.class, problem -> {
+					// 화면 하나를 깨지 않으려 빈 값으로 삼키되, 이름이 모두 비는 원인을 찾을 수 있게 상태가 바뀔 때 한 번 남긴다.
+					if (displayNameProblemLogged.compareAndSet(false, true)) {
+						log.warn("표시 이름을 조회하지 못해 빈 이름으로 보인다: {}", problem.summary());
+					}
+					return Mono.just(Optional.empty());
+				});
 	}
 
 	private void cacheName(String subject, Optional<String> name) {
@@ -409,13 +431,17 @@ public class KeycloakAdminClient {
 	 * 서비스 계정이 꺼짐)과 Admin API의 403(역할 누락). Admin API의 401은 Keycloak이 토큰을 먼저 무효화한 일시 상황이라
 	 * 그대로 둔다. 응답 본문은 버린다 — Keycloak 오류 설명을 예외·로그에 싣지 않는다.
 	 */
+	private static ExchangeFilterFunction configurationFailureFilter() {
+		return (request, next) -> next.exchange(request).flatMap(response -> rejectConfigurationFailure(request, response));
+	}
+
 	static Mono<ClientResponse> rejectConfigurationFailure(ClientRequest request, ClientResponse response) {
 		int status = response.statusCode().value();
 		String path = request.url().getPath();
 		KeycloakAdminUnavailableException.Reason reason = null;
-		if (path.endsWith("/protocol/openid-connect/token") && (status == 400 || status == 401)) {
+		if (path.endsWith(TOKEN_PATH_SUFFIX) && (status == 400 || status == 401)) {
 			reason = KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED;
-		} else if (path.contains("/admin/realms/") && status == 403) {
+		} else if (path.contains(ADMIN_PATH_MARKER) && status == 403) {
 			reason = KeycloakAdminUnavailableException.Reason.FORBIDDEN;
 		}
 		if (reason == null) return Mono.just(response);
@@ -494,7 +520,7 @@ public class KeycloakAdminClient {
 		form.add("client_id", clientId);
 		form.add("client_secret", clientSecret);
 		return webClient.post()
-				.uri("/realms/{realm}/protocol/openid-connect/token", realm)
+				.uri("/realms/{realm}" + TOKEN_PATH_SUFFIX, realm)
 				.body(BodyInserters.fromFormData(form))
 				.retrieve()
 				.bodyToMono(TokenResponse.class)

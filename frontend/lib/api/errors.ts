@@ -66,7 +66,7 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   SERVICE_UNAVAILABLE:
     '지금은 새 대화를 만들 수 없어요. 서버의 조직 설정이 준비되지 않았으니 관리자에게 문의해 주세요.',
   // 재시도로 풀리지 않는다 — 서버의 Keycloak 관리 클라이언트 id·secret이나 역할이 맞지 않는다(#326). 일반 사용자의
-  // 초대 검색에서도 나오므로 설정 이름은 밝히지 않고 관리자에게 넘긴다.
+  // 초대 검색에서도 나오므로 client id·secret 같은 설정 항목은 밝히지 않고 관리자에게 넘긴다.
   KEYCLOAK_ADMIN_UNAVAILABLE:
     '지금은 사용자 정보를 불러올 수 없어요. 서버의 Keycloak 관리 연결 설정을 확인해야 하니 관리자에게 문의해 주세요.',
   // 모델 목록에는 API 키를 채우지 않은 모델도 뜬다 — 어떤 키가 설정됐는지는 게이트웨이만 알기

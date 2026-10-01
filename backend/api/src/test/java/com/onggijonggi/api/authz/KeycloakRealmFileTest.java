@@ -146,7 +146,7 @@ class KeycloakRealmFileTest {
 		assertThat(wrong.displayName("anyone").block()).isEmpty();
 
 		KeycloakAuditStore store = collectOnce(wrong);
-		assertThat(store.state().lastError()).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인)");
+		assertThat(store.state().lastError()).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인, 401)");
 	}
 
 	/**

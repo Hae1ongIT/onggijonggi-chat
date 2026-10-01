@@ -416,7 +416,8 @@ class KeycloakAdminClientTest {
 						assertThat(unavailable.reason()).isEqualTo(KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED);
 						assertThat(unavailable.getStatusCode().value()).isEqualTo(503);
 						assertThat(unavailable.getMessage()).doesNotContain("secret detail");
-						assertThat(unavailable.summary()).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인)");
+						assertThat(unavailable.summary())
+								.isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인, " + status.value() + ")");
 					})
 					.verify();
 		}
@@ -461,5 +462,23 @@ class KeycloakAdminClientTest {
 				.expectNext(Optional.empty()).verifyComplete();
 		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN).displayName(SUBJECT))
 				.expectNext(Optional.empty()).verifyComplete();
+	}
+
+	/** 이름이 모두 비는 원인을 찾을 수 있게 설정 문제는 남기되, 같은 상태가 이어지는 동안 다시 남기지 않는다. */
+	@Test
+	void displayNameWarnsOnceWhileTheConfigurationProblemLasts() {
+		ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(KeycloakAdminClient.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender = new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			KeycloakAdminClient client = clientWithStatuses(HttpStatus.OK, HttpStatus.FORBIDDEN);
+			client.displayName(SUBJECT).block();
+			client.displayName("other-subject").block();
+		} finally {
+			logger.detachAppender(appender);
+		}
+		assertThat(appender.list).singleElement().extracting(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+				.asString().contains("Keycloak 관리 권한 부족(");
 	}
 }

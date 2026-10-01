@@ -21,11 +21,13 @@ public class KeycloakAdminUnavailableException extends ResponseStatusException {
 	}
 
 	private final Reason reason;
+	private final int keycloakStatus;
 	private final String path;
 
 	public KeycloakAdminUnavailableException(Reason reason, int keycloakStatus, String path) {
 		super(HttpStatus.SERVICE_UNAVAILABLE, reason + " " + keycloakStatus + " " + path);
 		this.reason = reason;
+		this.keycloakStatus = keycloakStatus;
 		this.path = path;
 	}
 
@@ -33,9 +35,12 @@ public class KeycloakAdminUnavailableException extends ResponseStatusException {
 		return reason;
 	}
 
-	/** 수집 상태·로그에 남길 요지. 비밀값과 Keycloak 응답 본문은 넣지 않는다. */
+	/**
+	 * 수집 상태·로그에 남길 요지. 비밀값과 Keycloak 응답 본문은 넣지 않는다. 토큰 거부는 상태로 원인이 갈린다 —
+	 * 401은 client id·secret이 틀림, 400은 서비스 계정이 꺼졌거나 그 흐름이 허용되지 않음.
+	 */
 	public String summary() {
-		return reason == Reason.TOKEN_REJECTED ? "Keycloak 관리 클라이언트 인증 실패(설정 확인)"
+		return reason == Reason.TOKEN_REJECTED ? "Keycloak 관리 클라이언트 인증 실패(설정 확인, " + keycloakStatus + ")"
 				: "Keycloak 관리 권한 부족(" + path + ")";
 	}
 }

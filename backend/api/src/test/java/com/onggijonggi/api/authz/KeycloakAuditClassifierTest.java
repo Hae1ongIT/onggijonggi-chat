@@ -201,7 +201,7 @@ class KeycloakAuditClassifierTest {
 				.isEqualTo("IllegalStateException");
 		assertThat(KeycloakAuditCollector.summary(new com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException(
 				com.onggijonggi.api.auth.keycloak.KeycloakAdminUnavailableException.Reason.TOKEN_REJECTED, 401,
-				"/realms/app-realm/protocol/openid-connect/token"))).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인)");
+				"/realms/app-realm/protocol/openid-connect/token"))).isEqualTo("Keycloak 관리 클라이언트 인증 실패(설정 확인, 401)");
 		assertThat(KeycloakAuditCollector.summary(new KeycloakAuditCollector.CollectorProblem("view-users 권한 확인")))
 				.isEqualTo("view-users 권한 확인");
 	}
