@@ -109,6 +109,7 @@ async function main() {
 	const changed = report.rows.some((row) => row.outcome !== 'UNCHANGED');
 	if (!report.applied) console.log('미리보기다. 저장하려면 --apply를 붙인다.');
 	else console.log(changed ? '저장했다.' : '바뀐 것이 없어 이력도 남기지 않았다.');
+	console.log('ogjg-cli를 다 썼으면 끈다 — node scripts/casbin-demo-accounts.mjs --disable-cli (또는 관리 콘솔)');
 }
 
 main().catch((error) => {

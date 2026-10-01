@@ -53,6 +53,13 @@ public class KeycloakAdminClient {
 	private static final String ADMIN_PATH_MARKER = "/admin/realms/";
 
 	/**
+	 * 설정 문제로 거부된 토큰 요청을 기억하는 시간. 그동안은 Keycloak에 다시 묻지 않고 같은 예외를 낸다 — 이름 목록처럼 한 화면이
+	 * 사람 수만큼 부르면 요청마다 거부되는 토큰 요청과 Keycloak 로그인 오류 이벤트가 쌓인다. 설정을 고치면 BFF를 다시 만들므로
+	 * 그때 사라진다.
+	 */
+	private static final Duration REJECTION_MEMORY = Duration.ofSeconds(30);
+
+	/**
 	* 캐시가 무한히 자라지 않게 하는 상한. realm의 사용자 수가 자연스러운 경계지만, 그 수를
 	* 신뢰해 상한을 두지 않으면 오래 뜬 서버에서 조용히 새는 자리가 된다. 넘치면 만료된 것을
 	* 먼저 버리고, 그래도 넘치면 통째로 비운다 — 비워도 다음 조회가 다시 채우므로 안전하다.
@@ -64,6 +71,7 @@ public class KeycloakAdminClient {
 	private final String clientId;
 	private final String clientSecret;
 	private final AtomicReference<CachedToken> cachedToken = new AtomicReference<>();
+	private final AtomicReference<RememberedRejection> rejectedToken = new AtomicReference<>();
 
 	private final Map<String, CachedName> cachedNames = new ConcurrentHashMap<>();
 
@@ -431,8 +439,13 @@ public class KeycloakAdminClient {
 	 * 서비스 계정이 꺼짐)과 Admin API의 403(역할 누락). Admin API의 401은 Keycloak이 토큰을 먼저 무효화한 일시 상황이라
 	 * 그대로 둔다. 응답 본문은 버린다 — Keycloak 오류 설명을 예외·로그에 싣지 않는다.
 	 */
-	private static ExchangeFilterFunction configurationFailureFilter() {
-		return (request, next) -> next.exchange(request).flatMap(response -> rejectConfigurationFailure(request, response));
+	private ExchangeFilterFunction configurationFailureFilter() {
+		return (request, next) -> next.exchange(request).flatMap(response -> {
+			// Admin API 401은 Keycloak이 토큰을 먼저 무효화한 것이다(재시작 등). 이 요청은 일시 오류로 실패하고, 다음 요청이
+			// 새 토큰을 받게 캐시를 비운다 — 감사 수집기만 비우면 수집을 끈 배포는 토큰 만료까지 계속 실패한다.
+			if (response.statusCode().value() == 401 && request.url().getPath().contains(ADMIN_PATH_MARKER)) invalidateToken();
+			return rejectConfigurationFailure(request, response);
+		});
 	}
 
 	static Mono<ClientResponse> rejectConfigurationFailure(ClientRequest request, ClientResponse response) {
@@ -511,7 +524,24 @@ public class KeycloakAdminClient {
 		if (cached != null && cached.isValidAt(Instant.now())) {
 			return Mono.just(cached.value());
 		}
-		return fetchToken().doOnNext(cachedToken::set).map(CachedToken::value);
+		RememberedRejection rejected = rejectedToken.get();
+		if (rejected != null && rejected.isValidAt(Instant.now())) {
+			return Mono.error(rejected.rejection().again());
+		}
+		return fetchToken()
+				.doOnNext(token -> {
+					cachedToken.set(token);
+					rejectedToken.set(null);
+				})
+				.doOnError(KeycloakAdminUnavailableException.class, rejection -> rejectedToken
+						.set(new RememberedRejection(rejection, Instant.now().plus(REJECTION_MEMORY))))
+				.map(CachedToken::value);
+	}
+
+	private record RememberedRejection(KeycloakAdminUnavailableException rejection, Instant until) {
+		boolean isValidAt(Instant now) {
+			return now.isBefore(until);
+		}
 	}
 
 	private Mono<CachedToken> fetchToken() {

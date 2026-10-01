@@ -35,6 +35,11 @@ public class KeycloakAdminUnavailableException extends ResponseStatusException {
 		return reason;
 	}
 
+	/** 같은 사유·상태·경로의 새 예외(기억해 둔 거부를 다시 알릴 때). */
+	public KeycloakAdminUnavailableException again() {
+		return new KeycloakAdminUnavailableException(reason, keycloakStatus, path);
+	}
+
 	/**
 	 * 수집 상태·로그에 남길 요지. 비밀값과 Keycloak 응답 본문은 넣지 않는다. 토큰 거부는 상태로 원인이 갈린다 —
 	 * 401은 client id·secret이 틀림, 400은 서비스 계정이 꺼졌거나 그 흐름이 허용되지 않음.

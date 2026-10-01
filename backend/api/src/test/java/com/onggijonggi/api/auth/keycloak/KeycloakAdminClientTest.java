@@ -395,6 +395,7 @@ class KeycloakAdminClientTest {
 	private KeycloakAdminClient clientWithStatuses(HttpStatus tokenStatus, HttpStatus adminStatus) {
 		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
 			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				tokenRequests.incrementAndGet();
 				return Mono.just(tokenStatus == HttpStatus.OK
 						? jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 60 }")
 						: ClientResponse.create(tokenStatus).header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
@@ -464,6 +465,40 @@ class KeycloakAdminClientTest {
 		StepVerifier.create(clientWithStatuses(HttpStatus.OK, HttpStatus.BAD_REQUEST).listPeople(10))
 				.expectErrorSatisfies(error -> assertThat(error).isNotInstanceOf(KeycloakAdminUnavailableException.class))
 				.verify();
+	}
+
+	/** 거부된 토큰 요청은 잠시 기억해 Keycloak에 같은 요청을 거듭 보내지 않는다(이름 목록이 사람 수만큼 부르는 경우). */
+	@Test
+	void aRejectedTokenRequestIsRememberedForAWhile() {
+		KeycloakAdminClient client = clientWithStatuses(HttpStatus.UNAUTHORIZED, HttpStatus.OK);
+
+		for (int call = 0; call < 3; call++) {
+			StepVerifier.create(client.listPeople(10)).expectError(KeycloakAdminUnavailableException.class).verify();
+		}
+
+		assertThat(tokenRequests.get()).isEqualTo(1);
+	}
+
+	/** Admin API 401(Keycloak이 토큰을 먼저 무효화함)이면 캐시를 비워 다음 요청이 새 토큰을 받는다. */
+	@Test
+	void anAdminUnauthorizedDropsTheCachedTokenForTheNextCall() {
+		AtomicReference<HttpStatus> adminStatus = new AtomicReference<>(HttpStatus.UNAUTHORIZED);
+		WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
+			if (request.url().getPath().endsWith("/protocol/openid-connect/token")) {
+				tokenRequests.incrementAndGet();
+				return Mono.just(jsonResponse("{ \"access_token\": \"admin-token\", \"expires_in\": 3600 }"));
+			}
+			return Mono.just(adminStatus.get() == HttpStatus.OK ? jsonResponse("[]")
+					: ClientResponse.create(adminStatus.get()).build());
+		});
+		KeycloakAdminClient client = new KeycloakAdminClient(builder, INTERNAL_URL, REALM, CLIENT_ID, CLIENT_SECRET,
+				Duration.ZERO);
+
+		StepVerifier.create(client.listPeople(10)).expectError().verify();
+		adminStatus.set(HttpStatus.OK);
+		StepVerifier.create(client.listPeople(10)).expectNext(List.of()).verifyComplete();
+
+		assertThat(tokenRequests.get()).isEqualTo(2);
 	}
 
 	/** 표시 이름은 설정 문제여도 지금처럼 빈 값으로 삼킨다 — 이름 하나 때문에 화면 전체가 깨지면 안 된다. */
