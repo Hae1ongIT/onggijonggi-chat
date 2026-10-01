@@ -15,6 +15,156 @@ const request = (path: string, method = 'GET', body?: unknown) =>
       : {}),
   });
 
+it('활성 형제 이름 중복은 생성·이름 변경·재활성화·이동에서 상태와 감사를 바꾸지 않는다', async () => {
+  for (const action of ['create', 'name', 'reactivate', 'parent']) {
+    const state = createRbacMockState();
+    state.rooms = [];
+    const parent = fixture(state.nodes.find((node) => node.kind === 'ORG'));
+    const grant = state.grants[0];
+    const oldParent = { ...parent, id: 'old-parent', name: '이전 부모' };
+    const sibling = {
+      ...parent,
+      id: 'sibling',
+      parentId: parent.id,
+      name: 'Duplicate',
+    };
+    const leaf = {
+      ...parent,
+      id: 'leaf',
+      parentId: action === 'parent' ? oldParent.id : parent.id,
+      name: action === 'name' ? '기존 이름' : 'DUPLICATE',
+      status:
+        action === 'reactivate' ? ('INACTIVE' as const) : ('ACTIVE' as const),
+    };
+    state.nodes.push(oldParent, sibling);
+    if (action !== 'create') state.nodes.push(leaf);
+    state.grants.push(
+      { ...grant, id: 'old-admin', workspaceId: oldParent.id },
+      { ...grant, id: 'leaf-admin', workspaceId: leaf.id },
+    );
+    const before = structuredClone(state);
+    const response = await handleRbacMock(
+      action === 'create'
+        ? request('/api/rbac/workspaces', 'POST', {
+            parentId: parent.id,
+            kind: 'WORK',
+            name: 'DUPLICATE',
+          })
+        : request(
+            `/api/rbac/workspaces/${leaf.id}/${action}`,
+            action === 'reactivate' ? 'POST' : 'PATCH',
+            action === 'name'
+              ? { name: 'duplicate' }
+              : action === 'parent'
+                ? { parentId: parent.id }
+                : undefined,
+          ),
+      state,
+      'both',
+    );
+    expect(response.status, action).toBe(409);
+    expect(state, action).toEqual(before);
+  }
+});
+
+it('이름 중복 검사는 자기 자신과 비활성 형제를 제외한다', async () => {
+  const state = createRbacMockState();
+  const parent = fixture(state.nodes.find((node) => node.kind === 'ORG'));
+  state.nodes.push({
+    ...parent,
+    id: 'inactive-sibling',
+    parentId: parent.id,
+    name: 'Reusable',
+    status: 'INACTIVE',
+  });
+  const created = await handleRbacMock(
+    request('/api/rbac/workspaces', 'POST', {
+      parentId: parent.id,
+      kind: 'WORK',
+      name: 'reusable',
+    }),
+    state,
+    'both',
+  );
+  expect(created.status).toBe(201);
+  const { id } = await created.json();
+  expect(
+    (
+      await handleRbacMock(
+        request(`/api/rbac/workspaces/${id}/name`, 'PATCH', {
+          name: 'REUSABLE',
+        }),
+        state,
+        'both',
+      )
+    ).status,
+  ).toBe(204);
+});
+
+it('깊이 11은 허용하지만 생성·이동으로 깊이 12를 만들거나 CREATE를 표시하지 않는다', async () => {
+  const state = createRbacMockState();
+  state.rooms = [];
+  let parent = fixture(state.nodes.find((node) => node.kind === 'ORG'));
+  const oldParent = parent;
+  for (let depth = 3; depth <= 11; depth++) {
+    const response = await handleRbacMock(
+      request('/api/rbac/workspaces', 'POST', {
+        parentId: parent.id,
+        kind: 'WORK',
+        name: `depth-${depth}`,
+      }),
+      state,
+      'both',
+    );
+    expect(response.status).toBe(201);
+    const { id } = await response.json();
+    parent = fixture(state.nodes.find((node) => node.id === id));
+  }
+  const leafResponse = await handleRbacMock(
+    request('/api/rbac/workspaces', 'POST', {
+      parentId: oldParent.id,
+      kind: 'WORK',
+      name: '이동 대상',
+    }),
+    state,
+    'both',
+  );
+  const { id: leafId } = await leafResponse.json();
+  const before = structuredClone(state);
+  expect(
+    (
+      await handleRbacMock(
+        request('/api/rbac/workspaces', 'POST', {
+          parentId: parent.id,
+          kind: 'WORK',
+          name: 'depth-12',
+        }),
+        state,
+        'both',
+      )
+    ).status,
+  ).toBe(409);
+  expect(state).toEqual(before);
+  expect(
+    (
+      await handleRbacMock(
+        request(`/api/rbac/workspaces/${leafId}/parent`, 'PATCH', {
+          parentId: parent.id,
+        }),
+        state,
+        'both',
+      )
+    ).status,
+  ).toBe(409);
+  expect(state).toEqual(before);
+  const visible = await (
+    await handleRbacMock(request('/api/rbac/workspaces'), state, 'both')
+  ).json();
+  expect(
+    visible.find((node: { id: string }) => node.id === parent.id).actions,
+  ).not.toContain('CREATE');
+});
+
 it('overview는 해제·재배정과 권한 축소 뒤 최신 VIEW를 계산하고 COMMON을 제외한다', async () => {
   const state = createRbacMockState();
   const person = state.people[0];

@@ -21,6 +21,7 @@ const COMMON = '00000000-0000-4000-8000-000000000104';
 const ACTOR_USER = '00000000-0000-4000-8000-000000000108';
 const ROLES: Role[] = ['VIEWER', 'CONTRIBUTOR', 'ADMIN'];
 const RANKS = ['TL', 'B', 'C', 'K', 'D', 'S'];
+const MAX_DEPTH = 11;
 interface MockRoom {
   id: string;
   title: string;
@@ -154,6 +155,29 @@ export async function handleRbacMock(
   const rankAt = (id: string) =>
     state.ranks.find((value) => value.id === id) as StoredRank | undefined;
   const actor = state.people.find((person) => person.subject === 'mock-admin');
+  // 실 서버와 같은 ACTIVE 형제 이름 유일성과 ROOT 포함 깊이 한계를 적용한다.
+  const duplicateSibling = (
+    parentId: string | null,
+    name: string,
+    except?: string,
+  ) =>
+    state.nodes.some(
+      (node) =>
+        node.parentId === parentId &&
+        node.id !== except &&
+        node.status === 'ACTIVE' &&
+        node.name.toLowerCase() === name.toLowerCase(),
+    );
+  const depth = (node: ManagedWorkspace) => {
+    let value: ManagedWorkspace | undefined = node;
+    const visited = new Set<string>();
+    while (value) {
+      if (visited.has(value.id)) return MAX_DEPTH;
+      visited.add(value.id);
+      value = state.nodes.find((candidate) => candidate.id === value?.parentId);
+    }
+    return visited.size;
+  };
   const isManager = (id: string) =>
     workspace &&
     actor?.enabled &&
@@ -192,7 +216,9 @@ export async function handleRbacMock(
             : [
                 'AUDIT',
                 ...(node.kind === 'ROOT' ? [] : ['GRANTS']),
-                ...(node.kind === 'COMMON' ? [] : ['CREATE']),
+                ...(node.kind === 'COMMON' || depth(node) >= MAX_DEPTH
+                  ? []
+                  : ['CREATE']),
                 ...(!node.declared &&
                 node.kind !== 'ROOT' &&
                 node.kind !== 'COMMON'
@@ -460,6 +486,11 @@ export async function handleRbacMock(
       return error(409, 'RBAC_STATE_CONFLICT');
     if (!body.name || !['ORG', 'WORK'].includes(String(body.kind)))
       return error(400, 'MALFORMED_REQUEST');
+    if (
+      depth(parent) >= MAX_DEPTH ||
+      duplicateSibling(parent.id, String(body.name))
+    )
+      return error(409, 'RBAC_STATE_CONFLICT');
     created = crypto.randomUUID();
     workspaceNodeId = created;
     eventKind = 'NODE_CREATED';
@@ -543,6 +574,14 @@ export async function handleRbacMock(
         return error(409, 'RBAC_STATE_CONFLICT');
       if (action === 'name') {
         if (!body.name) return error(400, 'MALFORMED_REQUEST');
+        if (
+          duplicateSibling(
+            currentNode.parentId,
+            String(body.name),
+            currentNode.id,
+          )
+        )
+          return error(409, 'RBAC_STATE_CONFLICT');
         currentNode.name = String(body.name);
         eventKind = 'NODE_RENAMED';
       } else if (action === 'parent') {
@@ -566,6 +605,11 @@ export async function handleRbacMock(
           target.status !== 'ACTIVE' ||
           state.nodes.some((value) => value.parentId === nodeId) ||
           state.rooms.some((value) => value.workspaceId === nodeId)
+        )
+          return error(409, 'RBAC_STATE_CONFLICT');
+        if (
+          depth(target) >= MAX_DEPTH ||
+          duplicateSibling(target.id, currentNode.name, currentNode.id)
         )
           return error(409, 'RBAC_STATE_CONFLICT');
         const previous = state.grants.filter(
@@ -623,6 +667,14 @@ export async function handleRbacMock(
           currentNode.status !== 'INACTIVE' ||
           state.nodes.find((value) => value.id === currentNode.parentId)
             ?.status !== 'ACTIVE'
+        )
+          return error(409, 'RBAC_STATE_CONFLICT');
+        if (
+          duplicateSibling(
+            currentNode.parentId,
+            currentNode.name,
+            currentNode.id,
+          )
         )
           return error(409, 'RBAC_STATE_CONFLICT');
         currentNode.status = 'ACTIVE';
