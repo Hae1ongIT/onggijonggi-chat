@@ -32,6 +32,9 @@ export function ThreadDocuments({
   const alive = useRef(true);
   const writing = useRef(false);
   const uploadId = useRef<string | null>(null);
+  const changes = useRef(
+    new Map<string, { action: 'pin' | 'unpin' | 'delete'; id: string }>(),
+  );
   const scope = useRef(0);
   const reading = useRef(false);
   const request = useRef<AbortController | null>(null);
@@ -47,11 +50,17 @@ export function ThreadDocuments({
       const next = await listThreadDocuments(threadId, controller.signal);
       if (alive.current && version === sequence.current) {
         setListing(next);
+        setConfirmation((id) =>
+          id && next.documents.some((doc) => doc.id === id && doc.canDelete)
+            ? id
+            : null,
+        );
         setError('');
       }
     } catch (cause) {
       if (alive.current && version === sequence.current) {
         setListing(null);
+        setConfirmation(null);
         setError(
           cause instanceof Error ? cause.message : '목록 조회에 실패했습니다.',
         );
@@ -71,6 +80,7 @@ export function ThreadDocuments({
     setBusy(false);
     writing.current = false;
     uploadId.current = null;
+    changes.current.clear();
     return () => {
       alive.current = false;
       scope.current += 1;
@@ -149,6 +159,20 @@ export function ThreadDocuments({
           cause instanceof Error ? cause.message : '원본을 읽지 못했습니다.',
         );
     }
+  }
+
+  function change(id: string, action: 'pin' | 'unpin' | 'delete') {
+    if (writing.current) return;
+    const pending = changes.current.get(id);
+    const operation =
+      pending?.action === action
+        ? pending
+        : { action, id: crypto.randomUUID() };
+    changes.current.set(id, operation);
+    void mutate(async () => {
+      await changeThreadDocument(threadId, id, action, operation.id);
+      if (changes.current.get(id) === operation) changes.current.delete(id);
+    });
   }
 
   return (
@@ -240,16 +264,7 @@ export function ThreadDocuments({
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() =>
-                      void mutate(() =>
-                        changeThreadDocument(
-                          threadId,
-                          doc.id,
-                          doc.pinned ? 'unpin' : 'pin',
-                          crypto.randomUUID(),
-                        ),
-                      )
-                    }
+                    onClick={() => change(doc.id, doc.pinned ? 'unpin' : 'pin')}
                   >
                     {doc.pinned ? '고정 해제' : '고정'}
                   </button>
@@ -286,16 +301,7 @@ export function ThreadDocuments({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() =>
-                  void mutate(() =>
-                    changeThreadDocument(
-                      threadId,
-                      confirmation,
-                      'delete',
-                      crypto.randomUUID(),
-                    ),
-                  )
-                }
+                onClick={() => change(confirmation, 'delete')}
               >
                 삭제 확인
               </button>

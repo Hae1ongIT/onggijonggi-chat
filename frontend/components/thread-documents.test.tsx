@@ -103,6 +103,124 @@ describe('패널 접기와 진행 중 업로드', () => {
 });
 
 describe('방 문서 실제 UI', () => {
+  it.each(['pin', 'unpin', 'delete'] as const)(
+    '%s 응답 유실 뒤 같은 의도의 재시도는 요청 UUID를 재사용한다',
+    async (action) => {
+      vi.mocked(api.listThreadDocuments).mockResolvedValue({
+        ...listing,
+        documents: [{ ...doc, pinned: action === 'unpin' }],
+      });
+      vi.mocked(api.changeThreadDocument)
+        .mockRejectedValueOnce(new Error('응답 유실'))
+        .mockResolvedValue();
+      render(<ThreadDocuments threadId="room" />);
+      open();
+      await screen.findByText('guide.txt');
+      const label =
+        action === 'pin'
+          ? '고정'
+          : action === 'unpin'
+            ? '고정 해제'
+            : '삭제 확인';
+      if (action === 'delete')
+        fireEvent.click(screen.getByRole('button', { name: '삭제' }));
+      fireEvent.click(screen.getByRole('button', { name: label }));
+      await screen.findByText('응답 유실');
+      fireEvent.click(screen.getByRole('button', { name: label }));
+      await waitFor(() =>
+        expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+      );
+      const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+      expect(calls[1][3]).toBe(calls[0][3]);
+    },
+  );
+  it('성공이 확인된 뒤 새 변경은 새 요청 UUID를 사용한다', async () => {
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await waitFor(() =>
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole('button', {
+            name: '고정',
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await waitFor(() =>
+      expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+    expect(calls[1][3]).not.toBe(calls[0][3]);
+  });
+  it('실패 뒤 반대 변경을 선택하면 이전 요청 UUID를 재사용하지 않는다', async () => {
+    vi.mocked(api.changeThreadDocument).mockRejectedValueOnce(
+      new Error('응답 유실'),
+    );
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await screen.findByText('응답 유실');
+    vi.mocked(api.listThreadDocuments).mockResolvedValue({
+      ...listing,
+      documents: [{ ...doc, pinned: true }],
+    });
+    fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
+    fireEvent.click(await screen.findByRole('button', { name: '고정 해제' }));
+    await waitFor(() =>
+      expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+    expect(calls[1][2]).toBe('unpin');
+    expect(calls[1][3]).not.toBe(calls[0][3]);
+  });
+  it('실패 뒤 방을 바꾸면 같은 문서의 변경에도 새 요청 UUID를 사용한다', async () => {
+    vi.mocked(api.changeThreadDocument).mockRejectedValueOnce(
+      new Error('응답 유실'),
+    );
+    const { rerender } = render(<ThreadDocuments threadId="old" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await screen.findByText('응답 유실');
+    rerender(<ThreadDocuments threadId="new" />);
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await waitFor(() =>
+      expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+    expect(calls[1][0]).toBe('new');
+    expect(calls[1][3]).not.toBe(calls[0][3]);
+  });
+  it.each(['locked', 'missing', 'denied'] as const)(
+    '삭제 확인 중 최신 조회가 %s이면 확인창을 닫는다',
+    async (state) => {
+      render(<ThreadDocuments threadId="room" />);
+      open();
+      await screen.findByText('guide.txt');
+      fireEvent.click(screen.getByRole('button', { name: '삭제' }));
+      expect(screen.getByRole('dialog')).toBeTruthy();
+      if (state === 'denied')
+        vi.mocked(api.listThreadDocuments).mockRejectedValue(
+          new Error('접근 불가'),
+        );
+      else
+        vi.mocked(api.listThreadDocuments).mockResolvedValue({
+          ...listing,
+          documents: state === 'missing' ? [] : [{ ...doc, canDelete: false }],
+        });
+      fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(api.changeThreadDocument).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     ['PENDING', '처리 대기'],
     ['PROCESSING', '처리 중'],
