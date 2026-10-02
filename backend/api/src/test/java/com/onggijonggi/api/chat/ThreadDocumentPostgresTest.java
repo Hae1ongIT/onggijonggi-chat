@@ -135,6 +135,46 @@ class ThreadDocumentPostgresTest {
 		}
 	}
 
+	@Test void expiredUploadFailsAndCleanupIsLeasedSoAFailedDeleteIsNotRetriedAtOnce() {
+		UUID id = UUID.randomUUID();
+		// 저장 요청이 돌아오지 않은 채 예약이 만료된 상태: UPLOADING 행과 기한이 지난 정리 참조만 남아 있다.
+		doAnswer(invocation -> { throw new IllegalStateException("BFF 중단"); })
+				.when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		assertThatThrownBy(() -> upload(id, owner)).isInstanceOf(IllegalStateException.class);
+		jdbc.update("update thr_doc set status='UPLOADING', err=null where id=?", id);
+		jdbc.update("update thr_doc_end set next_at=now()-interval '1 second' where doc_id=?", id);
+		var claimed = new java.util.concurrent.atomic.AtomicReference<Object>();
+		doAnswer(invocation -> {
+			claimed.set(jdbc.queryForObject("select next_at > now() + interval '60 seconds' from thr_doc_end where doc_id=?", Boolean.class, id));
+			throw new IllegalStateException("워커 응답 없음");
+		}).when(storage).delete(any(), any(), any(), any(), any());
+		service.cleanupDue();
+		assertThat(claimed.get()).as("삭제 호출 중에는 선점으로 다음 시각이 밀려 있다").isEqualTo(true);
+		assertThat(jdbc.queryForMap("select status, err from thr_doc where id=?", id))
+				.containsEntry("status", "FAILED").containsEntry("err", "SOURCE_UPLOAD_EXPIRED");
+		service.cleanupDue();
+		verify(storage, times(1)).delete(any(), any(), any(), any(), any());
+		assertThat(jdbc.queryForObject("select att_cnt from thr_doc_end where doc_id=?", Integer.class, id)).isEqualTo(1);
+	}
+
+	@Test void aDocumentOfAnotherRoomCannotBeReachedThroughMyRoom() {
+		UUID foreign = UUID.randomUUID(); upload(foreign, owner);
+		CurrentActor stranger = actor();
+		Thr other = Thr.collab(stranger.userId(), "다른 방");
+		other.placeIn(tenant, jdbc.queryForObject("select id from wrk_node where node_key='common'", UUID.class));
+		threads.saveAndFlush(other);
+		members.saveAndFlush(new ThrMbr(other.getId(), stranger.userId(), ThrMbrRole.OWNER, stranger.userId()));
+		when(storage.read(any(), any(), any(), any(), any())).thenReturn(bytes);
+		status(() -> service.original(other.getId(), foreign, stranger), HttpStatus.NOT_FOUND);
+		status(() -> service.change(other.getId(), foreign, stranger, "PINNED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
+		status(() -> service.change(other.getId(), foreign, stranger, "DELETED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
+		status(() -> service.upload(other.getId(), foreign, stranger, "guide.txt", bytes), HttpStatus.NOT_FOUND);
+		assertThat(service.list(other.getId(), stranger).documents()).isEmpty();
+		assertThat(service.list(room, owner).documents()).singleElement()
+				.satisfies(doc -> assertThat(doc.pinned()).isFalse());
+		verify(storage, never()).read(any(), any(), any(), any(), any());
+	}
+
 	@Test void severalDocumentsCanBePinnedAndUnpinningOneKeepsTheOthers() {
 		UUID first = UUID.randomUUID(); upload(first, owner);
 		UUID second = UUID.randomUUID(); service.upload(room, second, member, "second.txt", "둘째 원문".getBytes(StandardCharsets.UTF_8));

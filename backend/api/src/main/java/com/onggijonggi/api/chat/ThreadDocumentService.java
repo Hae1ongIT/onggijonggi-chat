@@ -11,22 +11,25 @@ import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
 import com.onggijonggi.common.user.AppUserRepository;
 import com.onggijonggi.common.user.AppUserStatus;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
-import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -43,8 +46,21 @@ import org.springframework.web.server.ResponseStatusException;
 public class ThreadDocumentService {
 	public static final int MAX_FILE_BYTES = 10 * 1024 * 1024;
 	private static final Logger log = LoggerFactory.getLogger(ThreadDocumentService.class);
+	/**
+	 * 원본 저장 시간 경계(설계 11.4). 예약은 DB 예약 변경 시각부터 RESERVATION_SECONDS 동안만 유효하고, 워커는 그보다
+	 * 5초 넘게 먼 만료를 거부한다(워커 source_files.py의 125). 정리 유예는 예약에 워커 호출 대기(ThreadSourceStorage의
+	 * 60초)를 더한 값이라 진행 중인 정상 저장을 정리가 앞지르지 않는다. 선점은 삭제 대기(60초)보다 길어야 같은 작업을
+	 * 두 번 집지 않는다. 하나를 바꾸면 이 관계를 함께 맞춘다.
+	 */
+	private static final int RESERVATION_SECONDS = 120;
+	private static final int CLEANUP_GRACE_SECONDS = 180;
+	private static final int CLEANUP_LEASE_SECONDS = 90;
+	private static final int CLEANUP_RETRY_SECONDS = 30;
 	/** 이 횟수부터 정리 실패를 error로 올린다(30초 간격이라 약 5분). */
 	private static final int CLEANUP_ALERT_ATTEMPTS = 10;
+	/** 원본이 아직 없거나(업로드 중) 이미 지운 문서. 고정·열람·관리 대상이 아니다. */
+	private static final Set<String> UNSETTLED = Set.of("UPLOADING", "DELETED");
+	private static final Set<String> CHANGES = Set.of("PINNED", "UNPINNED", "DELETED");
 	private static final Set<String> EXTENSIONS = Set.of("txt", "md", "csv", "pdf", "docx");
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate transactions;
@@ -73,6 +89,7 @@ public class ThreadDocumentService {
 	private record Document(UUID id, UUID tenant, UUID thread, UUID uploader, String name, long size,
 			String digest, UUID attempt, String status, boolean pinned, Instant created, Instant updated) { }
 	public record Original(String fileName, byte[] bytes) { }
+	private record CleanupJob(UUID tenant, UUID thread, String digest, UUID attempt) { }
 
 	private Access access(UUID threadId, CurrentActor actor, boolean write) {
 		// Tenant 범위 권한 변경과 동일한 잠금 순서다. 읽기·원본 전송도 최신 판정 뒤 진행한다.
@@ -114,54 +131,31 @@ public class ThreadDocumentService {
 	public ThreadDocumentView upload(UUID thread, UUID id, CurrentActor actor, String fileName, byte[] content) {
 		validate(fileName, content);
 		String digest = digest(content);
-		Document reservation;
-		try {
-		reservation = transactions.execute(tx -> {
-			Access access = access(thread, actor, true);
-			Document old = find(id, false);
-			if (old != null) {
-				if (!old.thread().equals(thread) || !old.uploader().equals(actor.userId())) throw notFound();
-				if (!old.digest().equals(digest)
-						|| !old.name().equals(fileName) || old.size() != content.length) throw conflict();
-				if (old.status().equals("DELETED")) throw notFound();
-				if (old.status().equals("UPLOADING")) throw conflict();
-				if (!old.status().equals("FAILED")) return old;
-				// ETL 실패는 등록 완료 사건이 이미 있다. 같은 등록 재시도로 ETL을 자동 다시 시작하지 않는다.
-				if (registered(id)) return old;
-				if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
-				jdbc.update("update thr_doc set status = 'UPLOADING', src_att_id = ?, err = null, updated_at = now() where id = ?", UUID.randomUUID(), id);
-			} else {
-				// 부모가 사라져도 이전 원본의 정리 참조는 살아 있다. 다른 방의 재등록으로 덮지 않는다.
-				if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
-				jdbc.update("insert into thr_doc(id, tnn_id, thr_id, user_id, file_name, file_size, src_key, src_att_id, status) values (?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING')",
-						id, access.thread().getTenantId(), thread, actor.userId(), fileName, content.length, digest, UUID.randomUUID());
-			}
-			queue(find(id, true), 180);
-			return find(id, true);
-		});
-		} catch (DuplicateKeyException collision) { throw conflict(); }
+		Document reservation = reserve(thread, id, actor, fileName, content, digest);
 		if (!reservation.status().equals("UPLOADING")) return transactions.execute(tx -> view(reservation, access(thread, actor, false)));
 		boolean stored = false;
 		try {
-			storage.save(reservation.tenant(), thread, id, digest, content, reservation.updated().plusSeconds(120), reservation.attempt());
+			storage.save(reservation.tenant(), thread, id, digest, content, reservation.updated().plusSeconds(RESERVATION_SECONDS), reservation.attempt());
 			stored = true;
 			return transactions.execute(tx -> {
 				Access access = access(thread, actor, true);
 				Document latest = findIn(thread, id);
 				if (latest.status().equals("DELETED")) throw notFound();
-				if (!latest.status().equals("UPLOADING") || !java.util.Objects.equals(latest.attempt(), reservation.attempt())) throw conflict();
+				if (!latest.status().equals("UPLOADING") || !Objects.equals(latest.attempt(), reservation.attempt())) throw conflict();
 				jdbc.update("update thr_doc set status = 'PENDING', updated_at = now(), err = null where id = ?", id);
 				record(latest, actor.userId(), "REGISTERED", id);
 				jdbc.update("delete from thr_doc_end where doc_id = ?", id);
 				return view(find(id, true), access);
 			});
 		} catch (RuntimeException error) {
-			int cleanupDelay = stored ? 0 : 180;
+			// 저장이 끝난 뒤의 실패(등록 확정 거부 등)는 원본이 확실히 있으니 바로 지운다. 저장 실패·시간 초과는 워커가
+			// 아직 쓰는 중일 수 있어 정리 유예를 둔다.
+			int cleanupDelay = stored ? 0 : CLEANUP_GRACE_SECONDS;
 			try {
 				transactions.executeWithoutResult(tx -> {
 					Document doc = find(id, true);
 					if (doc == null || doc.status().equals("DELETED")
-							|| (java.util.Objects.equals(doc.attempt(), reservation.attempt()) && doc.status().equals("UPLOADING"))) {
+							|| (Objects.equals(doc.attempt(), reservation.attempt()) && doc.status().equals("UPLOADING"))) {
 						if (doc != null && doc.status().equals("UPLOADING"))
 							jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_FAILED', updated_at = now() where id = ?", id);
 						queue(reservation, cleanupDelay);
@@ -174,8 +168,37 @@ public class ThreadDocumentService {
 		}
 	}
 
+	/** 원본을 보내기 전에 등록 행과 정리 참조를 먼저 남긴다. 같은 요청의 재시도면 기존 행을 돌려준다. */
+	private Document reserve(UUID thread, UUID id, CurrentActor actor, String fileName, byte[] content, String digest) {
+		try {
+			return transactions.execute(tx -> {
+				Access access = access(thread, actor, true);
+				Document old = find(id, false);
+				if (old != null) {
+					if (!old.thread().equals(thread) || !old.uploader().equals(actor.userId())) throw notFound();
+					if (!old.digest().equals(digest)
+							|| !old.name().equals(fileName) || old.size() != content.length) throw conflict();
+					if (old.status().equals("DELETED")) throw notFound();
+					if (old.status().equals("UPLOADING")) throw conflict();
+					if (!old.status().equals("FAILED")) return old;
+					// ETL 실패는 등록 완료 사건이 이미 있다. 같은 등록 재시도로 ETL을 자동 다시 시작하지 않는다.
+					if (registered(id)) return old;
+					if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
+					jdbc.update("update thr_doc set status = 'UPLOADING', src_att_id = ?, err = null, updated_at = now() where id = ?", UUID.randomUUID(), id);
+				} else {
+					// 부모가 사라져도 이전 원본의 정리 참조는 살아 있다. 다른 방의 재등록으로 덮지 않는다.
+					if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
+					jdbc.update("insert into thr_doc(id, tnn_id, thr_id, user_id, file_name, file_size, src_key, src_att_id, status) values (?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING')",
+							id, access.thread().getTenantId(), thread, actor.userId(), fileName, content.length, digest, UUID.randomUUID());
+				}
+				queue(find(id, true), CLEANUP_GRACE_SECONDS);
+				return find(id, true);
+			});
+		} catch (DuplicateKeyException collision) { throw conflict(); }
+	}
+
 	public void change(UUID thread, UUID id, CurrentActor actor, String action, UUID requestId) {
-		if (!Set.of("PINNED", "UNPINNED", "DELETED").contains(action)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
+		if (!CHANGES.contains(action)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
 		transactions.executeWithoutResult(tx -> {
 			// 방 상태(쓰기 가능)보다 재전송 여부를 먼저 본다. 이미 반영된 변경의 응답이 유실된 뒤 방이 잠겼어도
 			// 재전송은 성공으로 끝나야 한다. 접근권 자체는 재전송에도 최신 기준으로 다시 확인한다.
@@ -256,12 +279,12 @@ public class ThreadDocumentService {
 				var job = transactions.execute(tx -> claimCleanup(id));
 				if (job == null) continue;
 				try {
-					storage.delete((UUID) job.get("tnn_id"), (UUID) job.get("thr_id"), id, (String) job.get("src_key"), (UUID) job.get("src_att_id"));
+					storage.delete(job.tenant(), job.thread(), id, job.digest(), job.attempt());
 					transactions.executeWithoutResult(tx -> jdbc.update("delete from thr_doc_end where doc_id = ?", id));
 				} catch (RuntimeException failure) {
 					List<Integer> attempts = transactions.execute(tx -> jdbc.queryForList(
-							"update thr_doc_end set att_cnt = att_cnt + 1, err = 'SOURCE_DELETE_FAILED', next_at = now() + interval '30 seconds' where doc_id = ? returning att_cnt",
-							Integer.class, id));
+							"update thr_doc_end set att_cnt = att_cnt + 1, err = 'SOURCE_DELETE_FAILED', next_at = now() + ? * interval '1 second' where doc_id = ? returning att_cnt",
+							Integer.class, CLEANUP_RETRY_SECONDS, id));
 					int count = attempts.isEmpty() ? 0 : attempts.get(0);
 					if (count >= CLEANUP_ALERT_ATTEMPTS) log.error("원본 정리가 {}회 연속 실패했다 — 워커·저장소 확인 필요: {}", count, id, failure);
 					else log.warn("원본 정리 재시도 대기({}회): {}", count, id, failure);
@@ -271,9 +294,11 @@ public class ThreadDocumentService {
 	}
 
 	/** 정리할 원본이면 다음 시각을 삭제 대기보다 길게 미뤄 선점하고 그 작업을 돌려준다. 이 BFF가 도중에 멈춰도 선점이 끝나면 다시 집힌다. */
-	private java.util.Map<String, Object> claimCleanup(UUID id) {
+	private CleanupJob claimCleanup(UUID id) {
 		Document doc = find(id, true);
-		var rows = jdbc.queryForList("select * from thr_doc_end where doc_id = ? and next_at <= now() for update", id);
+		var rows = jdbc.query("select tnn_id, thr_id, src_key, src_att_id from thr_doc_end where doc_id = ? and next_at <= now() for update",
+				(rs, row) -> new CleanupJob(rs.getObject("tnn_id", UUID.class), rs.getObject("thr_id", UUID.class),
+						rs.getString("src_key"), rs.getObject("src_att_id", UUID.class)), id);
 		if (rows.isEmpty()) return null;
 		if (doc != null && (!Set.of("UPLOADING", "DELETED", "FAILED").contains(doc.status())
 				|| (doc.status().equals("FAILED") && registered(id)))) {
@@ -282,13 +307,13 @@ public class ThreadDocumentService {
 		}
 		if (doc != null && doc.status().equals("UPLOADING"))
 			jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_EXPIRED', updated_at = now() where id = ?", id);
-		jdbc.update("update thr_doc_end set next_at = now() + interval '90 seconds' where doc_id = ?", id);
+		jdbc.update("update thr_doc_end set next_at = now() + ? * interval '1 second' where doc_id = ?", CLEANUP_LEASE_SECONDS, id);
 		return rows.get(0);
 	}
 
 	private void queue(Document doc, int seconds) {
 		jdbc.update("insert into thr_doc_end(doc_id, tnn_id, thr_id, src_key, src_att_id, next_at) values (?, ?, ?, ?, ?, ?) on conflict(doc_id) do update set next_at = excluded.next_at",
-				doc.id(), doc.tenant(), doc.thread(), doc.digest(), doc.attempt(), java.sql.Timestamp.from(Instant.now().plusSeconds(seconds)));
+				doc.id(), doc.tenant(), doc.thread(), doc.digest(), doc.attempt(), Timestamp.from(Instant.now().plusSeconds(seconds)));
 	}
 	private boolean registered(UUID id) {
 		return jdbc.queryForObject("select count(*) from thr_doc_evt where doc_id = ? and evt_kind = 'REGISTERED'", Integer.class, id) > 0;
@@ -316,11 +341,11 @@ public class ThreadDocumentService {
 	}
 	private ThreadDocumentView view(Document doc, Access access, boolean registered) {
 		boolean own = doc.uploader().equals(access.user());
-		boolean writable = access.writable() && !Set.of("UPLOADING", "DELETED").contains(doc.status());
+		boolean writable = access.writable() && !UNSETTLED.contains(doc.status());
 		boolean manageable = writable && (own || access.owner());
 		return new ThreadDocumentView(doc.id(), doc.name(), doc.size(), doc.status(), doc.pinned(), own,
 				writable && registered, manageable && registered, manageable,
-				registered && !Set.of("UPLOADING", "DELETED").contains(doc.status()), doc.created());
+				registered && !UNSETTLED.contains(doc.status()), doc.created());
 	}
 	private void validate(String name, byte[] content) {
 		// 방향 제어 문자는 목록·내려받은 이름의 확장자를 다르게 보이게 한다(예: 오른쪽→왼쪽 재정렬 문자로 .pdf가 .txt처럼 보임).
@@ -338,7 +363,7 @@ public class ThreadDocumentService {
 	}
 	static String digest(byte[] bytes) {
 		try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
-		catch (java.security.NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
+		catch (NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
 	}
 	private static ResponseStatusException notFound() { return new ResponseStatusException(HttpStatus.NOT_FOUND); }
 	private static ThreadDocumentException conflict() { return ThreadDocumentException.conflict(); }

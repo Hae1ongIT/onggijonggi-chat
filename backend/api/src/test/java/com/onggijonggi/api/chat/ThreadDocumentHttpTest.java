@@ -50,6 +50,52 @@ class ThreadDocumentHttpTest {
 		client = RestTestClient.bindToServer().baseUrl("http://localhost:" + port).build();
 	}
 
+	/** 요청 본문·메서드가 서비스의 변경 종류로 바뀌는 곳은 컨트롤러뿐이라 여기서 대응을 못 박는다. */
+	@Test
+	void requestsMapToTheServiceChangeKinds() {
+		UUID pin = UUID.randomUUID(), unpin = UUID.randomUUID(), delete = UUID.randomUUID();
+		for (var entry : List.of(List.of(pin, true), List.of(unpin, false)))
+			client.put().uri("/api/threads/" + room + "/documents/" + document + "/pin")
+					.header(HttpHeaders.AUTHORIZATION, bearer())
+					.contentType(MediaType.APPLICATION_JSON)
+					.body("{\"requestId\":\"" + entry.get(0) + "\",\"pinned\":" + entry.get(1) + "}")
+					.exchange()
+					.expectStatus().isNoContent();
+		client.delete().uri("/api/threads/" + room + "/documents/" + document + "?requestId=" + delete)
+				.header(HttpHeaders.AUTHORIZATION, bearer())
+				.exchange()
+				.expectStatus().isNoContent();
+
+		verify(documents).change(eq(room), eq(document), any(), eq("PINNED"), eq(pin));
+		verify(documents).change(eq(room), eq(document), any(), eq("UNPINNED"), eq(unpin));
+		verify(documents).change(eq(room), eq(document), any(), eq("DELETED"), eq(delete));
+	}
+
+	@Test
+	void uploadPassesTheFileNameAndBytesAndAMissingRequestIdIsRejected() {
+		when(documents.upload(any(), any(), any(), anyString(), any())).thenReturn(new ThreadDocumentView(document, "회의록.txt", 6,
+				"PENDING", false, true, false, false, true, false, java.time.Instant.now()));
+		MultipartBodyBuilder body = new MultipartBodyBuilder();
+		body.part("file", new ByteArrayResource("본문".getBytes(StandardCharsets.UTF_8)) {
+			@Override public String getFilename() { return "회의록.txt"; }
+		});
+		client.post().uri("/api/threads/" + room + "/documents?documentId=" + document)
+				.header(HttpHeaders.AUTHORIZATION, bearer())
+				.contentType(MediaType.MULTIPART_FORM_DATA)
+				.body(body.build())
+				.exchange()
+				.expectStatus().isCreated();
+		verify(documents).upload(eq(room), eq(document), any(), eq("회의록.txt"), eq("본문".getBytes(StandardCharsets.UTF_8)));
+
+		client.put().uri("/api/threads/" + room + "/documents/" + document + "/pin")
+				.header(HttpHeaders.AUTHORIZATION, bearer())
+				.contentType(MediaType.APPLICATION_JSON)
+				.body("{\"pinned\":true}")
+				.exchange()
+				.expectStatus().isBadRequest();
+		verify(documents, never()).change(any(), any(), any(), any(), any());
+	}
+
 	/** 참여자 상태 충돌(PARTICIPANT_STATE_CONFLICT)로 나가면 화면이 "참여자 정보가 바뀌었다"고 잘못 안내한다. */
 	@Test
 	void documentStateConflictHasItsOwnCode() {

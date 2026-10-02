@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app.api.routes.source_files import get_source_storage, source_key
 from app.errors import WorkerError
@@ -91,12 +92,28 @@ def test_internal_key_required_before_storage_access(sources, method, key):
     assert storage.calls == []
 
 
-def test_declared_oversized_body_is_rejected_before_parsing(sources):
+@pytest.fixture
+def unparsed(monkeypatch):
+    """본문 파싱(파일 파트 스풀)에 닿으면 실패시킨다. 미들웨어가 그 전에 끊는지 본다."""
+
+    async def form(self, *args, **kwargs):
+        raise AssertionError("multipart body was parsed")
+
+    monkeypatch.setattr(Request, "form", form)
+
+
+@pytest.mark.parametrize("key, size, status, code", [
+    ("incorrect", 8, 401, "UNAUTHORIZED"),
+    ("test-key", 70 * 1024, 413, "FILE_TOO_LARGE"),
+])
+def test_key_and_declared_size_are_checked_before_parsing(sources, unparsed, key, size, status, code):
+    body = b"x" * size
     client, storage = sources
     url, headers, _ = location()
-    response = client.put(url, headers=headers, files={"file": ("source.txt", b"x" * (70 * 1024))})
-    assert response.status_code == 413
-    assert response.json()["code"] == "FILE_TOO_LARGE"
+    headers["X-Internal-Api-Key"] = key
+    response = client.put(url, headers=headers, files={"file": ("source.txt", body)})
+    assert response.status_code == status
+    assert response.json()["code"] == code
     assert storage.calls == []
 
 

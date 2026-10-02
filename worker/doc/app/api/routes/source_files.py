@@ -75,6 +75,7 @@ def save_source(
         # 잠금 대기와 실제 저장 후에도 검사한다. HTTPX timeout은 전체 처리 기한이 아니다.
         if expires_at <= time():
             raise WorkerError(409, "SOURCE_UPLOAD_EXPIRED", "Source upload reservation expired")
+        # BFF 예약은 120초다(ThreadDocumentService.RESERVATION_SECONDS). 시계 차이 5초까지만 허용한다.
         if expires_at > time() + 125:
             raise WorkerError(400, "INVALID_SOURCE_EXPIRY", "Source upload expiry exceeds reservation window")
         storage.upload_bytes(key, content)
