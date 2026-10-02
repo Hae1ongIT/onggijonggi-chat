@@ -4,4 +4,21 @@
 - python-docx · openpyxl · python-pptx, LibreOffice headless(PDF 변환)
 - 리소스·네트워크 제한, 화이트리스트 연산만(임의 코드 실행 없음)
 
-코드는 착수 시 추가(현재는 폴더·명명 선점용 placeholder).
+`doc/`의 FastAPI가 문서 생성·템플릿 처리와 Thread 문서 원본 저장을 제공한다. 브라우저는 BFF만 호출하며,
+워커는 내부 API key와 Tenant 식별자를 확인한다. 사용자·방·문서 인가는 BFF의 책임이다.
+
+## Thread 문서 원본
+
+- 내부 경로: `/api/v1/thread-sources/{threadId}/{documentId}/{sha256}`.
+- PUT은 multipart `file`을 받아 변환·잘라내기 없이 저장한다. GET은 원본 바이트, DELETE는 멱등 삭제다.
+- 모든 요청에 `X-Internal-Api-Key`, UUID `X-Tenant-Id`가 필요하다. PUT은 BFF 예약 만료 시각(Unix 초)의
+  `X-Source-Expires-At`도 필요하며, 만료됐거나 125초보다 먼 요청은 거부한다.
+- 원본 경로는 Tenant·Thread·문서·SHA-256으로 분리한다. 사용자 파일명을 저장소 경로에 넣지 않는다.
+- `MAX_SOURCE_BYTES` 기본값은 10MiB다. BFF도 같은 상한으로 제한한다. 원본 통신 timeout은 최대 30초이며,
+  배포 서버·DB·워커의 시계를 동기화해야 예약 만료와 180초 정리 유예가 일치한다.
+- 원본 저장 성공은 ETL/검색 완료가 아니다. 추출·청킹·임베딩·색인은 별도 후속 작업이다.
+- DB 변경 이력·정리 재시도는 BFF가 보관한다. 워커의 DELETE는 이미 없는 원본에도 성공한다.
+
+Compose의 BFF는 `APP_DOCUMENT_WORKER_URL`과 `APP_DOCUMENT_INTERNAL_API_KEY`를 사용한다.
+후자는 워커의 `DOCUMENT_WORKER_INTERNAL_API_KEY`와 같은 값이어야 한다. 호스트 BFF에서 실행할 때는
+실제로 접근 가능한 워커 주소와 같은 내부 key를 명시한다. 저장소·워커를 브라우저에 직접 공개하지 않는다.

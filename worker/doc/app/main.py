@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from uuid import uuid4
 
 from app.api.routes.documents import router as documents_router
+from app.api.routes.source_files import router as source_files_router
 from app.core.config import Settings
 from app.errors import WorkerError, error_response
 
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="document-worker", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.include_router(documents_router)
+app.include_router(source_files_router)
 
 
 @app.middleware("http")
