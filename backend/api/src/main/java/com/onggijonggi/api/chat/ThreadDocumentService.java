@@ -173,7 +173,9 @@ public class ThreadDocumentService {
 		try {
 			return transactions.execute(tx -> {
 				Access access = access(thread, actor, true);
-				Document old = find(id, false);
+				// 방 잠금이 공유라 같은 문서의 재시도끼리는 이 행 잠금으로 줄을 세운다. 잠금 뒤 최신 상태를 다시 읽으므로 늦은
+				// 쪽은 앞선 재시도의 UPLOADING(409)이나 그사이 삭제(404)를 보고, 앞선 저장 시도를 덮어써 원본을 고아로 만들지 않는다.
+				Document old = find(id, true);
 				if (old != null) {
 					if (!old.thread().equals(thread) || !old.uploader().equals(actor.userId())) throw notFound();
 					if (!old.digest().equals(digest)

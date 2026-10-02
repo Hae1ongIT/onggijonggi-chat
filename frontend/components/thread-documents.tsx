@@ -210,7 +210,10 @@ export function ThreadDocuments({
 
   const target = listing?.documents.find((doc) => doc.id === confirmation);
   // 삭제 확인창이 열려 있으면 변경 오류는 확인창 안에 보인다(뒤 화면은 화면 낭독기에서 가려진다).
-  const errors = [listError, confirmation ? '' : error].filter(Boolean);
+  const errors = [
+    { key: 'list', message: listError },
+    { key: 'action', message: confirmation ? '' : error },
+  ].filter((entry) => entry.message);
 
   return (
     <section className="border-b px-4 py-2 text-sm" aria-label="방 문서">
@@ -248,8 +251,8 @@ export function ThreadDocuments({
               목록 다시 조회
             </Button>
           </div>
-          {errors.map((message) => (
-            <p key={message} role="alert" className="text-destructive">
+          {errors.map(({ key, message }) => (
+            <p key={key} role="alert" className="text-destructive">
               {message}
             </p>
           ))}

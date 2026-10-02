@@ -175,6 +175,32 @@ class ThreadDocumentPostgresTest {
 		verify(storage, never()).read(any(), any(), any(), any(), any());
 	}
 
+	/** 방 잠금이 공유라 같은 FAILED 문서의 재시도끼리는 문서 행 잠금으로 줄을 선다. 늦은 쪽은 앞선 재시도가 남긴 UPLOADING을 다시 읽고 409다. */
+	@Test void concurrentRetriesOfAFailedDocumentSerializeOnTheDocumentRow() throws Exception {
+		UUID id = UUID.randomUUID();
+		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		assertThatThrownBy(() -> upload(id, owner)).isInstanceOf(IllegalStateException.class);
+		jdbc.update("delete from thr_doc_end where doc_id=?", id);
+		doNothing().when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		var executor = Executors.newSingleThreadExecutor();
+		try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+			connection.setAutoCommit(false);
+			try (var hold = connection.prepareStatement("select id from thr_doc where id=? for update")) {
+				hold.setObject(1, id); hold.executeQuery();
+			}
+			var retry = executor.submit(() -> upload(id, owner));
+			Thread.sleep(300);
+			assertThat(retry.isDone()).as("앞선 재시도가 문서 행을 쥔 동안 기다린다").isFalse();
+			try (var first = connection.prepareStatement("update thr_doc set status='UPLOADING', src_att_id=? where id=?")) {
+				first.setObject(1, UUID.randomUUID()); first.setObject(2, id); first.executeUpdate();
+			}
+			connection.commit();
+			assertThatThrownBy(() -> retry.get(10, TimeUnit.SECONDS)).cause().isInstanceOfSatisfying(ResponseStatusException.class,
+					error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
+		} finally { executor.shutdown(); }
+		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any(), any());
+	}
+
 	@Test void severalDocumentsCanBePinnedAndUnpinningOneKeepsTheOthers() {
 		UUID first = UUID.randomUUID(); upload(first, owner);
 		UUID second = UUID.randomUUID(); service.upload(room, second, member, "second.txt", "둘째 원문".getBytes(StandardCharsets.UTF_8));

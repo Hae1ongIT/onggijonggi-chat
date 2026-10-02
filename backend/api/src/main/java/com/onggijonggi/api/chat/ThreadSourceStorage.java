@@ -79,7 +79,9 @@ public class ThreadSourceStorage {
 	private ThreadDocumentException unavailable(RuntimeException error) {
 		if (error instanceof WebClientResponseException response && response.getStatusCode().is4xxClientError()) {
 			String body = response.getResponseBodyAsString();
-			log.error("문서 워커가 요청을 거절했다 — 내부 key·시계·크기 설정이나 원본 유실을 확인해야 한다: {} {} {}",
+			// 404는 읽는 사이 문서가 삭제·정리된 정상 경합에서도 난다(호출부 재검증이 404로 답한다). 그래서 warn에 둔다.
+			if (response.getStatusCode().value() == 404) log.warn("문서 워커에 원본이 없다: {}", body.length() > 300 ? body.substring(0, 300) : body);
+			else log.error("문서 워커가 요청을 거절했다 — 내부 key·시계·크기 설정이나 원본 유실을 확인해야 한다: {} {} {}",
 					response.getRequest() == null ? "" : response.getRequest().getMethod(), response.getStatusCode().value(),
 					body.length() > 300 ? body.substring(0, 300) : body);
 		}
