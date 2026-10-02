@@ -69,7 +69,7 @@ public class ThreadDocumentService {
 		boolean writable() { return thread.getStatus() == ThrStatus.ACTIVE; }
 	}
 	private record Document(UUID id, UUID tenant, UUID thread, UUID uploader, String name, long size,
-			String digest, String status, boolean pinned, Instant created, Instant updated) { }
+			String digest, UUID attempt, String status, boolean pinned, Instant created, Instant updated) { }
 	public record Original(String fileName, byte[] bytes) { }
 
 	private Access access(UUID threadId, CurrentActor actor, boolean write) {
@@ -81,8 +81,12 @@ public class ThreadDocumentService {
 		entityManager.refresh(thread);
 		if (users.findById(actor.userId()).filter(user -> user.getStatus() == AppUserStatus.ACTIVE).isEmpty())
 			throw notFound();
+		// 같은 참여 행을 잠가 문서 인가와 참여 종료가 서로 앞서 확정되지 않게 한다.
+		if (jdbc.queryForList("select id from thr_mbr where thr_id = ? and user_id = ? and status = 'ACTIVE' for update",
+				threadId, actor.userId()).isEmpty()) throw notFound();
 		var member = memberships.findByThrIdAndUserIdAndStatus(threadId, actor.userId(), ThrMbrStatus.ACTIVE)
 				.orElseThrow(ThreadDocumentService::notFound);
+		entityManager.refresh(member);
 		boolean owner = member.getRole() == ThrMbrRole.OWNER;
 		if (thread.getKind() == ThrKind.DIRECT && (!owner || !actor.userId().equals(thread.getDrcOwnUserId())))
 			throw notFound();
@@ -117,10 +121,13 @@ public class ThreadDocumentService {
 				if (!old.status().equals("FAILED")) return old;
 				// ETL 실패는 등록 완료 사건이 이미 있다. 같은 등록 재시도로 ETL을 자동 다시 시작하지 않는다.
 				if (registered(id)) return old;
-				jdbc.update("update thr_doc set status = 'UPLOADING', err = null, updated_at = now() where id = ?", id);
+				if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
+				jdbc.update("update thr_doc set status = 'UPLOADING', src_att_id = ?, err = null, updated_at = now() where id = ?", UUID.randomUUID(), id);
 			} else {
-				jdbc.update("insert into thr_doc(id, tnn_id, thr_id, user_id, file_name, file_size, src_key, status) values (?, ?, ?, ?, ?, ?, ?, 'UPLOADING')",
-						id, access.thread().getTenantId(), thread, actor.userId(), fileName, content.length, digest);
+				// 부모가 사라져도 이전 원본의 정리 참조는 살아 있다. 다른 방의 재등록으로 덮지 않는다.
+				if (!jdbc.queryForList("select doc_id from thr_doc_end where doc_id = ? for update", id).isEmpty()) throw conflict();
+				jdbc.update("insert into thr_doc(id, tnn_id, thr_id, user_id, file_name, file_size, src_key, src_att_id, status) values (?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING')",
+						id, access.thread().getTenantId(), thread, actor.userId(), fileName, content.length, digest, UUID.randomUUID());
 			}
 			queue(find(id, true), 180);
 			return find(id, true);
@@ -129,13 +136,13 @@ public class ThreadDocumentService {
 		if (!reservation.status().equals("UPLOADING")) return transactions.execute(tx -> view(reservation, access(thread, actor, false)));
 		boolean stored = false;
 		try {
-			storage.save(reservation.tenant(), thread, id, digest, content, reservation.updated().plusSeconds(120));
+			storage.save(reservation.tenant(), thread, id, digest, content, reservation.updated().plusSeconds(120), reservation.attempt());
 			stored = true;
 			return transactions.execute(tx -> {
 				Access access = access(thread, actor, true);
 				Document latest = findIn(thread, id);
 				if (latest.status().equals("DELETED")) throw notFound();
-				if (!latest.status().equals("UPLOADING")) throw conflict();
+				if (!latest.status().equals("UPLOADING") || !java.util.Objects.equals(latest.attempt(), reservation.attempt())) throw conflict();
 				jdbc.update("update thr_doc set status = 'PENDING', updated_at = now(), err = null where id = ?", id);
 				record(latest, actor.userId(), "REGISTERED", id);
 				jdbc.update("delete from thr_doc_end where doc_id = ?", id);
@@ -146,8 +153,8 @@ public class ThreadDocumentService {
 			try {
 				transactions.executeWithoutResult(tx -> {
 					Document doc = find(id, true);
-					if (doc == null || doc.status().equals("DELETED") || doc.status().equals("UPLOADING")
-							|| (doc.status().equals("FAILED") && !registered(id))) {
+					if (doc == null || doc.status().equals("DELETED")
+							|| (java.util.Objects.equals(doc.attempt(), reservation.attempt()) && doc.status().equals("UPLOADING"))) {
 						if (doc != null && doc.status().equals("UPLOADING"))
 							jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_FAILED', updated_at = now() where id = ?", id);
 						queue(reservation, cleanupDelay);
@@ -175,8 +182,8 @@ public class ThreadDocumentService {
 			if (doc.status().equals("UPLOADING")) throw conflict();
 			if (doc.status().equals("DELETED")) throw notFound();
 			if (!action.equals("DELETED") && !registered(id)) throw conflict();
-			// 이미 같은 고정 상태면 실제 변경이 없다. 재전송으로 업무 사건을 부풀리지 않는다.
-			if ((action.equals("PINNED") && doc.pinned()) || (action.equals("UNPINNED") && !doc.pinned())) return;
+			// 기록되지 않은 no-op을 성공으로 수락하지 않는다. 늦은 재전송이 이후 반대 변경을 되돌리지 않게 한다.
+			if ((action.equals("PINNED") && doc.pinned()) || (action.equals("UNPINNED") && !doc.pinned())) throw conflict();
 			if (action.equals("DELETED")) {
 				jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now(), updated_at = now() where id = ?", id);
 				queue(doc, 0);
@@ -192,7 +199,7 @@ public class ThreadDocumentService {
 			if (value.status().equals("DELETED") || value.status().equals("UPLOADING") || !registered(id)) throw notFound();
 			return value;
 		});
-		byte[] bytes = storage.read(doc.tenant(), thread, id, doc.digest());
+		byte[] bytes = storage.read(doc.tenant(), thread, id, doc.digest(), doc.attempt());
 		if (!digest(bytes).equals(doc.digest())) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
 		// 저장소에서 읽는 동안 방/문서 접근권이 사라졌으면 응답 본문을 전달하지 않는다.
 		transactions.executeWithoutResult(tx -> {
@@ -236,7 +243,7 @@ public class ThreadDocumentService {
 					if (doc != null && doc.status().equals("UPLOADING"))
 						jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_EXPIRED', updated_at = now() where id = ?", id);
 					try {
-						storage.delete((UUID) job.get("tnn_id"), (UUID) job.get("thr_id"), id, (String) job.get("src_key"));
+						storage.delete((UUID) job.get("tnn_id"), (UUID) job.get("thr_id"), id, (String) job.get("src_key"), (UUID) job.get("src_att_id"));
 						jdbc.update("delete from thr_doc_end where doc_id = ?", id);
 					} catch (RuntimeException failure) {
 						jdbc.update("update thr_doc_end set att_cnt = att_cnt + 1, err = 'SOURCE_DELETE_FAILED', next_at = now() + interval '30 seconds' where doc_id = ?", id);
@@ -248,8 +255,8 @@ public class ThreadDocumentService {
 	}
 
 	private void queue(Document doc, int seconds) {
-		jdbc.update("insert into thr_doc_end(doc_id, tnn_id, thr_id, src_key, next_at) values (?, ?, ?, ?, ?) on conflict(doc_id) do update set next_at = excluded.next_at",
-				doc.id(), doc.tenant(), doc.thread(), doc.digest(), java.sql.Timestamp.from(Instant.now().plusSeconds(seconds)));
+		jdbc.update("insert into thr_doc_end(doc_id, tnn_id, thr_id, src_key, src_att_id, next_at) values (?, ?, ?, ?, ?, ?) on conflict(doc_id) do update set next_at = excluded.next_at",
+				doc.id(), doc.tenant(), doc.thread(), doc.digest(), doc.attempt(), java.sql.Timestamp.from(Instant.now().plusSeconds(seconds)));
 	}
 	private boolean registered(UUID id) {
 		return jdbc.queryForObject("select count(*) from thr_doc_evt where doc_id = ? and evt_kind = 'REGISTERED'", Integer.class, id) > 0;
@@ -270,7 +277,7 @@ public class ThreadDocumentService {
 	private Document document(ResultSet rs, int row) throws SQLException {
 		return new Document(rs.getObject("id", UUID.class), rs.getObject("tnn_id", UUID.class), rs.getObject("thr_id", UUID.class),
 				rs.getObject("user_id", UUID.class), rs.getString("file_name"), rs.getLong("file_size"), rs.getString("src_key"),
-				rs.getString("status"), rs.getBoolean("pnn"), rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
+				rs.getObject("src_att_id", UUID.class), rs.getString("status"), rs.getBoolean("pnn"), rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
 	}
 	private ThreadDocumentView view(Document doc, Access access) {
 		boolean own = doc.uploader().equals(access.user());
@@ -278,7 +285,8 @@ public class ThreadDocumentService {
 		boolean manageable = writable && (own || access.owner());
 		boolean registered = registered(doc.id());
 		return new ThreadDocumentView(doc.id(), doc.name(), doc.size(), doc.status(), doc.pinned(), own,
-				writable && registered, manageable && registered, manageable, doc.created());
+				writable && registered, manageable && registered, manageable,
+				registered && !Set.of("UPLOADING", "DELETED").contains(doc.status()), doc.created());
 	}
 	private void validate(String name, byte[] content) {
 		if (name == null || name.isBlank() || name.length() > 255 || name.chars().anyMatch(Character::isISOControl)

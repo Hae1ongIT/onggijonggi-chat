@@ -90,6 +90,9 @@ describe('문서 목업 계약', () => {
         ])
       ).status,
     ).toBe(404);
+    expect(
+      (await mock.handle(upload(), [NORMAL_THREAD_ID, 'documents'])).status,
+    ).toBe(404);
   });
   it('접근 거부와 읽기 전용 상태에서 쓰기를 차단한다', async () => {
     const mock = new ThreadDocumentsMock();

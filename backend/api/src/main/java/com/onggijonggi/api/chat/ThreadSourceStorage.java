@@ -34,7 +34,7 @@ public class ThreadSourceStorage {
 		return "/api/v1/thread-sources/" + thread + "/" + document + "/" + digest;
 	}
 
-	public void save(UUID tenant, UUID thread, UUID document, String digest, byte[] content, Instant expiresAt) {
+	public void save(UUID tenant, UUID thread, UUID document, String digest, byte[] content, Instant expiresAt, UUID attempt) {
 		var body = new LinkedMultiValueMap<String, Object>();
 		body.add("file", new ByteArrayResource(content) {
 			@Override public String getFilename() { return "source"; }
@@ -43,14 +43,16 @@ public class ThreadSourceStorage {
 			client.put().uri(path(thread, document, digest))
 					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
 					.header("X-Source-Expires-At", Long.toString(expiresAt.getEpochSecond()))
+					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
 					.contentType(MediaType.MULTIPART_FORM_DATA).bodyValue(body)
 					.retrieve().toBodilessEntity().block(Duration.ofSeconds(60));
 		} catch (RuntimeException error) { throw unavailable(error); }
 	}
 
-	public byte[] read(UUID tenant, UUID thread, UUID document, String digest) {
+	public byte[] read(UUID tenant, UUID thread, UUID document, String digest, UUID attempt) {
 		try {
 			byte[] content = client.get().uri(path(thread, document, digest))
+					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
 					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
 					.retrieve().bodyToMono(byte[].class).block(Duration.ofSeconds(60));
 			if (content == null) throw new IllegalStateException("원본 응답이 비어 있다");
@@ -58,9 +60,10 @@ public class ThreadSourceStorage {
 		} catch (RuntimeException error) { throw unavailable(error); }
 	}
 
-	public void delete(UUID tenant, UUID thread, UUID document, String digest) {
+	public void delete(UUID tenant, UUID thread, UUID document, String digest, UUID attempt) {
 		try {
 			client.delete().uri(path(thread, document, digest))
+					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
 					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
 					.retrieve().toBodilessEntity().block(Duration.ofSeconds(60));
 		} catch (RuntimeException error) { throw unavailable(error); }

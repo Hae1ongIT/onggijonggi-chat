@@ -27,6 +27,7 @@ const doc: api.ThreadDocument = {
   canPin: true,
   canUnpin: true,
   canDelete: true,
+  canReadOriginal: true,
   createdAt: '2026-10-02T00:00:00Z',
 };
 const listing: api.ThreadDocumentsListing = {
@@ -43,6 +44,63 @@ beforeEach(() => {
   vi.mocked(api.changeThreadDocument).mockResolvedValue();
 });
 afterEach(cleanup);
+
+describe('패널 접기와 진행 중 업로드', () => {
+  it('접힌 동안 성공한 업로드는 다시 펼쳐도 이전 파일을 재전송하지 않는다', async () => {
+    let resolveUpload!: (value: api.ThreadDocument) => void;
+    vi.mocked(api.uploadThreadDocument).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.change(screen.getByLabelText('등록할 방 문서'), {
+      target: { files: [new File(['text'], 'new.txt')] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '문서 등록' }));
+    open();
+    await act(async () => resolveUpload(doc));
+    open();
+    await screen.findByText('guide.txt');
+    const submit = screen.getByRole('button', {
+      name: '문서 등록',
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(api.uploadThreadDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('접었다 다시 펼친 동안 실패하면 입력과 재시도 UUID를 유지하고 오류를 표시한다', async () => {
+    let rejectUpload!: (error: Error) => void;
+    vi.mocked(api.uploadThreadDocument).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectUpload = reject;
+        }),
+    );
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.change(screen.getByLabelText('등록할 방 문서'), {
+      target: { files: [new File(['text'], 'new.txt')] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '문서 등록' }));
+    const id = vi.mocked(api.uploadThreadDocument).mock.calls[0][1];
+    open();
+    open();
+    await screen.findByText('guide.txt');
+    await act(async () => rejectUpload(new Error('업로드 실패')));
+    expect(screen.getByRole('alert').textContent).toContain('업로드 실패');
+    fireEvent.click(screen.getByRole('button', { name: '문서 등록' }));
+    await waitFor(() =>
+      expect(api.uploadThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    expect(vi.mocked(api.uploadThreadDocument).mock.calls[1][1]).toBe(id);
+  });
+});
 
 describe('방 문서 실제 UI', () => {
   it.each([
@@ -181,4 +239,49 @@ describe('방 문서 실제 UI', () => {
     fireEvent.click(pin);
     expect(api.changeThreadDocument).toHaveBeenCalledTimes(1);
   });
+
+  it('이전 방 변경 후 조회 실패를 새 방 오류로 표시하지 않는다', async () => {
+    let rejectOld!: (error: Error) => void;
+    vi.mocked(api.listThreadDocuments)
+      .mockResolvedValueOnce(listing)
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectOld = reject;
+          }),
+      )
+      .mockResolvedValue(listing);
+    const { rerender } = render(<ThreadDocuments threadId="old" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await waitFor(() =>
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(2),
+    );
+    rerender(<ThreadDocuments threadId="new" />);
+    await screen.findByText('guide.txt');
+    await act(async () => rejectOld(new Error('이전 방 조회 중단')));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(
+      (screen.getByRole('button', { name: '고정' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it.each([false, true])(
+    'FAILED 원본 열람 capability %s를 적용한다',
+    async (canReadOriginal) => {
+      vi.mocked(api.listThreadDocuments).mockResolvedValue({
+        ...listing,
+        documents: [{ ...doc, status: 'FAILED', canReadOriginal }],
+      });
+      render(<ThreadDocuments threadId="room" />);
+      open();
+      await screen.findByText('guide.txt');
+      expect(
+        (screen.getByRole('button', { name: '원본' }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(!canReadOriginal);
+    },
+  );
 });

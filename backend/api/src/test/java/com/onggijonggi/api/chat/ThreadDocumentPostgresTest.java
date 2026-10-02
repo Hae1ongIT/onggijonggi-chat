@@ -13,7 +13,12 @@ import com.onggijonggi.common.chat.persistence.ThrRepository;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -86,9 +91,9 @@ class ThreadDocumentPostgresTest {
 		assertThat(first.status()).isEqualTo("PENDING");
 		assertThat(first.pinned()).isFalse();
 		assertThat(service.upload(room, id, member, "guide.txt", bytes)).isEqualTo(first);
-		verify(storage, times(1)).save(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), eq(bytes), any());
+		verify(storage, times(1)).save(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), eq(bytes), any(), any());
 		assertThat(events(id)).isEqualTo(1);
-		when(storage.read(tenant, room, id, ThreadDocumentService.digest(bytes))).thenReturn(bytes);
+		when(storage.read(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), any())).thenReturn(bytes);
 		assertThat(service.original(room, id, owner).bytes()).isEqualTo(bytes);
 		assertThat(service.list(room, member).documents()).hasSize(1);
 	}
@@ -135,7 +140,7 @@ class ThreadDocumentPostgresTest {
 		when(authorizer.canViewBlocking(anyString(), any())).thenReturn(false);
 		status(() -> service.list(room, owner), HttpStatus.NOT_FOUND);
 		when(authorizer.canViewBlocking(anyString(), any())).thenReturn(true);
-		when(storage.read(any(), any(), any(), any())).thenAnswer(invocation -> {
+		when(storage.read(any(), any(), any(), any(), any())).thenAnswer(invocation -> {
 			jdbc.update("update app_user set status='INACTIVE', inactive_at=now() where id=?", owner.userId());
 			return bytes;
 		});
@@ -144,16 +149,17 @@ class ThreadDocumentPostgresTest {
 
 	@Test void failedStorageCannotPinOrReadAndCleanupFailureRetries() {
 		UUID id = UUID.randomUUID();
-		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any());
+		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any(), any());
 		assertThatThrownBy(() -> upload(id, owner)).isInstanceOf(IllegalStateException.class);
 		assertThat(events(id)).isZero();
 		assertThat(service.list(room, owner).documents().get(0).canPin()).isFalse();
+		assertThat(service.list(room, owner).documents().get(0).canReadOriginal()).isFalse();
 		status(() -> service.change(room, id, owner, "PINNED", UUID.randomUUID()), HttpStatus.CONFLICT);
 		jdbc.update("update thr_doc_end set next_at=now()-interval '1 second'");
-		doThrow(new IllegalStateException("정리 실패")).when(storage).delete(any(), any(), any(), any());
+		doThrow(new IllegalStateException("정리 실패")).when(storage).delete(any(), any(), any(), any(), any());
 		service.cleanupDue();
 		assertThat(jdbc.queryForObject("select att_cnt from thr_doc_end where doc_id=?", Integer.class, id)).isEqualTo(1);
-		doNothing().when(storage).delete(any(), any(), any(), any());
+		doNothing().when(storage).delete(any(), any(), any(), any(), any());
 		jdbc.update("update thr_doc_end set next_at=now()-interval '1 second'");
 		service.cleanupDue();
 		assertThat(jdbc.queryForObject("select count(*) from thr_doc_end", Integer.class)).isZero();
@@ -168,18 +174,18 @@ class ThreadDocumentPostgresTest {
 		assertThat(jdbc.queryForObject("select count(*) from thr_doc_evt", Integer.class)).isZero();
 		assertThat(jdbc.queryForObject("select count(*) from thr_doc_end", Integer.class)).isEqualTo(1);
 		service.cleanupDue();
-		verify(storage).delete(tenant, room, id, ThreadDocumentService.digest(bytes));
+		verify(storage).delete(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), any());
 	}
 
 	@Test void lateUploadAfterRoomDeletionCannotRegisterAndStillQueuesCleanup() {
 		UUID id = UUID.randomUUID();
 		doAnswer(invocation -> { jdbc.update("delete from thr where id=?", room); return null; })
-				.when(storage).save(any(), any(), any(), any(), any(), any());
+				.when(storage).save(any(), any(), any(), any(), any(), any(), any());
 		status(() -> upload(id, owner), HttpStatus.NOT_FOUND);
 		assertThat(events(id)).isZero();
 		assertThat(jdbc.queryForObject("select count(*) from thr_doc_end", Integer.class)).isEqualTo(1);
 		service.cleanupDue();
-		verify(storage).delete(tenant, room, id, ThreadDocumentService.digest(bytes));
+		verify(storage).delete(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), any());
 	}
 
 	@Test void registeredFailureKeepsOriginalAndDeletedProcessingCannotResurrect() {
@@ -187,7 +193,8 @@ class ThreadDocumentPostgresTest {
 		assertThat(service.processing(id, "PENDING", "PROCESSING")).isTrue();
 		assertThat(service.processing(id, "PROCESSING", "FAILED")).isTrue();
 		assertThat(upload(id, owner).status()).isEqualTo("FAILED");
-		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any());
+		assertThat(service.list(room, owner).documents().get(0).canReadOriginal()).isTrue();
+		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any(), any());
 		service.change(room, id, owner, "DELETED", UUID.randomUUID());
 		assertThat(service.processing(id, "PROCESSING", "READY")).isFalse();
 	}
@@ -240,9 +247,9 @@ class ThreadDocumentPostgresTest {
 		doAnswer(invocation -> {
 			status(() -> upload(id, owner), HttpStatus.CONFLICT);
 			return null;
-		}).when(storage).save(any(), any(), any(), any(), any(), any());
+		}).when(storage).save(any(), any(), any(), any(), any(), any(), any());
 		assertThat(upload(id, owner).status()).isEqualTo("PENDING");
-		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any());
+		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any(), any());
 		assertThat(events(id)).isEqualTo(1);
 	}
 
@@ -267,7 +274,98 @@ class ThreadDocumentPostgresTest {
 		status(() -> service.original(room, id, outsider), HttpStatus.NOT_FOUND);
 		status(() -> service.upload(room, UUID.randomUUID(), outsider, "guide.txt", bytes), HttpStatus.NOT_FOUND);
 		status(() -> service.change(room, id, outsider, "PINNED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
-		verify(storage, never()).read(any(), any(), any(), any());
+		verify(storage, never()).read(any(), any(), any(), any(), any());
+	}
+
+	@Test void successfulPinRetryNeverOverridesLaterUnpinAndNoOpIsNotAccepted() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		UUID pinRequest = UUID.randomUUID();
+		service.change(room, id, owner, "PINNED", pinRequest);
+		status(() -> service.change(room, id, owner, "PINNED", UUID.randomUUID()), HttpStatus.CONFLICT);
+		service.change(room, id, owner, "UNPINNED", UUID.randomUUID());
+		service.change(room, id, owner, "PINNED", pinRequest);
+		assertThat(service.list(room, owner).documents().get(0).pinned()).isFalse();
+		assertThat(events(id)).isEqualTo(3);
+	}
+
+	@Test void staleUploadCompletionCannotChangeNewReservationOrItsCleanup() {
+		UUID id = UUID.randomUUID();
+		doAnswer(invocation -> {
+			// 만료 정리가 첫 예약을 끝내고, 두 번째 요청이 저장 중인 시점을 재현한다.
+			jdbc.update("update thr_doc set status='FAILED', updated_at=updated_at+interval '1 second' where id=?", id);
+			jdbc.update("update thr_doc set status='UPLOADING', src_att_id=?, updated_at=updated_at+interval '1 second' where id=?", UUID.randomUUID(), id);
+			jdbc.update("update thr_doc_end set next_at=now()+interval '10 minutes' where doc_id=?", id);
+			return null;
+		}).when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		status(() -> upload(id, owner), HttpStatus.CONFLICT);
+		assertThat(jdbc.queryForObject("select status from thr_doc where id=?", String.class, id)).isEqualTo("UPLOADING");
+		assertThat(jdbc.queryForObject("select next_at > now()+interval '9 minutes' from thr_doc_end where doc_id=?", Boolean.class, id)).isTrue();
+		assertThat(events(id)).isZero();
+	}
+
+	@Test void deletedRoomDocumentIdCannotOverwriteOutstandingOriginalCleanup() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		UUID deletedRoom = room;
+		jdbc.update("delete from thr where id=?", room);
+		UUID common = jdbc.queryForObject("select id from wrk_node where node_key='common'", UUID.class);
+		Thr replacement = Thr.collab(owner.userId(), "다른 문서 방");
+		replacement.placeIn(tenant, common); threads.saveAndFlush(replacement);
+		room = replacement.getId();
+		members.saveAndFlush(new ThrMbr(room, owner.userId(), ThrMbrRole.OWNER, owner.userId()));
+		status(() -> upload(id, owner), HttpStatus.CONFLICT);
+		assertThat(jdbc.queryForObject("select thr_id from thr_doc_end where doc_id=?", UUID.class, id)).isEqualTo(deletedRoom);
+		service.cleanupDue();
+		verify(storage).delete(eq(tenant), eq(deletedRoom), eq(id), eq(ThreadDocumentService.digest(bytes)), any());
+		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any(), any());
+	}
+
+	@Test void failedUploadRetriesOnlyAfterCleanupWithANewStorageAttempt() {
+		UUID id = UUID.randomUUID();
+		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		assertThatThrownBy(() -> upload(id, owner)).isInstanceOf(IllegalStateException.class);
+		UUID oldAttempt = jdbc.queryForObject("select src_att_id from thr_doc where id=?", UUID.class, id);
+		status(() -> upload(id, owner), HttpStatus.CONFLICT);
+		doNothing().when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		jdbc.update("update thr_doc_end set next_at=now()-interval '1 second' where doc_id=?", id);
+		service.cleanupDue();
+		verify(storage).delete(tenant, room, id, ThreadDocumentService.digest(bytes), oldAttempt);
+		assertThat(upload(id, owner).status()).isEqualTo("PENDING");
+		assertThat(jdbc.queryForObject("select src_att_id from thr_doc where id=?", UUID.class, id)).isNotEqualTo(oldAttempt);
+		assertThat(service.processing(id, "PENDING", "PROCESSING")).isTrue();
+		assertThat(service.processing(id, "PROCESSING", "READY")).isTrue();
+		assertThat(service.list(room, owner).documents().get(0).pinned()).isFalse();
+	}
+
+	@Test void participantRemovalSerializesWithInFlightDocumentAuthorization() throws Exception {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		CountDownLatch checkedMembership = new CountDownLatch(1);
+		CountDownLatch finishAuthorization = new CountDownLatch(1);
+		when(authorizer.canViewBlocking(eq(member.subject()), any())).thenAnswer(invocation -> {
+			checkedMembership.countDown();
+			if (!finishAuthorization.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("authorization timeout");
+			return true;
+		});
+		var executor = Executors.newSingleThreadExecutor();
+		var pin = executor.submit(() -> service.change(room, id, member, "PINNED", UUID.randomUUID()));
+		try {
+			assertThat(checkedMembership.await(10, TimeUnit.SECONDS)).isTrue();
+			try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+					var statement = connection.createStatement()) {
+				statement.execute("set lock_timeout = '200ms'");
+				try (var removal = connection.prepareStatement("update thr_mbr set status='REVOKED',ended_at=now(),end_rsn='OWNER_REVOKED' where thr_id=? and user_id=?")) {
+					removal.setObject(1, room); removal.setObject(2, member.userId());
+					assertThatThrownBy(removal::executeUpdate).isInstanceOfSatisfying(SQLException.class,
+							error -> assertThat(error.getSQLState()).isEqualTo("55P03"));
+				}
+			}
+		} finally {
+			finishAuthorization.countDown();
+			executor.shutdown();
+		}
+		pin.get(10, TimeUnit.SECONDS);
+		assertThat(jdbc.update("update thr_mbr set status='REVOKED',ended_at=now(),end_rsn='OWNER_REVOKED' where thr_id=? and user_id=?", room, member.userId())).isEqualTo(1);
+		status(() -> service.change(room, id, member, "UNPINNED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
+		assertThat(service.list(room, owner).documents().get(0).pinned()).isTrue();
 	}
 
 	private ThreadDocumentView upload(UUID id, CurrentActor actor) { return service.upload(room, id, actor, "guide.txt", bytes); }

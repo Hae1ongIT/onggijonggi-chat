@@ -12,6 +12,7 @@ export interface ThreadDocument {
   canPin: boolean;
   canUnpin: boolean;
   canDelete: boolean;
+  canReadOriginal: boolean;
   createdAt: string;
 }
 export interface ThreadDocumentsListing {

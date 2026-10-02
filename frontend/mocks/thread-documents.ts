@@ -11,6 +11,7 @@ type Stored = {
 export class ThreadDocumentsMock {
   private rooms = new Map<string, Map<string, Stored>>();
   private events = new Map<string, { action: string; actor: string }>();
+  private deleted = new Set<string>();
 
   async handle(
     request: Request,
@@ -58,6 +59,8 @@ export class ThreadDocumentsMock {
       const documentId = url.searchParams.get('documentId');
       if (!documentId || !/^[a-f0-9-]{36}$/i.test(documentId))
         return new Response(null, { status: 400 });
+      if (this.deleted.has(`${thread}:${documentId}`))
+        return new Response(null, { status: 404 });
       const form = await request.formData();
       const file = form.get('file');
       if (
@@ -97,6 +100,7 @@ export class ThreadDocumentsMock {
           canPin: true,
           canUnpin: true,
           canDelete: true,
+          canReadOriginal: true,
           createdAt: new Date().toISOString(),
         },
         bytes,
@@ -130,8 +134,15 @@ export class ThreadDocumentsMock {
     if (!doc) return new Response(null, { status: 404 });
     if (action !== 'pin' && !owner && doc.uploader !== actor)
       return new Response(null, { status: 403 });
-    if (action === 'delete') documents.delete(id);
-    else doc.value.pinned = action === 'pin';
+    if (
+      (action === 'pin' && doc.value.pinned) ||
+      (action === 'unpin' && !doc.value.pinned)
+    )
+      return new Response(null, { status: 409 });
+    if (action === 'delete') {
+      documents.delete(id);
+      this.deleted.add(`${thread}:${id}`);
+    } else doc.value.pinned = action === 'pin';
     this.events.set(key, { action, actor });
     return new Response(null, { status: 204 });
   }

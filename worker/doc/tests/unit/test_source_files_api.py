@@ -2,6 +2,8 @@
 
 from hashlib import sha256
 from time import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -129,6 +131,75 @@ def test_different_content_never_overwrites_original(sources):
     assert client.put(url, headers=headers, files={"file": ("source.txt", b"original")}).status_code == 201
     assert client.put(url, headers=headers, files={"file": ("source.txt", b"modified")}).status_code == 400
     assert storage.files[key] == b"original"
+
+
+def test_expiry_during_storage_removes_original_instead_of_succeeding(sources, monkeypatch):
+    client, storage = sources
+    url, headers, key = location()
+    now = int(time())
+    monkeypatch.setattr("app.api.routes.source_files.time", lambda: now)
+    original_upload = storage.upload_bytes
+
+    def slow_upload(path, content):
+        original_upload(path, content)
+        monkeypatch.setattr("app.api.routes.source_files.time", lambda: now + 121)
+
+    monkeypatch.setattr(storage, "upload_bytes", slow_upload)
+    response = client.put(url, headers=headers, files={"file": ("source.txt", b"original")})
+    assert response.status_code == 409
+    assert key not in storage.files
+
+
+def test_old_attempt_delete_never_removes_new_attempt_source(sources):
+    client, storage = sources
+    url, headers, legacy_key = location()
+    old_attempt, new_attempt = uuid4(), uuid4()
+    old_headers = {**headers, "X-Source-Attempt-Id": str(old_attempt)}
+    new_headers = {**headers, "X-Source-Attempt-Id": str(new_attempt)}
+    for request_headers in (old_headers, new_headers):
+        assert client.put(url, headers=request_headers, files={"file": ("source.txt", b"original")}).status_code == 201
+    assert client.delete(url, headers=old_headers).status_code == 204
+    assert client.get(url, headers=old_headers).status_code == 404
+    assert client.get(url, headers=new_headers).content == b"original"
+    assert list(storage.files) == [f"{legacy_key}/{new_attempt}"]
+
+
+def test_delete_waits_for_inflight_upload_before_removing_original(sources, monkeypatch):
+    client, storage = sources
+    url, headers, key = location()
+    entered, release, delete_waiting = Event(), Event(), Event()
+    original_upload = storage.upload_bytes
+
+    def blocked_upload(path, content):
+        entered.set()
+        assert release.wait(5)
+        original_upload(path, content)
+
+    from app.api.routes import source_files
+    original_lock = source_files.source_lock
+
+    class ObservedLock:
+        def __enter__(self):
+            delete_waiting.set()
+            original_lock(key).acquire()
+
+        def __exit__(self, *args):
+            original_lock(key).release()
+
+    monkeypatch.setattr(storage, "upload_bytes", blocked_upload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        put = pool.submit(client.put, url, headers=headers, files={"file": ("source.txt", b"original")})
+        assert entered.wait(5)
+        monkeypatch.setattr(source_files, "source_lock", lambda path: ObservedLock())
+        delete = pool.submit(client.delete, url, headers=headers)
+        try:
+            assert delete_waiting.wait(5)
+            assert not delete.done()
+        finally:
+            release.set()
+        assert put.result(timeout=5).status_code == 201
+        assert delete.result(timeout=5).status_code == 204
+    assert key not in storage.files
 
 
 def test_corrupted_source_does_not_return_content(sources):

@@ -5,6 +5,7 @@ UUID와 원본 SHA-256으로 경로를 구성한다. 임의 경로·파일명·�
 """
 
 from hashlib import sha256
+from threading import Lock
 from time import time
 from typing import Annotated
 from uuid import UUID
@@ -23,6 +24,14 @@ SettingsDependency = Annotated[Settings, Depends(get_settings)]
 ApiKey = Annotated[str, Header(alias="X-Internal-Api-Key")]
 TenantId = Annotated[UUID, Header(alias="X-Tenant-Id")]
 
+# 단일 워커에서 같은 원본의 DELETE가 진행 중 PUT을 앞지르지 않는다.
+# 고정된 수의 잠금을 사용해 문서 수에 따라 메모리가 증가하지 않게 한다.
+_source_locks = tuple(Lock() for _ in range(64))
+
+
+def source_lock(key: str):
+    return _source_locks[int.from_bytes(sha256(key.encode()).digest()[:2], "big") % len(_source_locks)]
+
 
 def get_source_storage(settings: SettingsDependency) -> SeaweedFsStorage:
     return SeaweedFsStorage(settings.seaweed_filer_url, min(settings.render_timeout_seconds, 30))
@@ -31,9 +40,10 @@ def get_source_storage(settings: SettingsDependency) -> SeaweedFsStorage:
 StorageDependency = Annotated[SeaweedFsStorage, Depends(get_source_storage)]
 
 
-def source_key(tenant_id: UUID, thread_id: UUID, document_id: UUID, digest: str) -> str:
+def source_key(tenant_id: UUID, thread_id: UUID, document_id: UUID, digest: str, attempt_id: UUID | None = None) -> str:
     # 파일명이 같아도 별도 문서다. 내용 digest까지 경로에 넣어 동일 요청 재시도만 같은 원본을 가리킨다.
-    return f"thread-sources/{tenant_id}/{thread_id}/{document_id}/{digest}"
+    key = f"thread-sources/{tenant_id}/{thread_id}/{document_id}/{digest}"
+    return key if attempt_id is None else f"{key}/{attempt_id}"
 
 
 @router.put("/{thread_id}/{document_id}/{digest}", status_code=201)
@@ -47,6 +57,7 @@ def save_source(
     tenant_id: TenantId,
     expires_at: Annotated[int, Header(alias="X-Source-Expires-At")],
     file: Annotated[UploadFile, File()],
+    attempt_id: Annotated[UUID | None, Header(alias="X-Source-Attempt-Id")] = None,
 ) -> dict[str, str | int]:
     # sync 경로이므로 파일 읽기와 저장소 통신은 FastAPI의 thread pool에서 실행된다.
     authorize(settings, internal_api_key, str(tenant_id))
@@ -57,12 +68,17 @@ def save_source(
         raise WorkerError(413, "FILE_TOO_LARGE", "Document source exceeds upload limit")
     if sha256(content).hexdigest() != digest:
         raise WorkerError(400, "SOURCE_DIGEST_MISMATCH", "Document source checksum does not match")
-    # BFF가 예약한 저장 기간을 지난 요청은 원본 정리 뒤 다시 쓰지 않는다.
-    if expires_at <= time():
-        raise WorkerError(409, "SOURCE_UPLOAD_EXPIRED", "Source upload reservation expired")
-    if expires_at > time() + 125:
-        raise WorkerError(400, "INVALID_SOURCE_EXPIRY", "Source upload expiry exceeds reservation window")
-    storage.upload_bytes(source_key(tenant_id, thread_id, document_id, digest), content)
+    key = source_key(tenant_id, thread_id, document_id, digest, attempt_id)
+    with source_lock(key):
+        # 잠금 대기와 실제 저장 후에도 검사한다. HTTPX timeout은 전체 처리 기한이 아니다.
+        if expires_at <= time():
+            raise WorkerError(409, "SOURCE_UPLOAD_EXPIRED", "Source upload reservation expired")
+        if expires_at > time() + 125:
+            raise WorkerError(400, "INVALID_SOURCE_EXPIRY", "Source upload expiry exceeds reservation window")
+        storage.upload_bytes(key, content)
+        if expires_at <= time():
+            storage.delete(key)
+            raise WorkerError(409, "SOURCE_UPLOAD_EXPIRED", "Source upload reservation expired")
     return {"documentId": str(document_id), "sha256": digest, "size": len(content)}
 
 
@@ -75,9 +91,10 @@ def read_source(
     storage: StorageDependency,
     internal_api_key: ApiKey,
     tenant_id: TenantId,
+    attempt_id: Annotated[UUID | None, Header(alias="X-Source-Attempt-Id")] = None,
 ) -> Response:
     authorize(settings, internal_api_key, str(tenant_id))
-    content = storage.read(source_key(tenant_id, thread_id, document_id, digest), settings.max_source_bytes)
+    content = storage.read(source_key(tenant_id, thread_id, document_id, digest, attempt_id), settings.max_source_bytes)
     if sha256(content).hexdigest() != digest:
         raise WorkerError(503, "SOURCE_INTEGRITY_ERROR", "Document source integrity check failed")
     # 브라우저 열람 이름·방 권한은 BFF가 정한다. 내부 API가 HTML 같은 업로드 내용을 실행하게 하지 않는다.
@@ -97,7 +114,10 @@ def delete_source(
     storage: StorageDependency,
     internal_api_key: ApiKey,
     tenant_id: TenantId,
+    attempt_id: Annotated[UUID | None, Header(alias="X-Source-Attempt-Id")] = None,
 ) -> Response:
     authorize(settings, internal_api_key, str(tenant_id))
-    storage.delete(source_key(tenant_id, thread_id, document_id, digest))
+    key = source_key(tenant_id, thread_id, document_id, digest, attempt_id)
+    with source_lock(key):
+        storage.delete(key)
     return Response(status_code=204)

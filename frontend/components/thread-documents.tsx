@@ -67,6 +67,9 @@ export function ThreadDocuments({
     setListing(null);
     setFile(null);
     setConfirmation(null);
+    setError('');
+    setBusy(false);
+    writing.current = false;
     uploadId.current = null;
     return () => {
       alive.current = false;
@@ -95,12 +98,13 @@ export function ThreadDocuments({
     writing.current = true;
     request.current?.abort();
     reading.current = false;
-    const version = ++sequence.current;
+    sequence.current += 1;
+    const generation = scope.current;
     setBusy(true);
     setError('');
     try {
       await action();
-      if (!alive.current || version !== sequence.current) return;
+      if (!alive.current || generation !== scope.current) return;
       setConfirmation(null);
       if (uploaded) {
         setFile(null);
@@ -110,19 +114,21 @@ export function ThreadDocuments({
       try {
         await refresh();
       } catch {
-        if (alive.current)
+        if (alive.current && generation === scope.current)
           setError(
             '변경은 저장됐지만 목록을 갱신하지 못했습니다. 목록을 다시 조회해주세요.',
           );
       }
     } catch (cause) {
-      if (alive.current && version === sequence.current)
+      if (alive.current && generation === scope.current)
         setError(
           cause instanceof Error ? cause.message : '문서 변경에 실패했습니다.',
         );
     } finally {
-      writing.current = false;
-      if (alive.current) setBusy(false);
+      if (alive.current && generation === scope.current) {
+        writing.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -225,7 +231,7 @@ export function ThreadDocuments({
                 </div>
                 <button
                   type="button"
-                  disabled={busy || doc.status === 'UPLOADING'}
+                  disabled={busy || !doc.canReadOriginal}
                   onClick={() => void download(doc.id, doc.fileName)}
                 >
                   원본
