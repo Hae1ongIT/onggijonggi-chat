@@ -35,6 +35,9 @@ const listing: api.ThreadDocumentsListing = {
   canUpload: true,
   documents: [doc],
 };
+function denied() {
+  return Object.assign(new Error('접근 불가'), { status: 404 });
+}
 function open() {
   fireEvent.click(screen.getByRole('button', { name: /방 문서/ }));
 }
@@ -206,18 +209,19 @@ describe('방 문서 실제 UI', () => {
       open();
       await screen.findByText('guide.txt');
       fireEvent.click(screen.getByRole('button', { name: '삭제' }));
-      expect(screen.getByRole('dialog')).toBeTruthy();
+      expect(screen.getByRole('alertdialog')).toBeTruthy();
       if (state === 'denied')
-        vi.mocked(api.listThreadDocuments).mockRejectedValue(
-          new Error('접근 불가'),
-        );
+        vi.mocked(api.listThreadDocuments).mockRejectedValue(denied());
       else
         vi.mocked(api.listThreadDocuments).mockResolvedValue({
           ...listing,
           documents: state === 'missing' ? [] : [{ ...doc, canDelete: false }],
         });
-      fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      // 확인창이 뒤 화면을 가리므로 다음 폴링 대신 숨은 버튼을 직접 누른다.
+      fireEvent.click(
+        screen.getByRole('button', { name: '목록 다시 조회', hidden: true }),
+      );
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
       expect(api.changeThreadDocument).not.toHaveBeenCalled();
     },
   );
@@ -338,12 +342,89 @@ describe('방 문서 실제 UI', () => {
     render(<ThreadDocuments threadId="room" />);
     open();
     await screen.findByText('guide.txt');
-    vi.mocked(api.listThreadDocuments).mockRejectedValue(
-      new Error('접근 불가'),
-    );
+    vi.mocked(api.listThreadDocuments).mockRejectedValue(denied());
     fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
     await screen.findByText('접근 불가');
     expect(screen.queryByText('guide.txt')).toBeNull();
+  });
+  it('일시적인 조회 실패는 마지막 목록과 확인창을 유지한다', async () => {
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '삭제' }));
+    vi.mocked(api.listThreadDocuments).mockRejectedValue(
+      Object.assign(new Error('저장소 장애'), { status: 503 }),
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: '목록 다시 조회', hidden: true }),
+    );
+    await screen.findByText('저장소 장애');
+    expect(screen.getByText('guide.txt')).toBeTruthy();
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+  });
+  it('조회 성공은 변경 실패 문구를 지우지 않는다', async () => {
+    vi.mocked(api.changeThreadDocument).mockRejectedValueOnce(
+      new Error('상태가 바뀜'),
+    );
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await screen.findByText('상태가 바뀜');
+    fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
+    await waitFor(() =>
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByText('상태가 바뀜')).toBeTruthy();
+  });
+  it('실패 뒤 최신 목록을 받으면 다음 변경은 새 요청 UUID를 쓴다', async () => {
+    vi.mocked(api.changeThreadDocument).mockRejectedValueOnce(
+      new Error('응답 유실'),
+    );
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    fireEvent.click(screen.getByRole('button', { name: '고정' }));
+    await screen.findByText('응답 유실');
+    fireEvent.click(screen.getByRole('button', { name: '목록 다시 조회' }));
+    await waitFor(() =>
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(2),
+    );
+    fireEvent.click(await screen.findByRole('button', { name: '고정' }));
+    await waitFor(() =>
+      expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+    expect(calls[1][3]).not.toBe(calls[0][3]);
+  });
+  it('탭이 가려진 동안은 폴링하지 않고 돌아오면 바로 갱신한다', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const visibility = vi.spyOn(document, 'visibilityState', 'get');
+    try {
+      render(<ThreadDocuments threadId="room" />);
+      open();
+      await screen.findByText('guide.txt');
+      visibility.mockReturnValue('hidden');
+      await act(async () => vi.advanceTimersByTime(30_000));
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue('visible');
+      await act(async () =>
+        document.dispatchEvent(new Event('visibilitychange')),
+      );
+      expect(api.listThreadDocuments).toHaveBeenCalledTimes(2);
+    } finally {
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+  it('작업 버튼은 어느 문서의 것인지 설명으로 알린다', async () => {
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    for (const name of ['원본', '고정', '삭제'])
+      expect(
+        screen.getByRole('button', { name, description: 'guide.txt' }),
+      ).toBeTruthy();
   });
   it('중복 제출을 같은 이벤트 회차에서도 차단한다', async () => {
     vi.mocked(api.changeThreadDocument).mockImplementation(

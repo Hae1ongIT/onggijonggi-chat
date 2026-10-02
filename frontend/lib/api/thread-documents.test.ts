@@ -38,6 +38,6 @@ it('실 BFF 오류는 code 문구를 쓰고 서버 message는 보이지 않는�
 it('봉투가 없는 응답(목업)은 상태 코드로 문구를 고른다', async () => {
   fetcher.mockResolvedValue(new Response(null, { status: 415 }));
   await expect(downloadThreadDocument('room', 'doc')).rejects.toThrow(
-    'TXT, MD, CSV, PDF, DOCX 파일만 등록할 수 있습니다.',
+    'TXT·MD·CSV·PDF·DOCX 파일만 등록할 수 있어요.',
   );
 });
