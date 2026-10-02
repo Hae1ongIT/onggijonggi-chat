@@ -323,13 +323,18 @@ public class ThreadDocumentService {
 				registered && !Set.of("UPLOADING", "DELETED").contains(doc.status()), doc.created());
 	}
 	private void validate(String name, byte[] content) {
+		// 방향 제어 문자는 목록·내려받은 이름의 확장자를 다르게 보이게 한다(예: report‮fdp.txt가 reporttxt.pdf로 보임).
 		if (name == null || name.isBlank() || name.length() > 255 || name.chars().anyMatch(Character::isISOControl)
+				|| name.chars().anyMatch(ThreadDocumentService::bidiControl)
 				|| name.contains("/") || name.contains("\\")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
 		int dot = name.lastIndexOf('.');
 		if (dot < 0 || !EXTENSIONS.contains(name.substring(dot + 1).toLowerCase(Locale.ROOT)))
 			throw ThreadDocumentException.unsupportedFile();
 		if (content.length == 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
 		if (content.length > MAX_FILE_BYTES) throw ThreadDocumentException.tooLarge();
+	}
+	private static boolean bidiControl(int c) {
+		return c == 0x061C || c == 0x200E || c == 0x200F || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069);
 	}
 	static String digest(byte[] bytes) {
 		try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }

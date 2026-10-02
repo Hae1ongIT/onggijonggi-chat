@@ -9,9 +9,11 @@ import com.onggijonggi.api.chat.ThreadDocumentException;
 import com.openai.errors.OpenAIServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -114,6 +116,17 @@ public class GlobalExceptionHandler {
 			log.warn("문서 원본 저장소 요청 실패(traceId={})", traceId(exchange), ex.getCause());
 		return ResponseEntity.status(ex.getStatusCode())
 				.body(ErrorResponse.of(ex.getCode(), ex.getReason(), traceId(exchange)));
+	}
+
+	/** 코덱 상한에서 끊긴 본문 — 아니면 처리되지 않은 예외(500)가 된다. 멀티파트는 파서의 파트 크기 상한
+	 * (spring.webflux.multipart.max-disk-usage-per-part)이고, 첨부·방 문서 모두 10MiB 상한이라 컨트롤러가 내는 크기 초과와
+	 * 같은 code로 답한다. 그 밖의 본문(JSON 등)은 파일이 아니므로 일반 요청 오류 code로 둔다. */
+	@ExceptionHandler(DataBufferLimitException.class)
+	public ResponseEntity<ErrorResponse> handleBodyLimit(DataBufferLimitException ex, ServerWebExchange exchange) {
+		boolean multipart = MediaType.MULTIPART_FORM_DATA.isCompatibleWith(exchange.getRequest().getHeaders().getContentType());
+		return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).body(multipart
+				? ErrorResponse.of("FILE_TOO_LARGE", "파일이 너무 큽니다.", traceId(exchange))
+				: ErrorResponse.of("REQUEST_ERROR", "요청 본문이 너무 큽니다.", traceId(exchange)));
 	}
 
 	/** Workspace·부여·org-unit 관리(#260)가 현재 권한 구성 상태 때문에 거부된 경우(선언 리소스, 마지막 ADMIN, 남은 방 등).

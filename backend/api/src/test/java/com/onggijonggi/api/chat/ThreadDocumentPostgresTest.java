@@ -233,6 +233,7 @@ class ThreadDocumentPostgresTest {
 
 	@Test void invalidFileAndMismatchedRegistrationAreRejected() {
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "../x.txt", bytes), HttpStatus.BAD_REQUEST);
+		status(() -> service.upload(room, UUID.randomUUID(), owner, "report‮fdp.txt", bytes), HttpStatus.BAD_REQUEST);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.exe", bytes), HttpStatus.UNSUPPORTED_MEDIA_TYPE);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.txt", new byte[0]), HttpStatus.BAD_REQUEST);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.txt", new byte[ThreadDocumentService.MAX_FILE_BYTES+1]), HttpStatus.CONTENT_TOO_LARGE);

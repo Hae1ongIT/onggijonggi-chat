@@ -152,7 +152,8 @@ export function ThreadDocuments({
       link.href = url;
       link.download = name;
       link.click();
-      URL.revokeObjectURL(url);
+      // 같은 틱에 해제하면 일부 브라우저가 내려받기를 시작하기 전에 취소한다.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (cause) {
       if (alive.current && generation === scope.current)
         setError(

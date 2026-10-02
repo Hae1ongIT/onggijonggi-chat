@@ -112,6 +112,24 @@ class ThreadDocumentHttpTest {
 		verify(documents, never()).upload(any(), any(), any(), anyString(), any());
 	}
 
+	/** 파서 단계 상한(11MB)을 넘는 본문은 임시 디스크를 더 쓰기 전에 끊고 서비스에 닿지 않는다. */
+	@Test
+	void bodyBeyondTheParserLimitNeverReachesTheService() {
+		MultipartBodyBuilder body = new MultipartBodyBuilder();
+		body.part("file", new ByteArrayResource(new byte[12 * 1024 * 1024]) {
+			@Override public String getFilename() { return "huge.txt"; }
+		});
+
+		client.post().uri("/api/threads/" + room + "/documents?documentId=" + document)
+				.header(HttpHeaders.AUTHORIZATION, bearer())
+				.contentType(MediaType.MULTIPART_FORM_DATA)
+				.body(body.build())
+				.exchange()
+				.expectStatus().isEqualTo(HttpStatus.CONTENT_TOO_LARGE)
+				.expectBody().jsonPath("$.error.code").isEqualTo("FILE_TOO_LARGE");
+		verify(documents, never()).upload(any(), any(), any(), anyString(), any());
+	}
+
 	private static String bearer() {
 		return "Bearer " + TestJwtSupport.signedJwt("doc-http-user", List.of("USER"));
 	}

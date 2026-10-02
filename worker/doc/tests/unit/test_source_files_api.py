@@ -80,11 +80,12 @@ def test_source_round_trip_and_idempotent_delete(sources):
     assert client.get(url, headers=headers).status_code == 404
 
 
+@pytest.mark.parametrize("key", ["incorrect", "키".encode()])
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
-def test_internal_key_required_before_storage_access(sources, method):
+def test_internal_key_required_before_storage_access(sources, method, key):
     client, storage = sources
     url, headers, _ = location()
-    headers["X-Internal-Api-Key"] = "incorrect"
+    headers["X-Internal-Api-Key"] = key
     kwargs = {"files": {"file": ("source.txt", b"original")}} if method == "put" else {}
     assert getattr(client, method)(url, headers=headers, **kwargs).status_code == 401
     assert storage.calls == []
