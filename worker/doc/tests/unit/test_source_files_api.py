@@ -91,6 +91,15 @@ def test_internal_key_required_before_storage_access(sources, method, key):
     assert storage.calls == []
 
 
+def test_declared_oversized_body_is_rejected_before_parsing(sources):
+    client, storage = sources
+    url, headers, _ = location()
+    response = client.put(url, headers=headers, files={"file": ("source.txt", b"x" * (70 * 1024))})
+    assert response.status_code == 413
+    assert response.json()["code"] == "FILE_TOO_LARGE"
+    assert storage.calls == []
+
+
 @pytest.mark.parametrize("content, status, code", [
     (b"", 400, "EMPTY_SOURCE"),
     (b"x" * 17, 413, "FILE_TOO_LARGE"),

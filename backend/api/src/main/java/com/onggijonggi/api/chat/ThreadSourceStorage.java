@@ -3,12 +3,15 @@ package com.onggijonggi.api.chat;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 /**
  * Class Name : ThreadSourceStorage.java
@@ -16,6 +19,7 @@ import org.springframework.web.reactive.function.client.WebClient;
  */
 @Component
 public class ThreadSourceStorage {
+	private static final Logger log = LoggerFactory.getLogger(ThreadSourceStorage.class);
 	private final WebClient client;
 	private final String apiKey;
 
@@ -67,7 +71,18 @@ public class ThreadSourceStorage {
 		} catch (RuntimeException error) { throw unavailable(error); }
 	}
 
+	/**
+	 * 사용자에게는 모두 저장소 장애(503)로 답하지만, 워커의 4xx는 재시도로 풀리지 않는 설정·데이터 문제다(내부 key 불일치,
+	 * 시계 차이로 만료 거부, 워커 크기 상한이 BFF보다 낮음, 등록된 원본 유실). 그래서 상태와 워커의 오류 본문(code·message·
+	 * requestId, 비밀값 없음)을 error로 남긴다. 네트워크·5xx는 일시 장애라 GlobalExceptionHandler의 warn으로 충분하다.
+	 */
 	private ThreadDocumentException unavailable(RuntimeException error) {
+		if (error instanceof WebClientResponseException response && response.getStatusCode().is4xxClientError()) {
+			String body = response.getResponseBodyAsString();
+			log.error("문서 워커가 요청을 거절했다 — 내부 key·시계·크기 설정이나 원본 유실을 확인해야 한다: {} {} {}",
+					response.getRequest() == null ? "" : response.getRequest().getMethod(), response.getStatusCode().value(),
+					body.length() > 300 ? body.substring(0, 300) : body);
+		}
 		return ThreadDocumentException.storageUnavailable(error);
 	}
 }

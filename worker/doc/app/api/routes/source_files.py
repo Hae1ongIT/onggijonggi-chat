@@ -18,15 +18,17 @@ from app.errors import WorkerError
 from app.storage.seaweedfs import SeaweedFsStorage
 
 
-router = APIRouter(prefix="/api/v1/thread-sources", tags=["thread-sources"])
+SOURCE_PATH_PREFIX = "/api/v1/thread-sources/"
+router = APIRouter(prefix=SOURCE_PATH_PREFIX.rstrip("/"), tags=["thread-sources"])
 Digest = Annotated[str, Path(pattern=r"^[a-f0-9]{64}$")]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
 ApiKey = Annotated[str, Header(alias="X-Internal-Api-Key")]
 TenantId = Annotated[UUID, Header(alias="X-Tenant-Id")]
 
 # 단일 워커에서 같은 원본의 DELETE가 진행 중 PUT을 앞지르지 않는다.
-# 고정된 수의 잠금을 사용해 문서 수에 따라 메모리가 증가하지 않게 한다.
-_source_locks = tuple(Lock() for _ in range(64))
+# 고정된 수의 잠금을 사용해 문서 수에 따라 메모리가 증가하지 않게 한다. 다른 원본이 같은 칸에 걸리면 느린 저장을
+# 기다리다 예약이 만료될 수 있어, 칸 수를 넉넉히 둔다(두 원본이 겹칠 확률 1/1024).
+_source_locks = tuple(Lock() for _ in range(1024))
 
 
 def source_lock(key: str):
