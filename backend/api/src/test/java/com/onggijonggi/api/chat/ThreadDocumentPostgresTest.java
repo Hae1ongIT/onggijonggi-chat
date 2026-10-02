@@ -135,6 +135,38 @@ class ThreadDocumentPostgresTest {
 		}
 	}
 
+	@Test void retransmittedChangeStillSucceedsAfterTheRoomIsLocked() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		UUID request = UUID.randomUUID();
+		service.change(room, id, owner, "PINNED", request);
+		jdbc.update("update thr set status='LOCKED',locked_at=now() where id=?", room);
+		service.change(room, id, owner, "PINNED", request);
+		status(() -> service.change(room, id, owner, "UNPINNED", UUID.randomUUID()), HttpStatus.CONFLICT);
+		assertThat(events(id)).isEqualTo(2);
+	}
+
+	@Test void originalDeletedWhileReadingIsNotFoundAndPlainOutageIsUnavailable() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		when(storage.read(any(), any(), any(), any(), any()))
+				.thenThrow(ThreadDocumentException.storageUnavailable(new IllegalStateException("워커 장애")));
+		status(() -> service.original(room, id, owner), HttpStatus.SERVICE_UNAVAILABLE);
+		doAnswer(invocation -> {
+			jdbc.update("update thr_doc set status='DELETED',pnn=false,deleted_at=now() where id=?", id);
+			throw ThreadDocumentException.storageUnavailable(new IllegalStateException("워커 404"));
+		}).when(storage).read(any(), any(), any(), any(), any());
+		status(() -> service.original(room, id, owner), HttpStatus.NOT_FOUND);
+	}
+
+	@Test void cleanupDeletesTheSourceWithoutHoldingTheDocumentRowLock() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		service.change(room, id, owner, "DELETED", UUID.randomUUID());
+		doAnswer(invocation -> jdbc.queryForList("select id from thr_doc where id=? for update nowait", id))
+				.when(storage).delete(any(), any(), any(), any(), any());
+		service.cleanupDue();
+		verify(storage).delete(eq(tenant), eq(room), eq(id), eq(ThreadDocumentService.digest(bytes)), any());
+		assertThat(jdbc.queryForObject("select count(*) from thr_doc_end", Integer.class)).isZero();
+	}
+
 	@Test void latestWorkspaceAndAccountAuthorizationIsRequiredIncludingOriginalSecondCheck() {
 		UUID id = UUID.randomUUID(); upload(id, owner);
 		when(authorizer.canViewBlocking(anyString(), any())).thenReturn(false);

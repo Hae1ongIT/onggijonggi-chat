@@ -59,7 +59,7 @@ public class ThreadDocumentController {
 					} finally { DataBufferUtils.release(buffer); }
 				})
 				.switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST)))
-				.onErrorMap(DataBufferLimitException.class, error -> new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE))
+				.onErrorMap(DataBufferLimitException.class, error -> ThreadDocumentException.tooLarge())
 				.publishOn(Schedulers.boundedElastic())
 				.map(bytes -> documents.upload(threadId, documentId, actor, file.filename(), bytes)));
 	}

@@ -43,6 +43,8 @@ import org.springframework.web.server.ResponseStatusException;
 public class ThreadDocumentService {
 	public static final int MAX_FILE_BYTES = 10 * 1024 * 1024;
 	private static final Logger log = LoggerFactory.getLogger(ThreadDocumentService.class);
+	/** 이 횟수부터 정리 실패를 error로 올린다(30초 간격이라 약 5분). */
+	private static final int CLEANUP_ALERT_ATTEMPTS = 10;
 	private static final Set<String> EXTENSIONS = Set.of("txt", "md", "csv", "pdf", "docx");
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate transactions;
@@ -74,15 +76,18 @@ public class ThreadDocumentService {
 
 	private Access access(UUID threadId, CurrentActor actor, boolean write) {
 		// Tenant 범위 권한 변경과 동일한 잠금 순서다. 읽기·원본 전송도 최신 판정 뒤 진행한다.
-		Thr initial = threads.findById(threadId).orElseThrow(ThreadDocumentService::notFound);
-		if (initial.getTenantId() == null) throw notFound();
-		jdbc.queryForList("select id from tnn where id = ? for update", initial.getTenantId());
-		Thr thread = threads.findByIdForSeqUpdate(threadId).orElseThrow(ThreadDocumentService::notFound);
+		// 공유 잠금이라 권한 변경·방 상태 변경·참여 종료(배타 잠금·UPDATE)와는 직렬화되지만, 문서 요청끼리는
+		// 서로 막지 않는다. 문서 변경끼리의 직렬화는 thr_doc 행 잠금이 맡는다. 배타 잠금이면 목록 폴링만으로
+		// 같은 Tenant의 문서 요청·방 생성(FK key-share)·채팅 seq 예약이 한 줄로 밀린다.
+		Thr thread = threads.findById(threadId).orElseThrow(ThreadDocumentService::notFound);
+		if (thread.getTenantId() == null) throw notFound();
+		jdbc.queryForList("select id from tnn where id = ? for share", thread.getTenantId());
+		if (jdbc.queryForList("select id from thr where id = ? for share", threadId).isEmpty()) throw notFound();
 		entityManager.refresh(thread);
 		if (users.findById(actor.userId()).filter(user -> user.getStatus() == AppUserStatus.ACTIVE).isEmpty())
 			throw notFound();
 		// 같은 참여 행을 잠가 문서 인가와 참여 종료가 서로 앞서 확정되지 않게 한다.
-		if (jdbc.queryForList("select id from thr_mbr where thr_id = ? and user_id = ? and status = 'ACTIVE' for update",
+		if (jdbc.queryForList("select id from thr_mbr where thr_id = ? and user_id = ? and status = 'ACTIVE' for share",
 				threadId, actor.userId()).isEmpty()) throw notFound();
 		var member = memberships.findByThrIdAndUserIdAndStatus(threadId, actor.userId(), ThrMbrStatus.ACTIVE)
 				.orElseThrow(ThreadDocumentService::notFound);
@@ -98,8 +103,10 @@ public class ThreadDocumentService {
 	public ThreadDocumentView.Listing list(UUID thread, CurrentActor actor) {
 		return transactions.execute(tx -> {
 			Access access = access(thread, actor, false);
+			Set<UUID> registered = Set.copyOf(jdbc.queryForList(
+					"select doc_id from thr_doc_evt where thr_id = ? and evt_kind = 'REGISTERED'", UUID.class, thread));
 			List<ThreadDocumentView> values = jdbc.query("select * from thr_doc where thr_id = ? and status <> 'DELETED' order by created_at, id",
-					this::document, thread).stream().map(doc -> view(doc, access)).toList();
+					this::document, thread).stream().map(doc -> view(doc, access, registered.contains(doc.id()))).toList();
 			return new ThreadDocumentView.Listing(access.thread().getStatus().name(), access.writable(), values);
 		});
 	}
@@ -170,7 +177,9 @@ public class ThreadDocumentService {
 	public void change(UUID thread, UUID id, CurrentActor actor, String action, UUID requestId) {
 		if (!Set.of("PINNED", "UNPINNED", "DELETED").contains(action)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
 		transactions.executeWithoutResult(tx -> {
-			Access access = access(thread, actor, true);
+			// 방 상태(쓰기 가능)보다 재전송 여부를 먼저 본다. 이미 반영된 변경의 응답이 유실된 뒤 방이 잠겼어도
+			// 재전송은 성공으로 끝나야 한다. 접근권 자체는 재전송에도 최신 기준으로 다시 확인한다.
+			Access access = access(thread, actor, false);
 			Document doc = findIn(thread, id);
 			if (!action.equals("PINNED") && !access.owner() && !doc.uploader().equals(actor.userId()))
 				throw new ResponseStatusException(HttpStatus.FORBIDDEN);
@@ -179,6 +188,7 @@ public class ThreadDocumentService {
 				if (!action.equals(previous.get(0).get("evt_kind")) || !actor.userId().equals(previous.get(0).get("act_user_id"))) throw conflict();
 				return;
 			}
+			if (!access.writable()) throw conflict();
 			if (doc.status().equals("UPLOADING")) throw conflict();
 			if (doc.status().equals("DELETED")) throw notFound();
 			if (!action.equals("DELETED") && !registered(id)) throw conflict();
@@ -199,13 +209,22 @@ public class ThreadDocumentService {
 			if (value.status().equals("DELETED") || value.status().equals("UPLOADING") || !registered(id)) throw notFound();
 			return value;
 		});
-		byte[] bytes = storage.read(doc.tenant(), thread, id, doc.digest(), doc.attempt());
-		if (!digest(bytes).equals(doc.digest())) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
-		// 저장소에서 읽는 동안 방/문서 접근권이 사라졌으면 응답 본문을 전달하지 않는다.
-		transactions.executeWithoutResult(tx -> {
+		// 저장소에서 읽는 동안 방/문서 접근권이 사라졌으면 응답 본문을 전달하지 않는다. 읽기가 실패해도 먼저
+		// 재검증한다 — 그사이 삭제·정리된 원본의 워커 404가 저장소 장애(503)로 보이지 않고 404가 되게 한다.
+		Runnable recheck = () -> transactions.executeWithoutResult(tx -> {
 			access(thread, actor, false);
 			if (findIn(thread, id).status().equals("DELETED")) throw notFound();
 		});
+		byte[] bytes;
+		try {
+			bytes = storage.read(doc.tenant(), thread, id, doc.digest(), doc.attempt());
+		} catch (ThreadDocumentException unavailable) {
+			recheck.run();
+			throw unavailable;
+		}
+		if (!digest(bytes).equals(doc.digest()))
+			throw ThreadDocumentException.storageUnavailable(new IllegalStateException("원본 digest 불일치: " + id));
+		recheck.run();
 		return new Original(doc.name(), bytes);
 	}
 
@@ -224,34 +243,47 @@ public class ThreadDocumentService {
 		cleanupDue();
 	}
 
-	/** 제어된 테스트와 운영 스케줄러가 같은 정리 루프를 사용한다. */
+	/**
+	 * 제어된 테스트와 운영 스케줄러가 같은 정리 루프를 사용한다. 원본 삭제(HTTP, 최대 60초) 동안 DB 잠금·커넥션을
+	 * 쥐지 않도록 짧은 트랜잭션으로 작업을 선점하고, 잠금 밖에서 지운 뒤 다시 짧게 확정한다. 정리 행이 남아 있는 동안은
+	 * 같은 문서의 재등록이 409로 막히고 시도 경로도 고정이라, 잠금을 놓아도 지울 원본이 다시 필요해지지 않는다.
+	 */
 	public void cleanupDue() {
 		List<UUID> due = jdbc.query("select doc_id from thr_doc_end where next_at <= now() order by next_at limit 20",
 				(rs, row) -> rs.getObject(1, UUID.class));
 		for (UUID id : due) {
 			try {
-				transactions.executeWithoutResult(tx -> {
-					Document doc = find(id, true);
-					var rows = jdbc.queryForList("select * from thr_doc_end where doc_id = ? and next_at <= now() for update", id);
-					if (rows.isEmpty()) return;
-					var job = rows.get(0);
-					if (doc != null && (!Set.of("UPLOADING", "DELETED", "FAILED").contains(doc.status())
-							|| (doc.status().equals("FAILED") && registered(id)))) {
-						jdbc.update("delete from thr_doc_end where doc_id = ?", id);
-						return;
-					}
-					if (doc != null && doc.status().equals("UPLOADING"))
-						jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_EXPIRED', updated_at = now() where id = ?", id);
-					try {
-						storage.delete((UUID) job.get("tnn_id"), (UUID) job.get("thr_id"), id, (String) job.get("src_key"), (UUID) job.get("src_att_id"));
-						jdbc.update("delete from thr_doc_end where doc_id = ?", id);
-					} catch (RuntimeException failure) {
-						jdbc.update("update thr_doc_end set att_cnt = att_cnt + 1, err = 'SOURCE_DELETE_FAILED', next_at = now() + interval '30 seconds' where doc_id = ?", id);
-						log.warn("원본 정리 재시도 대기: {}", id);
-					}
-				});
+				var job = transactions.execute(tx -> claimCleanup(id));
+				if (job == null) continue;
+				try {
+					storage.delete((UUID) job.get("tnn_id"), (UUID) job.get("thr_id"), id, (String) job.get("src_key"), (UUID) job.get("src_att_id"));
+					transactions.executeWithoutResult(tx -> jdbc.update("delete from thr_doc_end where doc_id = ?", id));
+				} catch (RuntimeException failure) {
+					List<Integer> attempts = transactions.execute(tx -> jdbc.queryForList(
+							"update thr_doc_end set att_cnt = att_cnt + 1, err = 'SOURCE_DELETE_FAILED', next_at = now() + interval '30 seconds' where doc_id = ? returning att_cnt",
+							Integer.class, id));
+					int count = attempts.isEmpty() ? 0 : attempts.get(0);
+					if (count >= CLEANUP_ALERT_ATTEMPTS) log.error("원본 정리가 {}회 연속 실패했다 — 워커·저장소 확인 필요: {}", count, id, failure);
+					else log.warn("원본 정리 재시도 대기({}회): {}", count, id, failure);
+				}
 			} catch (RuntimeException failure) { log.error("원본 정리 트랜잭션 실패: {}", id, failure); }
 		}
+	}
+
+	/** 정리할 원본이면 다음 시각을 삭제 대기보다 길게 미뤄 선점하고 그 작업을 돌려준다. 이 BFF가 도중에 멈춰도 선점이 끝나면 다시 집힌다. */
+	private java.util.Map<String, Object> claimCleanup(UUID id) {
+		Document doc = find(id, true);
+		var rows = jdbc.queryForList("select * from thr_doc_end where doc_id = ? and next_at <= now() for update", id);
+		if (rows.isEmpty()) return null;
+		if (doc != null && (!Set.of("UPLOADING", "DELETED", "FAILED").contains(doc.status())
+				|| (doc.status().equals("FAILED") && registered(id)))) {
+			jdbc.update("delete from thr_doc_end where doc_id = ?", id);
+			return null;
+		}
+		if (doc != null && doc.status().equals("UPLOADING"))
+			jdbc.update("update thr_doc set status = 'FAILED', err = 'SOURCE_UPLOAD_EXPIRED', updated_at = now() where id = ?", id);
+		jdbc.update("update thr_doc_end set next_at = now() + interval '90 seconds' where doc_id = ?", id);
+		return rows.get(0);
 	}
 
 	private void queue(Document doc, int seconds) {
@@ -280,10 +312,12 @@ public class ThreadDocumentService {
 				rs.getObject("src_att_id", UUID.class), rs.getString("status"), rs.getBoolean("pnn"), rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
 	}
 	private ThreadDocumentView view(Document doc, Access access) {
+		return view(doc, access, registered(doc.id()));
+	}
+	private ThreadDocumentView view(Document doc, Access access, boolean registered) {
 		boolean own = doc.uploader().equals(access.user());
 		boolean writable = access.writable() && !Set.of("UPLOADING", "DELETED").contains(doc.status());
 		boolean manageable = writable && (own || access.owner());
-		boolean registered = registered(doc.id());
 		return new ThreadDocumentView(doc.id(), doc.name(), doc.size(), doc.status(), doc.pinned(), own,
 				writable && registered, manageable && registered, manageable,
 				registered && !Set.of("UPLOADING", "DELETED").contains(doc.status()), doc.created());
@@ -293,14 +327,14 @@ public class ThreadDocumentService {
 				|| name.contains("/") || name.contains("\\")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
 		int dot = name.lastIndexOf('.');
 		if (dot < 0 || !EXTENSIONS.contains(name.substring(dot + 1).toLowerCase(Locale.ROOT)))
-			throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+			throw ThreadDocumentException.unsupportedFile();
 		if (content.length == 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
-		if (content.length > MAX_FILE_BYTES) throw new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE);
+		if (content.length > MAX_FILE_BYTES) throw ThreadDocumentException.tooLarge();
 	}
 	static String digest(byte[] bytes) {
 		try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
 		catch (java.security.NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
 	}
 	private static ResponseStatusException notFound() { return new ResponseStatusException(HttpStatus.NOT_FOUND); }
-	private static ResponseStatusException conflict() { return new ResponseStatusException(HttpStatus.CONFLICT); }
+	private static ThreadDocumentException conflict() { return ThreadDocumentException.conflict(); }
 }

@@ -26,6 +26,8 @@ export type BffErrorCode =
   | 'EMPTY_FILE_TEXT' // 422 CORE — 첨부에서 글자를 못 찾음(스캔 PDF 등)
   | 'UNREADABLE_FILE' // 422 CORE — 첨부가 손상됐거나 암호가 걸림
   | 'INVALID_ATTACHMENT' // 400·WS CORE — 발화에 실은 첨부가 없거나 이미 쓰였거나 개수 초과
+  | 'DOCUMENT_STATE_CONFLICT' // 409 CORE — 방 문서가 잠긴 방·업로드 중·이미 그 상태라 지금은 바꿀 수 없음
+  | 'DOCUMENT_STORAGE_UNAVAILABLE' // 503 CORE — 방 문서 원본 저장소(문서 워커)에 저장·조회하지 못함
   | 'SERVICE_UNAVAILABLE' // 503 CORE·WS — 새 대화를 놓을 고객사(Tenant)를 정할 수 없음(서버 설정 문제)
   | 'KEYCLOAK_ADMIN_UNAVAILABLE'; // 503 CORE — BFF의 Keycloak 관리 클라이언트 설정 문제(토큰 발급 거부·역할 누락)
 
@@ -60,6 +62,12 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   // 다시 시도해도 같다 — 배포 설정이 정한 리소스이거나, 마지막 관리자·남은 방·남은 배정을 먼저 정리해야 풀린다.
   RBAC_STATE_CONFLICT:
     '지금 권한 구성으로는 바꿀 수 없어요. 먼저 정리해야 할 항목이 있는지 확인해 주세요.',
+  // 남이 먼저 바꿨거나 방이 잠겼다 — 다시 불러오면 지금 할 수 있는 작업이 보인다.
+  DOCUMENT_STATE_CONFLICT:
+    '방이나 문서 상태가 방금 바뀌었어요. 목록을 새로고침한 뒤 다시 시도해 주세요.',
+  // 서버 설정 문제(SERVICE_UNAVAILABLE)와 달리 저장소가 돌아오면 같은 요청이 성공한다.
+  DOCUMENT_STORAGE_UNAVAILABLE:
+    '문서 저장소에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.',
   MESSAGE_DELIVERY_FAILED:
     '메시지를 전달하지 못했어요. 연결을 확인하고 다시 보내 주세요.',
   // 재시도로 풀리지 않는다 — 새 대화를 놓을 조직 설정이 서버에 아직 없거나 둘 이상이라 관리자가 고쳐야 한다.

@@ -5,6 +5,7 @@ import com.onggijonggi.api.authz.RbacStateConflictException;
 import com.onggijonggi.api.chat.IdempotencyKeyConflictException;
 import com.onggijonggi.api.chat.InviteeOutsideWorkspaceException;
 import com.onggijonggi.api.chat.MsgFileRejectedException;
+import com.onggijonggi.api.chat.ThreadDocumentException;
 import com.openai.errors.OpenAIServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -103,6 +104,16 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ErrorResponse> handleMsgFileRejected(MsgFileRejectedException ex, ServerWebExchange exchange) {
 		return ResponseEntity.status(ex.getStatus())
 				.body(ErrorResponse.of(ex.getCode(), ex.getMessage(), traceId(exchange)));
+	}
+
+	/** 방 문서(#338)가 문서 고유의 이유로 거부된 경우. 원본 저장소 장애(503)는 사용자에게 재시도만 안내하고 원인은
+	 * 서버에만 남는다 — 이 핸들러가 아니면 503이 로그 없이 사라진다. */
+	@ExceptionHandler(ThreadDocumentException.class)
+	public ResponseEntity<ErrorResponse> handleThreadDocument(ThreadDocumentException ex, ServerWebExchange exchange) {
+		if (ex.getStatusCode().is5xxServerError())
+			log.warn("문서 원본 저장소 요청 실패(traceId={})", traceId(exchange), ex.getCause());
+		return ResponseEntity.status(ex.getStatusCode())
+				.body(ErrorResponse.of(ex.getCode(), ex.getReason(), traceId(exchange)));
 	}
 
 	/** Workspace·부여·org-unit 관리(#260)가 현재 권한 구성 상태 때문에 거부된 경우(선언 리소스, 마지막 ADMIN, 남은 방 등).

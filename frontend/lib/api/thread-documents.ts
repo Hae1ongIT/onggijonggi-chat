@@ -1,5 +1,6 @@
 /** Thread 문서는 사용자 토큰으로 BFF만 호출한다. 재시도에도 등록·변경 식별자는 유지한다. */
 import { bffUrl } from './config';
+import { friendlyMessageForCode, parseErrorEnvelope } from './errors';
 import { authFetch } from './http';
 
 export interface ThreadDocument {
@@ -38,8 +39,11 @@ async function fetchDocument(
   }
 }
 
+// 실 BFF는 에러 봉투의 code로 문구를 고른다. 봉투가 없는 응답(목업·프록시)만 상태 코드로 고른다.
 async function checked(response: Response): Promise<Response> {
   if (response.ok) return response;
+  const envelope = parseErrorEnvelope(await response.text().catch(() => ''));
+  if (envelope?.code) throw new Error(friendlyMessageForCode(envelope.code));
   const messages: Record<number, string> = {
     400: '파일과 입력값을 확인해주세요.',
     401: '다시 로그인해주세요.',
