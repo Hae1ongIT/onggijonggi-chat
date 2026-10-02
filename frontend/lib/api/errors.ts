@@ -21,8 +21,8 @@ export type BffErrorCode =
   | 'RBAC_STATE_CONFLICT' // 409 CORE — Workspace·부여 관리가 현재 권한 구성 때문에 거부됨(선언 리소스, 마지막 ADMIN 등)
   | 'MODEL_UNAVAILABLE' // 502 CORE — 게이트웨이가 모델 호출을 거절
   | 'MESSAGE_DELIVERY_FAILED' // WS — 협업방 메시지 방송 실패
-  | 'UNSUPPORTED_FILE' // 400 CORE — 첨부 형식이 txt·md·csv·pdf·docx가 아님
-  | 'FILE_TOO_LARGE' // 413 CORE — 첨부가 크기 상한을 넘음
+  | 'UNSUPPORTED_FILE' // 400·415 CORE — 첨부·방 문서 형식이 txt·md·csv·pdf·docx가 아님(방 문서는 415)
+  | 'FILE_TOO_LARGE' // 413 CORE — 첨부·방 문서가 크기 상한을 넘음
   | 'EMPTY_FILE_TEXT' // 422 CORE — 첨부에서 글자를 못 찾음(스캔 PDF 등)
   | 'UNREADABLE_FILE' // 422 CORE — 첨부가 손상됐거나 암호가 걸림
   | 'INVALID_ATTACHMENT' // 400·WS CORE — 발화에 실은 첨부가 없거나 이미 쓰였거나 개수 초과
@@ -85,8 +85,9 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   // 그 사이 보낸 메시지는 들어가지 않았을 수 있다.
   NOT_SUBSCRIBED:
     '방 연결이 잠시 끊겨 다시 연결했어요. 방금 보낸 메시지가 보이지 않으면 다시 보내 주세요.',
-  UNSUPPORTED_FILE: 'txt·md·csv·pdf·docx 파일만 첨부할 수 있어요.',
-  FILE_TOO_LARGE: '파일은 10MB까지 첨부할 수 있어요.',
+  // 입력창 첨부와 방 문서 등록이 같은 code를 쓰므로 "첨부"라고 하지 않는다.
+  UNSUPPORTED_FILE: 'txt·md·csv·pdf·docx 파일만 올릴 수 있어요.',
+  FILE_TOO_LARGE: '파일은 10MB까지 올릴 수 있어요.',
   EMPTY_FILE_TEXT:
     '파일에서 글자를 찾지 못했어요. 스캔한 PDF처럼 이미지로만 된 파일은 읽을 수 없어요.',
   UNREADABLE_FILE:

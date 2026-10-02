@@ -71,6 +71,8 @@ export class ThreadDocumentsMock {
           (character) =>
             character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
         ) ||
+        // 서버와 같이 방향 제어 문자(확장자 위장)를 거부한다.
+        /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(file.name) ||
         file.name.length > 255
       )
         return new Response(null, { status: 400 });

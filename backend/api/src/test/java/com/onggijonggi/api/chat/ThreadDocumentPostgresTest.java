@@ -135,6 +135,18 @@ class ThreadDocumentPostgresTest {
 		}
 	}
 
+	@Test void severalDocumentsCanBePinnedAndUnpinningOneKeepsTheOthers() {
+		UUID first = UUID.randomUUID(); upload(first, owner);
+		UUID second = UUID.randomUUID(); service.upload(room, second, member, "second.txt", "둘째 원문".getBytes(StandardCharsets.UTF_8));
+		service.change(room, first, owner, "PINNED", UUID.randomUUID());
+		service.change(room, second, member, "PINNED", UUID.randomUUID());
+		assertThat(service.list(room, owner).documents()).allMatch(ThreadDocumentView::pinned).hasSize(2);
+		service.change(room, first, owner, "UNPINNED", UUID.randomUUID());
+		assertThat(service.list(room, owner).documents())
+				.extracting(ThreadDocumentView::id, ThreadDocumentView::pinned)
+				.containsExactly(tuple(first, false), tuple(second, true));
+	}
+
 	@Test void retransmittedChangeStillSucceedsAfterTheRoomIsLocked() {
 		UUID id = UUID.randomUUID(); upload(id, owner);
 		UUID request = UUID.randomUUID();
@@ -233,7 +245,7 @@ class ThreadDocumentPostgresTest {
 
 	@Test void invalidFileAndMismatchedRegistrationAreRejected() {
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "../x.txt", bytes), HttpStatus.BAD_REQUEST);
-		status(() -> service.upload(room, UUID.randomUUID(), owner, "report‮fdp.txt", bytes), HttpStatus.BAD_REQUEST);
+		status(() -> service.upload(room, UUID.randomUUID(), owner, "report\u202Efdp.txt", bytes), HttpStatus.BAD_REQUEST);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.exe", bytes), HttpStatus.UNSUPPORTED_MEDIA_TYPE);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.txt", new byte[0]), HttpStatus.BAD_REQUEST);
 		status(() -> service.upload(room, UUID.randomUUID(), owner, "x.txt", new byte[ThreadDocumentService.MAX_FILE_BYTES+1]), HttpStatus.CONTENT_TOO_LARGE);

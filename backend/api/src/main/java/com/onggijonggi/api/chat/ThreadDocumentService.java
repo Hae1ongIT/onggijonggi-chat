@@ -323,7 +323,7 @@ public class ThreadDocumentService {
 				registered && !Set.of("UPLOADING", "DELETED").contains(doc.status()), doc.created());
 	}
 	private void validate(String name, byte[] content) {
-		// 방향 제어 문자는 목록·내려받은 이름의 확장자를 다르게 보이게 한다(예: report‮fdp.txt가 reporttxt.pdf로 보임).
+		// 방향 제어 문자는 목록·내려받은 이름의 확장자를 다르게 보이게 한다(예: 오른쪽→왼쪽 재정렬 문자로 .pdf가 .txt처럼 보임).
 		if (name == null || name.isBlank() || name.length() > 255 || name.chars().anyMatch(Character::isISOControl)
 				|| name.chars().anyMatch(ThreadDocumentService::bidiControl)
 				|| name.contains("/") || name.contains("\\")) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);

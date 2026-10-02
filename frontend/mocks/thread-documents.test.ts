@@ -94,6 +94,19 @@ describe('문서 목업 계약', () => {
       (await mock.handle(upload(), [NORMAL_THREAD_ID, 'documents'])).status,
     ).toBe(404);
   });
+  it('방향 제어 문자가 든 파일명은 서버와 같이 400이다', async () => {
+    const mock = new ThreadDocumentsMock();
+    const body = new FormData();
+    body.append('file', new File(['text'], 'report\u202Efdp.txt'));
+    const response = await mock.handle(
+      new Request(
+        `http://local/api/threads/${NORMAL_THREAD_ID}/documents?documentId=${crypto.randomUUID()}`,
+        { method: 'POST', body },
+      ),
+      [NORMAL_THREAD_ID, 'documents'],
+    );
+    expect(response.status).toBe(400);
+  });
   it('접근 거부와 읽기 전용 상태에서 쓰기를 차단한다', async () => {
     const mock = new ThreadDocumentsMock();
     expect(
