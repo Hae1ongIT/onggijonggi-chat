@@ -1,5 +1,6 @@
 package com.onggijonggi.etl;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,26 +22,41 @@ public class IngestionWorkers implements SmartLifecycle {
 	private final RunStore runs;
 	private final IngestionPipeline pipeline;
 	private final EmbeddingClient embeddings;
+	private final ChunkIndex index;
 	private final EtlProperties properties;
+	/** 종료 시 처리 중인 회차를 기다리는 상한. compose 기본 종료 유예(10초)보다 짧아야 강제 종료 전에 끝난다. */
+	private static final Duration STOP_WAIT = Duration.ofSeconds(8);
+
 	private final AtomicBoolean running = new AtomicBoolean();
 	private final List<Thread> threads = new ArrayList<>();
 
-	public IngestionWorkers(RunStore runs, IngestionPipeline pipeline, EmbeddingClient embeddings, EtlProperties properties) {
+	public IngestionWorkers(RunStore runs, IngestionPipeline pipeline, EmbeddingClient embeddings, ChunkIndex index,
+			EtlProperties properties) {
 		this.runs = runs;
 		this.pipeline = pipeline;
 		this.embeddings = embeddings;
+		this.index = index;
 		this.properties = properties;
 	}
 
 	@Override
 	public void start() {
-		if (!running.compareAndSet(false, true)) return;
+		if (running.get()) return;
 		if (!embeddings.configured()) {
 			log.warn("임베딩 주소(app.etl.embedding.url)가 비어 있어 문서 처리를 시작하지 않는다");
 			return;
 		}
+		if (embeddings.dimensions() != index.mappingDimensions()) {
+			// 차원이 다르면 모든 적재가 거절돼 문서가 전부 실패로 쌓인다. 처리하지 않고 설정을 고치게 한다.
+			log.error("임베딩 차원({})이 검색 인덱스 매핑 차원({})과 달라 문서 처리를 시작하지 않는다", embeddings.dimensions(),
+					index.mappingDimensions());
+			return;
+		}
+		running.set(true);
 		for (int i = 0; i < Math.max(1, properties.concurrency()); i++) {
 			Thread thread = new Thread(this::loop, "etl-worker-" + i);
+			// 종료 대기(stop)가 끝나도 남은 스레드가 JVM 종료를 막지 않게 한다. 끊긴 회차는 선점 시한 뒤 다시 집힌다.
+			thread.setDaemon(true);
 			thread.start();
 			threads.add(thread);
 		}
@@ -51,7 +67,7 @@ public class IngestionWorkers implements SmartLifecycle {
 		while (running.get()) {
 			RunStore.Job job;
 			try {
-				job = runs.claim(properties.lease());
+				job = runs.claim(properties.lease(), properties.retryDelays().size() + 1);
 			} catch (RuntimeException error) {
 				log.warn("처리 회차를 가져오지 못했다 — 잠시 뒤 다시 본다", error);
 				job = null;
@@ -60,7 +76,17 @@ public class IngestionWorkers implements SmartLifecycle {
 				pause();
 				continue;
 			}
-			pipeline.process(job);
+			try {
+				pipeline.process(job);
+			} catch (VirtualMachineError fatal) {
+				// 메모리 부족 같은 JVM 오류 뒤에는 이 프로세스를 믿을 수 없다. 끝내서 컨테이너가 다시 띄우게 한다. 이 회차는 선점 시한 뒤
+				// 다시 집히고, 같은 문서가 계속 죽이면 시도 상한(claim)에서 실패로 끝난다.
+				log.error("처리 중 JVM 오류로 워커를 종료한다: doc={} run={}", job.document(), job.runSeq(), fatal);
+				Runtime.getRuntime().halt(1);
+			} catch (Throwable unexpected) {
+				// 상태 확정(DB) 실패 등. 스레드를 살려 두고, 이 회차는 선점 시한 뒤 다시 집힌다.
+				log.error("처리 중 예기치 못한 오류 — 선점 시한 뒤 다시 처리한다: doc={} run={}", job.document(), job.runSeq(), unexpected);
+			}
 		}
 	}
 
@@ -73,11 +99,22 @@ public class IngestionWorkers implements SmartLifecycle {
 		}
 	}
 
+	/**
+	 * 새 회차를 집지 않게 하고 처리 중인 회차가 끝나기를 기다린다. 인터럽트하지 않는다 — 진행 중인 외부 호출을 끊으면 일시 실패로
+	 * 분류돼 배포 때마다 시도 횟수를 쓴다. 기다리는 동안 끝나지 않은 회차는 선점 시한 뒤 다른 워커가 다시 집는다.
+	 */
 	@Override
 	public void stop() {
 		running.set(false);
-		// 처리 중인 회차는 끝까지 둔다. 중간에 끊겨도 선점 시한이 지나면 다시 집힌다.
-		threads.forEach(Thread::interrupt);
+		long deadline = System.nanoTime() + STOP_WAIT.toNanos();
+		for (Thread thread : threads) {
+			try {
+				thread.join(Math.max(1, (deadline - System.nanoTime()) / 1_000_000));
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
 		threads.clear();
 	}
 

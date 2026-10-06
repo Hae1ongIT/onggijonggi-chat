@@ -74,6 +74,8 @@ class IngestionIntegrationTest {
 		registry.add("app.etl.sweep-delay", () -> "300ms");
 		registry.add("app.etl.concurrency", () -> "1");
 		registry.add("app.etl.embedding.batch-size", () -> "4");
+		// 적재를 여러 요청으로 나누는 경로도 지나게 한다.
+		registry.add("app.etl.elasticsearch.bulk-size", () -> "2");
 	}
 
 	@Autowired JdbcTemplate jdbc;
@@ -102,7 +104,7 @@ class IngestionIntegrationTest {
 		Map<String, Object> run = run(doc, 1);
 		assertThat(run).containsEntry("status", "DONE").containsEntry("emb_mdl", "bge-m3").containsEntry("emb_dim", 1024);
 		int chunks = (Integer) run.get("chunk_cnt");
-		assertThat(chunks).isGreaterThan(1).isEqualTo(count(doc));
+		assertThat(chunks).isGreaterThan(2).isEqualTo(count(doc));
 		JsonNode first = es().get().uri("/thr_doc_chunk/_doc/{id}?_source_exclude_vectors=false", doc.id + ":1:1").retrieve().body(JsonNode.class).path("_source");
 		assertThat(first.path("doc_id").asString()).isEqualTo(doc.id.toString());
 		assertThat(first.path("thr_id").asString()).isEqualTo(doc.thread.toString());
@@ -172,6 +174,19 @@ class IngestionIntegrationTest {
 				UUID.randomUUID(), doc.id, doc.tenant, doc.thread, java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
 		await(() -> "READY".equals(status(doc)));
 		assertThat(run(doc, 1)).containsEntry("status", "DONE").containsEntry("att_cnt", 2);
+	}
+
+	@Test
+	void runThatKeepsKillingWorkersFailsAtTheAttemptLimitInsteadOfBeingReclaimedForever() {
+		Fixture doc = register("독.txt", "처리할 때마다 워커를 죽이는 문서라고 가정한다.", "PROCESSING", false);
+		int calls = FAKE.embeddingCalls.get();
+		// 재시도 간격 2개 → 최대 3회. 세 번째 시도 중 워커가 죽어 시한이 지난 상태.
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', 3, now() - interval '1 second')",
+				UUID.randomUUID(), doc.id, doc.tenant, doc.thread);
+		await(() -> "FAILED".equals(status(doc)));
+		assertThat(run(doc, 1).get("err")).isEqualTo("RETRY_EXHAUSTED");
+		assertThat(run(doc, 1).get("att_cnt")).isEqualTo(3);
+		assertThat(FAKE.embeddingCalls.get()).isEqualTo(calls);
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }

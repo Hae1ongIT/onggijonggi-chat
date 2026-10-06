@@ -1,9 +1,7 @@
 package com.onggijonggi.etl;
 
 import com.onggijonggi.common.document.ThreadDocumentStates;
-import java.sql.Timestamp;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -16,6 +14,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * Class Name : RunStore.java
  * Description : 처리 회차(thr_doc_run)의 선점·연장·완료·실패·재시도·정리 표시. 모든 메서드는 짧은 트랜잭션이고, 원본 읽기·임베딩·
  *               적재 같은 외부 호출 동안에는 DB 잠금을 쥐지 않는다. 잠금 순서는 문서(thr_doc) → 회차(thr_doc_run)로 A와 같다.
+ *               선점 시한·재시도 시각은 DB 시계(now())로 계산한다 — 비교도 now()로 하므로 앱과 DB의 시계 차이가 끼지 않는다.
  */
 @Component
 public class RunStore {
@@ -39,9 +38,9 @@ public class RunStore {
 	 * 기한이 된 회차 하나를 선점한다. PENDING(새 작업·재시도 대기)과 선점 시한이 지난 RUNNING(죽은 워커)을 같이 본다.
 	 * 문서가 사라졌거나 삭제됐으면 회차를 CANCELLED로 두고 다음을 본다. 없으면 null.
 	 */
-	public Job claim(Duration lease) {
+	public Job claim(Duration lease, int maxAttempts) {
 		for (int skipped = 0; skipped < 20; skipped++) {
-			Claim claim = transactions.execute(tx -> claimOne(lease));
+			Claim claim = transactions.execute(tx -> claimOne(lease, maxAttempts));
 			if (claim == null) return null;
 			if (claim.job() != null) return claim.job();
 		}
@@ -50,7 +49,7 @@ public class RunStore {
 
 	private record Claim(Job job) { }
 
-	private Claim claimOne(Duration lease) {
+	private Claim claimOne(Duration lease, int maxAttempts) {
 		// 후보는 잠그지 않고 고른 뒤 문서 → 회차 순서로 잠근다(A의 등록·재처리와 같은 순서라 교착이 없다).
 		// 다른 워커가 같은 회차를 잡고 있으면 회차 잠금에서 건너뛰고 다음 후보를 본다.
 		var candidates = jdbc.queryForList("select id, doc_id from thr_doc_run where status in ('PENDING', 'RUNNING')"
@@ -60,18 +59,27 @@ public class RunStore {
 			UUID run = (UUID) candidate.get("id");
 			UUID document = (UUID) candidate.get("doc_id");
 			var docs = jdbc.queryForList("select status, file_name, src_key, src_att_id from thr_doc where id = ? for update", document);
-			if (jdbc.queryForList("select id from thr_doc_run where id = ? and status in ('PENDING', 'RUNNING') and next_at <= now()"
-					+ " for update skip locked", run).isEmpty()) continue;
-			return lockedClaim(run, document, docs, lease);
+			var locked = jdbc.queryForList("select status, att_cnt from thr_doc_run where id = ? and status in ('PENDING', 'RUNNING')"
+					+ " and next_at <= now() for update skip locked", run);
+			if (locked.isEmpty()) continue;
+			return lockedClaim(run, document, docs, locked.get(0), lease, maxAttempts);
 		}
 		// 기한이 된 후보를 모두 다른 워커가 잡고 있다. 다음 폴링에서 다시 본다.
 		return null;
 	}
 
-	private Claim lockedClaim(UUID run, UUID document, List<Map<String, Object>> docs, Duration lease) {
+	private Claim lockedClaim(UUID run, UUID document, List<Map<String, Object>> docs, Map<String, Object> current,
+			Duration lease, int maxAttempts) {
 		String status = docs.isEmpty() ? null : (String) docs.get(0).get("status");
 		if (status == null || status.equals("DELETED")) {
 			jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ?", run);
+			return new Claim(null);
+		}
+		// 시한이 지난 RUNNING은 처리 중에 워커가 죽은 회차다. 실패 처리(handle)를 거치지 못했으므로 시도 상한을 여기서 본다 —
+		// 프로세스를 죽이는 문서(메모리 초과 등)가 시한마다 다시 집혀 워커를 계속 죽이지 않게 한다.
+		if ("RUNNING".equals(current.get("status")) && (Integer) current.get("att_cnt") >= maxAttempts) {
+			ThreadDocumentStates.transition(jdbc, document, "PROCESSING", "FAILED");
+			jdbc.update("update thr_doc_run set status = 'FAILED', err = 'RETRY_EXHAUSTED', updated_at = now() where id = ?", run);
 			return new Claim(null);
 		}
 		// 처음 집는 회차면 문서를 처리 중으로 바꾼다. 죽은 워커의 회차를 다시 집는 경우 문서는 이미 PROCESSING이다.
@@ -81,8 +89,8 @@ public class RunStore {
 			jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ?", run);
 			return new Claim(null);
 		}
-		jdbc.update("update thr_doc_run set status = 'RUNNING', att_cnt = att_cnt + 1, next_at = ?, updated_at = now() where id = ?",
-				Timestamp.from(Instant.now().plus(lease)), run);
+		jdbc.update("update thr_doc_run set status = 'RUNNING', att_cnt = att_cnt + 1, next_at = now() + ? * interval '1 millisecond',"
+				+ " updated_at = now() where id = ?", lease.toMillis(), run);
 		var row = jdbc.queryForMap("select tnn_id, thr_id, run_seq, att_cnt from thr_doc_run where id = ?", run);
 		var doc = docs.get(0);
 		return new Claim(new Job(run, document, (UUID) row.get("tnn_id"), (UUID) row.get("thr_id"), (Integer) row.get("run_seq"),
@@ -94,8 +102,8 @@ public class RunStore {
 		Boolean alive = transactions.execute(tx -> {
 			var docs = jdbc.queryForList("select status from thr_doc where id = ?", job.document());
 			if (docs.isEmpty() || !"PROCESSING".equals(docs.get(0).get("status"))) return false;
-			return jdbc.update("update thr_doc_run set next_at = ?, updated_at = now() where id = ? and status = 'RUNNING' and att_cnt = ?",
-					Timestamp.from(Instant.now().plus(lease)), job.run(), job.attempts()) == 1;
+			return jdbc.update("update thr_doc_run set next_at = now() + ? * interval '1 millisecond', updated_at = now()"
+					+ " where id = ? and status = 'RUNNING' and att_cnt = ?", lease.toMillis(), job.run(), job.attempts()) == 1;
 		});
 		return Boolean.TRUE.equals(alive);
 	}
@@ -128,8 +136,8 @@ public class RunStore {
 
 	/** 일시 오류. 문서는 PROCESSING(처리 중)으로 둔 채 회차만 다음 시도 시각으로 미룬다. */
 	public void retryLater(Job job, String code, Duration delay) {
-		jdbc.update("update thr_doc_run set status = 'PENDING', err = ?, next_at = ?, updated_at = now() where id = ? and status = 'RUNNING' and att_cnt = ?",
-				code, Timestamp.from(Instant.now().plus(delay)), job.run(), job.attempts());
+		jdbc.update("update thr_doc_run set status = 'PENDING', err = ?, next_at = now() + ? * interval '1 millisecond', updated_at = now()"
+				+ " where id = ? and status = 'RUNNING' and att_cnt = ?", code, delay.toMillis(), job.run(), job.attempts());
 	}
 
 	/** 처리 도중 문서가 삭제됐다. 적재했던 청크는 정리 작업이 지운다. */

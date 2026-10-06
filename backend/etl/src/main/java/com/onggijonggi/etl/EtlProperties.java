@@ -29,7 +29,9 @@ public record EtlProperties(
 	public record Worker(String url, @DefaultValue("") String apiKey) { }
 
 	public record Elasticsearch(String url, @DefaultValue("thr_doc_chunk") String alias,
-			@DefaultValue("thr_doc_chunk_v1") String index) { }
+			@DefaultValue("thr_doc_chunk_v1") String index,
+			/** bulk 한 요청에 담는 청크 수. */
+			@DefaultValue("200") int bulkSize) { }
 
 	public record Embedding(@DefaultValue("") String url, @DefaultValue("bge-m3") String model,
 			@DefaultValue("1024") int dimensions, @DefaultValue("32") int batchSize) { }

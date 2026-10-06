@@ -63,9 +63,24 @@ public class ChunkIndex {
 		}
 	}
 
-	/** 한 회차의 청크를 적재한다. 청크 ID가 문서 ID라 같은 회차를 다시 적재하면 덮어쓴다. */
+	/** 매핑의 벡터 차원. 임베딩 설정과 다르면 워커가 처리를 시작하지 않는다. */
+	public int mappingDimensions() {
+		return mapping().path("mappings").path("properties").path("emb").path("dims").asInt(-1);
+	}
+
+	/**
+	 * 한 회차의 청크를 적재한다. 청크 ID가 문서 ID라 같은 회차를 다시 적재하면 덮어쓴다. 큰 문서는 청크가 수천 개라(청크당 벡터 약
+	 * 10KB) 한 요청이 수십 MB가 되므로 bulkSize개씩 나눠 보낸다. 중간에 실패하면 다음 시도가 같은 ID로 처음부터 덮어쓴다.
+	 */
 	public void write(RunStore.Job job, List<Chunker.Chunk> chunks, List<float[]> vectors, String model) {
 		ensure();
+		for (int from = 0; from < chunks.size(); from += settings.bulkSize()) {
+			int to = Math.min(chunks.size(), from + settings.bulkSize());
+			writeBatch(job, chunks.subList(from, to), vectors.subList(from, to), model);
+		}
+	}
+
+	private void writeBatch(RunStore.Job job, List<Chunker.Chunk> chunks, List<float[]> vectors, String model) {
 		StringBuilder ndjson = new StringBuilder();
 		for (int i = 0; i < chunks.size(); i++) {
 			Chunker.Chunk chunk = chunks.get(i);
