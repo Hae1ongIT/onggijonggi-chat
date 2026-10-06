@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 
+# 06·DOCUMENT — 방 문서 인제스천 ETL 워커(#340). 포트를 열지 않는다(사용자 요청을 받지 않음).
+
 ### 1단계: 빌드 (JDK로 Gradle 빌드) ###
 FROM eclipse-temurin:17-jdk AS build
 WORKDIR /app
@@ -10,7 +12,7 @@ COPY gradlew settings.gradle build.gradle gradle.properties ./
 COPY gradle ./gradle
 COPY common/build.gradle ./common/
 COPY api/build.gradle ./api/
-# settings.gradle이 etl 모듈도 포함한다. 빌드하지 않아도 모듈 디렉터리는 있어야 Gradle이 설정 단계를 통과한다.
+# settings.gradle이 api 모듈도 포함한다. 빌드하지 않아도 모듈 디렉터리는 있어야 Gradle이 설정 단계를 통과한다.
 COPY etl/build.gradle ./etl/
 
 # .gitattributes(eol=lf) 도입 전에 체크아웃한 Windows 워킹트리에는 gradlew가 CRLF로 남아 있다.
@@ -25,9 +27,9 @@ RUN --mount=type=cache,target=/root/.gradle \
 
 # 소스 복사 후 실행 가능한 jar 생성 (테스트는 CI에서 별도 수행).
 COPY common/src ./common/src
-COPY api/src ./api/src
+COPY etl/src ./etl/src
 RUN --mount=type=cache,target=/root/.gradle \
-	./gradlew :api:bootJar --no-daemon -x test
+	./gradlew :etl:bootJar --no-daemon -x test
 
 ### 2단계: 실행 (가벼운 JRE) ###
 FROM eclipse-temurin:17-jre AS runtime
@@ -41,8 +43,7 @@ RUN apt-get update \
 # 루트가 아닌 사용자로 실행한다.
 RUN useradd -r -u 1001 appuser
 
-COPY --from=build /app/api/build/libs/*.jar app.jar
+COPY --from=build /app/etl/build/libs/*.jar app.jar
 USER appuser
 
-EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

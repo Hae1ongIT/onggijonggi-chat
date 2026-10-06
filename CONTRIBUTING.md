@@ -328,6 +328,14 @@ PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다
 뒤(`127.0.0.1:8100`), 같은 값을 `application-local.properties`의 `app.document.internal-api-key`에 넣는다. 비우면 문서
 요청이 503이다(채팅은 영향 없음). 이 compose는 루트 스택과 컨테이너 이름이 같아 루트 스택의 워커와 동시에 띄울 수 없다.
 
+방 문서 ETL 워커(`backend/etl`)는 BFF와 따로 띄운다. 스키마는 BFF의 Flyway가 만드므로 BFF를 한 번 띄운 DB를 쓴다. Elasticsearch(`docker compose --profile elasticsearch up -d elasticsearch`)와 위 문서 워커, 임베딩 서버가 필요하다.
+
+```powershell
+.gradlew.bat :etl:bootRun --args="--spring.datasource.password=<DB 비밀번호> --app.etl.worker.api-key=<문서 워커 key> --app.etl.embedding.url=http://<임베딩 서버>"
+```
+
+`app.etl.embedding.url`을 비우면 문서를 처리하지 않고 경고만 남긴다. 테스트(`.gradlew.bat :etl:test`)는 Docker로 PostgreSQL과 nori를 넣은 Elasticsearch를 띄우고 문서 워커·임베딩 서버는 가짜로 대신한다(처음엔 Elasticsearch 이미지 빌드로 몇 분 걸린다).
+
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 
 `http://localhost:8090/actuator/health`가 `{"status":"UP"}`이면 정상이다.

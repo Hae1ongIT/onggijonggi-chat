@@ -247,6 +247,28 @@ docker compose -f infra/docker-compose.yml restart casbin
 
 ---
 
+## 방 문서 검색 준비 켜기 (ETL)
+
+대화방에 등록한 문서를 검색에 쓰려면 원본에서 글자를 뽑아 잘게 나누고(청크) 임베딩해 Elasticsearch에 넣어야 한다. 이 일은 BFF와 따로 도는 ETL 워커(`etl` 서비스)가 한다. **기본으로 꺼져 있다** — 꺼져 있어도 문서 등록·고정·원본 열람은 되고, 문서는 "처리 대기"에 머문다.
+
+**1. `infra/.env`에 세 줄을 넣고 다시 띄운다.**
+
+```bash
+COMPOSE_PROFILES=elasticsearch
+EMBEDDING_URL=http://<임베딩 서버 주소>:<포트>
+EMBEDDING_MODEL=bge-m3
+```
+
+다른 프로필과 함께 쓰면 쉼표로 잇는다(예: `COMPOSE_PROFILES=casbin,elasticsearch`). `EMBEDDING_URL`은 OpenAI 호환 `/v1/embeddings`를 제공하는 사내 임베딩 서버 주소이고, 모델은 1024차원 벡터를 내야 한다(bge-m3). 비워 두면 ETL 워커가 떠도 문서를 처리하지 않고 경고만 남긴다.
+
+```bash
+docker compose up -d --build
+```
+
+**✅ 성공**: `docker compose ps`에 `elasticsearch`와 `etl`이 보이고, `docker compose logs etl`에 `문서 처리 스레드 2개 시작`이 찍힌다. 대화방에 문서를 등록하면 상태가 "처리 대기" → "처리 중" → "검색 준비 완료"로 바뀐다. 이미 등록돼 있던 "처리 대기" 문서도 이어서 처리한다.
+
+처리에 실패하면 "처리 실패"로 남고, 올린 사람이나 방장이 "다시 처리"로 보관된 원본을 다시 처리할 수 있다. 원인은 `docker compose logs etl`의 `문서 처리 실패(사유 코드)`에 있다. 임베딩 서버·Elasticsearch가 잠시 끊기면 간격을 두고 몇 번 다시 시도한다.
+
 ## Keycloak 관리 클라이언트와 권한 변경 감사
 
 BFF는 Keycloak에서 사람 목록·표시 이름을 읽고, 누가 언제 누구에게 `PLATFORM_ADMIN`(권한 관리 화면·API를 여는 역할)을 줬는지·계정을 언제 끄고 지웠는지를 1분마다 읽어 DB에 지울 수 없는 기록으로 남긴다. 그룹 가입이나 복합 역할처럼 역할을 직접 붙이지 않고 권한을 얻는 경로와, 역할을 줄 수 있는 관리 권한(`realm-management`)도 함께 남는다. 처음 수집할 때는 그 시점에 이미 권한을 가진 사람을 한 번 기록한다.

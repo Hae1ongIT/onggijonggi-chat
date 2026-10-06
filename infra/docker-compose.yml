@@ -343,6 +343,37 @@ services:
       - app-net
       - document-worker-net
 
+  # 06·DOCUMENT — 방 문서 인제스천 ETL 워커(#340). 등록된 방 문서를 추출·청킹·임베딩해 Elasticsearch에 적재한다.
+  # Elasticsearch 없이는 할 일이 없어 같은 프로필로 켠다(COMPOSE_PROFILES=elasticsearch). 포트를 열지 않는다.
+  # 스키마는 bff의 Flyway가 만들므로 bff가 뜬 뒤에 시작한다. EMBEDDING_URL이 비면 작업을 가져가지 않는다.
+  etl:
+    build:
+      context: ../backend
+      dockerfile: etl/Dockerfile
+    image: ${ETL_IMAGE:-ogjg-chat/etl:local}
+    container_name: backend-etl
+    profiles:
+      - elasticsearch
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-appdb}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-appuser}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_ETL_WORKER_URL: http://document-worker:8100
+      APP_ETL_WORKER_API_KEY: ${DOCUMENT_WORKER_INTERNAL_API_KEY}
+      APP_ETL_ELASTICSEARCH_URL: http://elasticsearch:9200
+      APP_ETL_EMBEDDING_URL: ${EMBEDDING_URL:-}
+      APP_ETL_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+    depends_on:
+      bff:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      document-worker:
+        condition: service_healthy
+    networks:
+      - app-net
+
   seaweedfs-master:
     image: chrislusf/seaweedfs:3.80
     container_name: infra-seaweed-master
