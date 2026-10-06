@@ -355,6 +355,8 @@ services:
     profiles:
       - elasticsearch
     restart: unless-stopped
+    # 처리 중 회차를 최대 8초 기다린 뒤 놓아주고 Spring을 닫는다. 기본 10초면 그 전에 강제 종료될 수 있다.
+    stop_grace_period: 20s
     environment:
       SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-appdb}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-appuser}

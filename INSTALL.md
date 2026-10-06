@@ -267,7 +267,15 @@ docker compose up -d --build
 
 **✅ 성공**: `docker compose ps`에 `elasticsearch`와 `etl`이 보이고, `docker compose logs etl`에 `문서 처리 스레드 2개 시작`이 찍힌다. 대화방에 문서를 등록하면 상태가 "처리 대기" → "처리 중" → "검색 준비 완료"로 바뀐다. 이미 등록돼 있던 "처리 대기" 문서도 이어서 처리한다.
 
-처리에 실패하면 "처리 실패"로 남고, 올린 사람이나 방장이 "다시 처리"로 보관된 원본을 다시 처리할 수 있다. 원인은 `docker compose logs etl`의 `문서 처리 실패(사유 코드)`에 있다. 임베딩 서버·Elasticsearch가 잠시 끊기면 간격을 두고 몇 번 다시 시도한다.
+시작 로그 대신 `문서 처리를 시작하지 않는다`나 `문서 처리가 꺼져 있다`(5분마다)가 찍히면 `EMBEDDING_URL`이 비었거나 임베딩 모델의 벡터 차원이 1024가 아닌 것이다. 이때 컨테이너는 떠 있어 `docker compose ps`만으로는 알 수 없다.
+
+처리에 실패하면 "처리 실패"로 남고, 올린 사람이나 방장이 "다시 처리"로 보관된 원본을 다시 처리할 수 있다. 원인은 `docker compose logs etl`의 `문서 처리 실패(사유 코드)`에 있다. 임베딩 서버·Elasticsearch가 잠시 끊기거나 내부 key가 어긋나면 간격을 두고 몇 번 다시 시도한다.
+
+**알아둘 것**
+- 메모리: Elasticsearch가 `ES_HEAP`(기본 1g)에 더해 여유를 쓰고, ETL은 컨테이너 메모리의 절반까지 힙을 쓴다. 두 서비스를 켜면 2~3GB 정도를 더 잡는다.
+- 리눅스 호스트에서 Elasticsearch가 `max virtual memory areas vm.max_map_count [65530] is too low`로 뜨지 않으면 `sudo sysctl -w vm.max_map_count=262144`를 한다(재부팅 뒤에도 유지하려면 `/etc/sysctl.conf`에 적는다).
+- 배포(재기동) 때 처리 중이던 문서는 다음 기동에서 이어서 처리한다.
+- `docker compose down -v`나 Elasticsearch 볼륨 삭제는 검색 인덱스를 지운다. 이미 "검색 준비 완료"인 문서는 화면에 그대로 보이지만 검색 인덱스에서는 빠진다. 지금은 일괄로 다시 색인하는 운영 도구가 없으므로, 필요한 문서를 다시 등록한다.
 
 ## Keycloak 관리 클라이언트와 권한 변경 감사
 

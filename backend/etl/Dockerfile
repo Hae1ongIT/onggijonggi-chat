@@ -41,4 +41,6 @@ RUN useradd -r -u 1001 appuser
 COPY --from=build /app/etl/build/libs/*.jar app.jar
 USER appuser
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# 힙을 컨테이너 메모리의 절반으로 묶는다(제한이 없으면 호스트 메모리 기준). 메모리 부족이면 곧바로 끝내 컨테이너가 다시 띄운다 —
+# 같은 문서가 계속 그러면 시도 상한에서 실패로 끝난다.
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=50", "-XX:+ExitOnOutOfMemoryError", "-jar", "app.jar"]

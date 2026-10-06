@@ -81,6 +81,7 @@ class IngestionIntegrationTest {
 
 	@Autowired JdbcTemplate jdbc;
 	@Autowired ObjectMapper json;
+	@Autowired RunStore runStore;
 
 	@AfterEach
 	void reset() {
@@ -239,6 +240,19 @@ class IngestionIntegrationTest {
 		assertThat(mapping.path("thr_doc_chunk_v1").path("mappings").path("properties").path("emb").path("type").asString())
 				.isEqualTo("dense_vector");
 		assertThat(count(second)).isEqualTo(((Integer) run(second, 1).get("chunk_cnt")).longValue());
+	}
+
+	@Test
+	void runReleasedAtShutdownIsPickedUpAtOnceWithoutSpendingAnAttempt() {
+		Fixture doc = register("놓아주기.txt", "종료 대기 안에 끝나지 못해 놓아준 회차다.", "PROCESSING", false);
+		UUID run = UUID.randomUUID();
+		// 다른 워커가 처리 중(시한 10분 남음)이던 회차. 그 워커가 종료하며 놓아준다.
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', 1, now() + interval '10 minutes')",
+				run, doc.id, doc.tenant, doc.thread);
+		runStore.release(new RunStore.Job(run, doc.id, doc.tenant, doc.thread, 1, 1, "놓아주기.txt", null, null));
+
+		await(() -> "READY".equals(status(doc)));
+		assertThat(run(doc, 1)).containsEntry("status", "DONE").containsEntry("att_cnt", 1);
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }

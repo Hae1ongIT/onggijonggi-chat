@@ -141,6 +141,12 @@ public class RunStore {
 				+ " where id = ? and status = 'RUNNING' and att_cnt = ?", code, delay.toMillis(), job.run(), job.attempts());
 	}
 
+	/** 종료 중이라 끝내지 못한 회차를 바로 다시 집을 수 있게 놓아준다. 이번 시도는 세지 않는다. 아직 이 워커 소유일 때만. */
+	public void release(Job job) {
+		jdbc.update("update thr_doc_run set status = 'PENDING', att_cnt = att_cnt - 1, next_at = now(), updated_at = now()"
+				+ " where id = ? and status = 'RUNNING' and att_cnt = ?", job.run(), job.attempts());
+	}
+
 	/** 처리 도중 문서가 삭제됐다. 적재했던 청크는 정리 작업이 지운다. */
 	public void cancel(Job job) {
 		jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ? and status = 'RUNNING' and att_cnt = ?",
