@@ -22,7 +22,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Class Name : ChunkIndex.java
- * Description : 청크를 Elasticsearch에 적재·대조·삭제한다. 인덱스 매핑(공용 모듈의 es-thr-doc-chunk-index.json)은 검색(#345)이
+ * Description : 청크를 Elasticsearch에 적재·대조·삭제한다. 인덱스 매핑(공용 모듈의 es-thr-doc-chunk-index.json)은 검색(#344)이
  *               소유하고, ETL은 기동·첫 적재 때 그 매핑으로 인덱스와 별칭을 만들거나 이전 인덱스에서 옮긴다. 쓰기·조회는 항상 별칭으로 한다.
  *               청크 문서에는 본문(content)을 함께 둬, 매핑·분석기 변경은 원본 재추출 없이 Elasticsearch 안에서 다시 색인한다.
  */

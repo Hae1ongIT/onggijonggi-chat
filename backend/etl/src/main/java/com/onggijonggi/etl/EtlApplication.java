@@ -17,7 +17,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class EtlApplication {
 
-	/** 청킹 규칙은 공용 모듈(common)에 있다 — 검색 평가 세트도 같은 규칙으로 나눈다(#345). */
+	/** 청킹 규칙은 공용 모듈(common)에 있다 — 검색 평가 세트도 같은 규칙으로 나눈다(#344). */
 	@Bean
 	Chunker chunker(EtlProperties properties) {
 		return new Chunker(properties.chunk().settings());

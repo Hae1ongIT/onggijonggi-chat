@@ -34,7 +34,7 @@ import reactor.test.StepVerifier;
 
 /**
  * Class Name : ThreadDocumentSearchHttpTest.java
- * Description : 방 문서 검색 확인 API(#345)의 입력 검증, 서비스로 넘기는 값, 결과 모양, 설정으로 끈 경우의 404를 확인한다.
+ * Description : 방 문서 검색 확인 API(#344)의 입력 검증, 서비스로 넘기는 값, 결과 모양, 설정으로 끈 경우의 404를 확인한다.
  *               인가·범위·장애 구분은 ThreadDocumentSearchIntegrationTest가 본다.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)

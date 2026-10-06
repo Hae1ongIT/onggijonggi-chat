@@ -132,7 +132,7 @@ public class ThreadDocumentService {
 	}
 
 	/**
-	 * 방 문서 검색(#345) 범위. 목록·원본과 같은 방 접근 확인(활성 참여·DIRECT 소유자·워크스페이스 열람)을 통과해야 하고,
+	 * 방 문서 검색(#344) 범위. 목록·원본과 같은 방 접근 확인(활성 참여·DIRECT 소유자·워크스페이스 열람)을 통과해야 하고,
 	 * 실패는 같은 404다. 방 상태(LOCKED·ARCHIVED)와 무관하게 읽을 수 있다. 대상은 고정·READY 문서의 현재 완료 회차다.
 	 */
 	public ThreadDocumentScope searchScope(UUID thread, CurrentActor actor) {

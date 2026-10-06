@@ -55,7 +55,7 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * Class Name : ThreadDocumentSearchIntegrationTest.java
- * Description : 실제 PostgreSQL(Flyway)과 nori Elasticsearch, 가짜 임베딩으로 방 문서 검색(#345)을 확인한다. 다른 방·다른 고객사·
+ * Description : 실제 PostgreSQL(Flyway)과 nori Elasticsearch, 가짜 임베딩으로 방 문서 검색(#344)을 확인한다. 다른 방·다른 고객사·
  *               고정 해제·이전 회차 청크가 섞이지 않는지, 키워드에서만 잡히는 고유명사도 채택하는지, 대상이 없으면 임베딩을 부르지
  *               않는지, 장애·모델 불일치가 근거 없음이 아니라 UNAVAILABLE인지 본다. 벡터는 축 하나만 1인 단위 벡터라 코사인 유사도가
  *               같은 축이면 1, 다른 축이면 0이다.

@@ -55,7 +55,7 @@ dependencies {
 	testRuntimeOnly 'com.h2database:h2'
 }
 
-// 방 문서 검색 평가 세트(#345)는 실제 임베딩·대화 모델(사내망)이 필요해 기본 test·CI에서 빼고 ragEval로만 돈다.
+// 방 문서 검색 평가 세트(#344)는 실제 임베딩·대화 모델(사내망)이 필요해 기본 test·CI에서 빼고 ragEval로만 돈다.
 tasks.named('test') {
 	useJUnitPlatform {
 		excludeTags 'rag-eval'

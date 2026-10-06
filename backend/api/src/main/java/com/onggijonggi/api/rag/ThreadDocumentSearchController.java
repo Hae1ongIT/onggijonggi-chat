@@ -17,7 +17,7 @@ import reactor.core.publisher.Mono;
 
 /**
  * Class Name : ThreadDocumentSearchController.java
- * Description : 방 문서 검색 확인 API(#345). 채팅 답변 연결(E) 전에 "이 방에서 이 질문으로 무엇을 찾는지"를 실제 임베딩으로 확인한다.
+ * Description : 방 문서 검색 확인 API(#344). 채팅 답변 연결(E) 전에 "이 방에서 이 질문으로 무엇을 찾는지"를 실제 임베딩으로 확인한다.
  *               방 문서 목록과 같은 접근 확인을 거치고(없는 방·남의 방은 404), 결과에는 그 방 참여자가 이미 열람할 수 있는 원본의
  *               청크만 나온다. app.rag.search-api-enabled=false면 404다.
  */

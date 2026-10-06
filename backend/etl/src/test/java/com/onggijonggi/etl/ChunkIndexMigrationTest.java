@@ -27,7 +27,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Class Name : ChunkIndexMigrationTest.java
- * Description : 분석기를 바꿔 인덱스 이름을 올린 배포(#345, v1 → v2)에서 ETL이 이전 인덱스의 청크를 새 인덱스로 옮기고 별칭을 넘기는지
+ * Description : 분석기를 바꿔 인덱스 이름을 올린 배포(#344, v1 → v2)에서 ETL이 이전 인덱스의 청크를 새 인덱스로 옮기고 별칭을 넘기는지
  *               실제 nori Elasticsearch로 확인한다. ES 9.x는 벡터를 _source에서 빼고 저장하므로, 옮긴 뒤에도 kNN 검색이 그대로 되는지
  *               (벡터가 함께 옮겨졌는지)와 본문이 새 분석기(조사 제거)로 다시 분석됐는지를 본다.
  */

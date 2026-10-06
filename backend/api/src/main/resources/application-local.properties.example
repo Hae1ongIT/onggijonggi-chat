@@ -42,5 +42,5 @@ app.rbac.workspace-setup-path=<저장소 절대경로>/infra/config/workspace-se
 #app.document.worker-url=http://localhost:8100
 #app.document.internal-api-key=여기에_워커_INTERNAL_API_KEY_입력
 
-# 방 문서 검색(#345): ETL과 같은 임베딩 엔드포인트. 비면 검색 결과는 UNAVAILABLE이다.
+# 방 문서 검색(#344): ETL과 같은 임베딩 엔드포인트. 비면 검색 결과는 UNAVAILABLE이다.
 #app.rag.embedding.url=http://임베딩서버:포트

@@ -17,7 +17,7 @@ import reactor.core.scheduler.Schedulers;
 
 /**
  * Class Name : ThreadDocumentSearch.java
- * Description : 방 문서 검색(#345)의 흐름. ① 방 접근 확인과 검색 범위(ThreadDocumentService.searchScope — 실패는 404, 검색 전에 끝난다)
+ * Description : 방 문서 검색(#344)의 흐름. ① 방 접근 확인과 검색 범위(ThreadDocumentService.searchScope — 실패는 404, 검색 전에 끝난다)
  *               → ② 대상 문서가 없으면 근거 없음(임베딩·LLM을 부르지 않는다) → ③ 설정·모델 확인 → ④ 후속 질문이면 검색 문장 다시 쓰기
  *               → ⑤ 질문 임베딩 → ⑥ 하이브리드 검색. 장애는 UNAVAILABLE로 돌려주고 근거 없음으로 숨기지 않는다.
  *               권한은 턴 시작 시 한 번 확인한다 — 답변이 닿는 길(협업방 구독·기록 재조회)은 기존 회수·접근 확인이 지킨다(D 협의 5).

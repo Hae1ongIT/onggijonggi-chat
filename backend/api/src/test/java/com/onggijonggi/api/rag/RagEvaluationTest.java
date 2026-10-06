@@ -40,7 +40,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Class Name : RagEvaluationTest.java
- * Description : 방 문서 검색 평가 세트(#345). 가상 회사 규정 문서 5개(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
+ * Description : 방 문서 검색 평가 세트(#344). 가상 회사 규정 문서 5개(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
  *               nori Elasticsearch에 색인하고, 질문 32개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택)를
  *               검색 기준 조합마다 돌려 적중률·무관 질문 오채택률·다시 쓰기 효과·지연을 표로 낸다(build/rag-eval/report.md).
  *               실제 사내 모델이 필요해 기본 test·CI에서 빠지고 ragEval로만 돈다:
@@ -112,7 +112,7 @@ class RagEvaluationTest {
 				}
 			}
 
-			StringBuilder report = new StringBuilder("# 방 문서 검색 평가 (#345)\n\n");
+			StringBuilder report = new StringBuilder("# 방 문서 검색 평가 (#344)\n\n");
 			report.append("- 문서 ").append(DOCUMENTS.size()).append("개, 청크 ").append(chunkCount(RestClient.create(esUrl)))
 					.append("개, 질문 ").append(questions.size()).append("개, 상위 5개 기준\n");
 			report.append("- 다시 쓰기: ").append(rewriter == null ? "없음(RAG_EVAL_LLM_URL 미설정)" : llmModel)

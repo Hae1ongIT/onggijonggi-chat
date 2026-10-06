@@ -243,7 +243,7 @@ services:
       APP_LLM_GATEWAY_URL:                  http://litellm:4000
       APP_DOCUMENT_WORKER_URL: http://document-worker:8100
       APP_DOCUMENT_INTERNAL_API_KEY: ${DOCUMENT_WORKER_INTERNAL_API_KEY}
-      # 방 문서 검색(#345). elasticsearch 프로필을 켜지 않으면 ES가 없어 검색 결과가 UNAVAILABLE일 뿐 BFF는 정상 기동한다(depends_on 없음).
+      # 방 문서 검색(#344). elasticsearch 프로필을 켜지 않으면 ES가 없어 검색 결과가 UNAVAILABLE일 뿐 BFF는 정상 기동한다(depends_on 없음).
       # 질문 임베딩은 ETL과 같은 엔드포인트·모델이어야 한다. RAG_REWRITE_MODEL을 비우면 그 대화의 모델로 후속 질문을 다시 쓴다.
       APP_RAG_ELASTICSEARCH_URL: http://elasticsearch:9200
       APP_RAG_EMBEDDING_URL: ${EMBEDDING_URL:-}
