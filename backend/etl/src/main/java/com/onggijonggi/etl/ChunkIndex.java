@@ -104,9 +104,13 @@ public class ChunkIndex {
 		}
 		JsonNode response;
 		try {
-			response = json.readTree(client.post().uri("/{alias}/_bulk?refresh=wait_for", settings.alias())
+			// require_alias: 별칭이 사라졌으면(운영자가 인덱스를 지움) ES가 매핑 없는 같은 이름의 인덱스를 자동으로 만들지 않고 404를 준다.
+			response = json.readTree(client.post().uri("/{alias}/_bulk?refresh=wait_for&require_alias=true", settings.alias())
 					.contentType(NDJSON).body(utf8(ndjson.toString()))
 					.retrieve().body(String.class));
+		} catch (HttpClientErrorException.NotFound aliasMissing) {
+			ensured = false;
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 별칭이 없다 — 다음 시도에서 다시 만든다", aliasMissing);
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}
@@ -116,6 +120,11 @@ public class ChunkIndex {
 			int status = result.path("status").asInt(200);
 			if (status < 300) continue;
 			String reason = result.path("error").path("reason").asString("");
+			if (status == 404) {
+				// require_alias: 별칭이 사라졌다(ES는 bulk 전체가 아니라 항목마다 404로 알린다). 다음 시도에서 인덱스를 다시 만든다.
+				ensured = false;
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 별칭이 없다 — 다음 시도에서 다시 만든다: " + reason, null);
+			}
 			if (status == 429 || status >= 500) throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "bulk " + status + " " + reason, null);
 			throw EtlFailure.permanent("INDEX_REJECTED", "bulk " + status + " " + reason);
 		}
@@ -136,9 +145,12 @@ public class ChunkIndex {
 	/** 한 회차의 청크를 지운다. 멱등이다 — 인덱스가 아직 없으면 지울 것도 없다. */
 	public void delete(UUID document, int runSeq) {
 		try {
-			client.post().uri("/{alias}/_delete_by_query?refresh=true&conflicts=proceed", settings.alias())
+			JsonNode response = json.readTree(client.post().uri("/{alias}/_delete_by_query?refresh=true&conflicts=proceed", settings.alias())
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(runQuery(document, runSeq))))
-					.retrieve().toBodilessEntity();
+					.retrieve().body(String.class));
+			// 200이어도 일부 실패·시간 초과가 있을 수 있다. 그때 정리 완료로 표시하면 지난 회차 청크가 남는다.
+			if (response.path("timed_out").asBoolean(false) || !response.path("failures").isEmpty())
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "청크 삭제가 끝나지 않았다: " + HttpCalls.abbreviate(response.toString()), null);
 		} catch (HttpClientErrorException.NotFound noIndex) {
 			// 아직 한 번도 적재한 적이 없다.
 		} catch (RuntimeException error) {

@@ -1,5 +1,9 @@
 package com.onggijonggi.etl;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
@@ -14,7 +18,7 @@ import org.springframework.stereotype.Component;
 /**
  * Class Name : TextExtractor.java
  * Description : 원본에서 검색용 텍스트를 뽑는다. 첨부와 달리 잘라내지 않는다(지도 선택 9).
- *               txt·md·csv는 UTF-8 그대로 — Tika의 문자셋 추정이 짧은 한글 파일을 다른 인코딩으로 볼 수 있어서다(첨부와 같은 규칙).
+ *               txt·md·csv는 Tika 문자셋 추정 대신 UTF-8 → CP949 순서로 엄격히 읽는다(짧은 한글 파일을 Tika가 잘못 추정할 수 있어서다).
  *               PDF는 페이지 단위로 읽어 출처 위치를 페이지로 남기고, DOCX는 Tika로 읽는다.
  */
 @Component
@@ -28,9 +32,10 @@ public class TextExtractor {
 		List<Section> sections;
 		try {
 			sections = switch (extension) {
-				case "txt", "md", "csv" -> List.of(new Section(null, stripBom(new String(bytes, StandardCharsets.UTF_8))));
+				case "txt", "md", "csv" -> List.of(new Section(null, stripBom(decodeText(bytes))));
 				case "pdf" -> pdf(bytes);
-				case "docx" -> List.of(new Section(null, tika(bytes)));
+				// Tika는 DOCX 문단 사이에 줄바꿈 하나만 넣는다. 빈 줄로 바꿔 청킹이 문단을 알아보게 한다(출처 위치 para=N).
+				case "docx" -> List.of(new Section(null, tika(bytes).replaceAll("\\n+", "\n\n")));
 				default -> throw EtlFailure.permanent("UNSUPPORTED_FILE", "지원하지 않는 형식: " + extension);
 			};
 		} catch (EtlFailure failure) {
@@ -63,6 +68,22 @@ public class TextExtractor {
 	private static String tika(byte[] bytes) {
 		return new TikaDocumentReader(new ByteArrayResource(bytes)).get().stream()
 				.map(Document::getText).filter(Objects::nonNull).reduce("", (a, b) -> a.isEmpty() ? b : a + "\n" + b);
+	}
+
+	/**
+	 * UTF-8로 엄격히 읽고, 아니면 CP949(MS949)로 읽는다 — 한국어 Windows·엑셀에서 저장한 TXT·CSV가 흔히 CP949다. 느슨하게 읽으면
+	 * 깨진 바이트가 대체 문자(U+FFFD)로 바뀐 채 READY가 되어, 검색·출처에 쓸 수 없는 본문이 정상 처리로 보인다. 둘 다 아니면 영구 실패다.
+	 */
+	static String decodeText(byte[] bytes) {
+		for (Charset charset : List.of(StandardCharsets.UTF_8, Charset.forName("MS949"))) {
+			try {
+				return charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
+						.decode(ByteBuffer.wrap(bytes)).toString();
+			} catch (CharacterCodingException notThisCharset) {
+				// 다음 문자셋으로 본다.
+			}
+		}
+		throw EtlFailure.permanent("UNSUPPORTED_ENCODING", "UTF-8·CP949가 아닌 텍스트");
 	}
 
 	private static String stripBom(String text) {

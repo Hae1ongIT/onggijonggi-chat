@@ -81,7 +81,10 @@ public class EmbeddingClient {
 			if (index < 0 || index >= batch.size() || embedding.size() != settings.dimensions())
 				throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 순번·차원 불일치: index=" + index + " dim=" + embedding.size());
 			float[] vector = new float[embedding.size()];
-			for (int i = 0; i < vector.length; i++) vector[i] = (float) embedding.get(i).asDouble();
+			for (int i = 0; i < vector.length; i++) {
+				vector[i] = (float) embedding.get(i).asDouble();
+				if (!Float.isFinite(vector[i])) throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 벡터에 유한하지 않은 값: index=" + index);
+			}
 			ordered[index] = vector;
 		}
 		for (float[] vector : ordered) if (vector == null) throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 순번 누락");

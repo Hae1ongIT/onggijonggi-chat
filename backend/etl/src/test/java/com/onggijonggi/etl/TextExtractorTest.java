@@ -62,6 +62,27 @@ class TextExtractorTest {
 	}
 
 	@Test
+	void cp949TextFromWindowsIsReadAndUndecodableTextFailsInsteadOfBeingGarbled() {
+		var sections = extractor.extract("명단.csv", "이름,팀\n홍길동,인사".getBytes(java.nio.charset.Charset.forName("MS949")));
+		assertThat(sections.get(0).text()).isEqualTo("이름,팀\n홍길동,인사");
+		assertThatThrownBy(() -> extractor.extract("깨짐.txt", new byte[] {0x41, (byte) 0x80}))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> {
+					assertThat(failure.code()).isEqualTo("UNSUPPORTED_ENCODING");
+					assertThat(failure.permanent()).isTrue();
+				});
+	}
+
+	@Test
+	void docxParagraphsAreSeparatedByBlankLinesSoChunkLocationsCountParagraphs() throws IOException {
+		try (var document = new XWPFDocument(); var out = new ByteArrayOutputStream()) {
+			for (String text : new String[] {"첫 문단", "둘째 문단", "셋째 문단"}) document.createParagraph().createRun().setText(text);
+			document.write(out);
+			String text = extractor.extract("rule.docx", out.toByteArray()).get(0).text();
+			assertThat(text).contains("첫 문단\n\n둘째 문단\n\n셋째 문단");
+		}
+	}
+
+	@Test
 	void unsupportedExtensionFailsPermanently() {
 		assertThatThrownBy(() -> extractor.extract("slide.pptx", new byte[] {1}))
 				.isInstanceOfSatisfying(EtlFailure.class, failure -> {

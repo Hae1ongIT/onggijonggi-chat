@@ -225,6 +225,22 @@ class IngestionIntegrationTest {
 		assertThat(run(doc, 1)).containsEntry("status", "DONE");
 	}
 
+	@Test
+	void deletedSearchIndexIsRecreatedWithItsMappingInsteadOfAutoCreatedBlank() {
+		Fixture first = register("인덱스1.txt", "인덱스를 지우기 전에 처리한다.");
+		await(() -> "READY".equals(status(first)));
+		// 운영자가 인덱스를 지웠다. 워커는 인덱스를 이미 확인했다고 기억하고 있다.
+		es().delete().uri("/thr_doc_chunk_v1").retrieve().toBodilessEntity();
+
+		Fixture second = register("인덱스2.txt", "인덱스를 지운 뒤에 처리한다.");
+		await(() -> "READY".equals(status(second)));
+		JsonNode mapping = es().get().uri("/thr_doc_chunk/_mapping").retrieve().body(JsonNode.class);
+		assertThat(mapping.has("thr_doc_chunk_v1")).as("별칭이 원래 이름의 인덱스를 가리킨다").isTrue();
+		assertThat(mapping.path("thr_doc_chunk_v1").path("mappings").path("properties").path("emb").path("type").asString())
+				.isEqualTo("dense_vector");
+		assertThat(count(second)).isEqualTo(((Integer) run(second, 1).get("chunk_cnt")).longValue());
+	}
+
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }
 
 	private Fixture register(String fileName, String text) {
