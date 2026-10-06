@@ -35,11 +35,6 @@ RUN --mount=type=cache,target=/root/.gradle \
 FROM eclipse-temurin:17-jre AS runtime
 WORKDIR /app
 
-# 헬스체크(compose)가 컨테이너 안에서 curl을 쓰므로 설치한다.
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends curl \
-	&& rm -rf /var/lib/apt/lists/*
-
 # 루트가 아닌 사용자로 실행한다.
 RUN useradd -r -u 1001 appuser
 

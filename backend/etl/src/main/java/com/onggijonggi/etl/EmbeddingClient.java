@@ -64,7 +64,13 @@ public class EmbeddingClient {
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("EMBEDDING", error);
 		}
-		JsonNode root = json.readTree(body == null ? "{}" : body);
+		JsonNode root;
+		try {
+			root = json.readTree(body == null ? "{}" : body);
+		} catch (RuntimeException unreadable) {
+			// 200인데 본문이 JSON이 아니다(게이트웨이 오류 페이지·잘린 응답). 서버 쪽 일시 문제로 보고 다시 시도한다.
+			throw EtlFailure.transientFailure("EMBEDDING_UNAVAILABLE", "응답을 해석하지 못했다", unreadable);
+		}
 		JsonNode data = root.path("data");
 		if (!settings.model().equals(root.path("model").asString(settings.model())) || data.size() != batch.size())
 			throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 모델·개수 불일치: " + root.path("model").asString("") + " " + data.size() + "/" + batch.size());

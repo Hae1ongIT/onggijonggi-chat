@@ -34,13 +34,14 @@ final class FakeServices implements AutoCloseable {
 	final AtomicInteger embeddingCalls = new AtomicInteger();
 
 	private final HttpServer server;
+	private final java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newCachedThreadPool();
 	private final ObjectMapper json = JsonMapper.builder().build();
 
 	FakeServices() throws IOException {
 		server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		server.createContext("/api/v1/thread-sources/", this::source);
 		server.createContext("/v1/embeddings", this::embeddings);
-		server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+		server.setExecutor(executor);
 		server.start();
 	}
 
@@ -106,5 +107,6 @@ final class FakeServices implements AutoCloseable {
 	@Override
 	public void close() {
 		server.stop(0);
+		executor.shutdownNow();
 	}
 }

@@ -37,10 +37,20 @@ class ChunkerTest {
 		String paragraph = sentence.repeat(20);
 		var chunks = chunker.chunk(document, 3, List.of(new TextExtractor.Section(null, paragraph)));
 
-		assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.content().length()).isLessThanOrEqualTo(150 + 20));
+		assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.content().length()).isLessThanOrEqualTo(150 + 20 + 2));
 		assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.content().length()).isGreaterThan(20));
 		assertThat(String.join("", chunks.stream().map(Chunker.Chunk::content).toList())).contains("문장입니다");
 		assertThat(chunks.get(0).id()).isEqualTo(document + ":3:1");
+	}
+
+	@Test
+	void textWithoutSentenceBoundariesIsCutAtTheMaximum() {
+		String token = "가".repeat(400);
+		var chunks = chunker.chunk(document, 1, List.of(new TextExtractor.Section(null, token)));
+
+		assertThat(chunks).hasSizeGreaterThan(1);
+		assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.content().length()).isLessThanOrEqualTo(150 + 20 + 2));
+		assertThat(chunks.get(0).content()).hasSize(150);
 	}
 
 	@Test

@@ -52,8 +52,12 @@ public class ChunkIndex {
 				try {
 					client.put().uri("/{index}", settings.index()).contentType(MediaType.APPLICATION_JSON)
 							.body(utf8(json.writeValueAsString(body))).retrieve().toBodilessEntity();
-				} catch (HttpClientErrorException.BadRequest exists) {
-					// 다른 워커가 먼저 만들었거나 인덱스만 있고 별칭이 없다. 별칭만 붙인다.
+				} catch (HttpClientErrorException.BadRequest rejected) {
+					String reason = rejected.getResponseBodyAsString();
+					// 다른 워커가 먼저 만들었거나 인덱스만 있고 별칭이 없다. 별칭만 붙인다. 그 밖의 400(nori 플러그인 없음, 매핑 오류)은
+					// 원인을 그대로 남기고 영구 실패로 둔다 — 별칭 붙이기로 넘어가면 진짜 원인이 "인덱스 없음"으로 가려진다.
+					if (!reason.contains("resource_already_exists_exception"))
+						throw EtlFailure.permanent("INDEX_REJECTED", "인덱스 생성 거절: " + HttpCalls.abbreviate(reason), rejected);
 					client.put().uri("/{index}/_alias/{alias}", settings.index(), settings.alias()).retrieve().toBodilessEntity();
 				}
 			}

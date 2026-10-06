@@ -53,7 +53,7 @@ public class RunStore {
 		// 후보는 잠그지 않고 고른 뒤 문서 → 회차 순서로 잠근다(A의 등록·재처리와 같은 순서라 교착이 없다).
 		// 다른 워커가 같은 회차를 잡고 있으면 회차 잠금에서 건너뛰고 다음 후보를 본다.
 		var candidates = jdbc.queryForList("select id, doc_id from thr_doc_run where status in ('PENDING', 'RUNNING')"
-				+ " and next_at <= now() order by next_at limit 5");
+				+ " and next_at <= now() order by next_at, id limit 5");
 		if (candidates.isEmpty()) return null;
 		for (var candidate : candidates) {
 			UUID run = (UUID) candidate.get("id");
@@ -129,8 +129,9 @@ public class RunStore {
 		transactions.executeWithoutResult(tx -> {
 			jdbc.queryForList("select id from thr_doc where id = ? for update", job.document());
 			if (!owned(job)) return;
-			ThreadDocumentStates.transition(jdbc, job.document(), "PROCESSING", "FAILED");
-			jdbc.update("update thr_doc_run set status = 'FAILED', err = ?, updated_at = now() where id = ?", code, job.run());
+			// 그사이 삭제된 문서면 실패가 아니라 취소다(complete와 같은 기록). 청크는 어느 쪽이든 정리 작업이 지운다.
+			String status = ThreadDocumentStates.transition(jdbc, job.document(), "PROCESSING", "FAILED") ? "FAILED" : "CANCELLED";
+			jdbc.update("update thr_doc_run set status = ?, err = ?, updated_at = now() where id = ?", status, code, job.run());
 		});
 	}
 
@@ -165,6 +166,31 @@ public class RunStore {
 				+ " or exists (select 1 from thr_doc_run n where n.doc_id = r.doc_id and n.status = 'DONE' and n.run_seq > r.run_seq)))"
 				+ " order by r.updated_at limit ?",
 				(rs, row) -> new Stale(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getInt(3)), limit);
+	}
+
+	/**
+	 * 등록됐는데(REGISTERED 사건) 진행 중 회차가 없는 PENDING 문서에 회차를 보충한다. 회차는 등록 확정과 같은 트랜잭션에서 만들어지지만,
+	 * 이 migration 전 버전의 BFF가 롤링 배포 중에 확정한 등록이나 수동 조작으로 회차 없는 문서가 생기면 ETL이 영영 집지 않는다.
+	 * 막 등록된 문서와 겹치지 않게 1분 넘게 그대로인 문서만 본다. 보충한 수를 돌려준다.
+	 */
+	public int requeueOrphans(int limit) {
+		List<UUID> orphans = jdbc.queryForList("select d.id from thr_doc d where d.status = 'PENDING'"
+				+ " and d.updated_at < now() - interval '1 minute'"
+				+ " and exists (select 1 from thr_doc_evt e where e.doc_id = d.id and e.evt_kind = 'REGISTERED')"
+				+ " and not exists (select 1 from thr_doc_run r where r.doc_id = d.id and r.status in ('PENDING', 'RUNNING'))"
+				+ " order by d.updated_at limit ?", UUID.class, limit);
+		int queued = 0;
+		for (UUID document : orphans) {
+			Boolean created = transactions.execute(tx -> {
+				var docs = jdbc.queryForList("select tnn_id, thr_id from thr_doc where id = ? and status = 'PENDING' for update", document);
+				if (docs.isEmpty() || !jdbc.queryForList("select id from thr_doc_run where doc_id = ? and status in ('PENDING', 'RUNNING')",
+						document).isEmpty()) return false;
+				ThreadDocumentStates.createRun(jdbc, document, (UUID) docs.get(0).get("tnn_id"), (UUID) docs.get(0).get("thr_id"));
+				return true;
+			});
+			if (Boolean.TRUE.equals(created)) queued++;
+		}
+		return queued;
 	}
 
 	public void purged(Stale stale) {

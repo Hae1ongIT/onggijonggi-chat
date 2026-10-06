@@ -271,6 +271,9 @@ public class ThreadDocumentService {
 
 	/** ETL 처리 결과 전이. 규칙은 ETL 워커와 같은 ThreadDocumentStates를 쓴다. 사용자 설정 API는 제공하지 않는다. */
 	public boolean processing(UUID id, String expected, String next) {
+		// 재처리 전이(FAILED→PENDING)는 회차 생성·사건 기록과 한 트랜잭션이어야 해서 change(REPROCESSED)로만 연다.
+		// 여기서 열면 회차 없는 PENDING 문서가 생겨 ETL이 영영 집지 않는다.
+		if (next.equals("PENDING")) throw new IllegalArgumentException("재처리는 change(REPROCESSED)로만 연다");
 		return transactions.execute(tx -> ThreadDocumentStates.transition(jdbc, id, expected, next));
 	}
 

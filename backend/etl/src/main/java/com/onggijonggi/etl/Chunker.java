@@ -33,7 +33,7 @@ public class Chunker {
 			for (String paragraph : paragraphs(section.text())) {
 				paragraphIndex++;
 				for (String piece : splitLong(paragraph)) {
-					// 겹침 꼬리만 있는 상태에서는 내보내지 않는다(꼬리만으로 된 청크 방지). 그래서 청크는 최대 max+overlap 자다.
+					// 겹침 꼬리만 있는 상태에서는 내보내지 않는다(꼬리만으로 된 청크 방지). 그래서 청크는 최대 max + overlap + 구분자(2자)다.
 					if (current.length() > previousTail.length() && current.length() + piece.length() + 2 > settings.target()) {
 						previousTail = emit(chunks, document, runSeq, section, startParagraph, current.toString());
 						current = new StringBuilder(previousTail);

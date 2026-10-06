@@ -61,6 +61,21 @@ class TextExtractorTest {
 				});
 	}
 
+	@Test
+	void unsupportedExtensionFailsPermanently() {
+		assertThatThrownBy(() -> extractor.extract("slide.pptx", new byte[] {1}))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> {
+					assertThat(failure.code()).isEqualTo("UNSUPPORTED_FILE");
+					assertThat(failure.permanent()).isTrue();
+				});
+	}
+
+	@Test
+	void pdfLayoutSpacingIsTidied() {
+		assertThat(TextExtractor.tidyLayout("  제   1   조 \n\n\n\n  연차\u00A0\u00A0휴가  "))
+				.isEqualTo("제 1 조\n\n연차 휴가");
+	}
+
 	/** 글자만 있는 PDF(페이지마다 한 줄). 인자가 없으면 글자 없는 한 페이지 — 스캔 PDF와 같다. */
 	static byte[] pdf(String... pages) throws IOException {
 		try (var document = new PDDocument(); var out = new ByteArrayOutputStream()) {

@@ -189,7 +189,7 @@ class ThreadDocumentPostgresTest {
 				hold.setObject(1, id); hold.executeQuery();
 			}
 			var retry = executor.submit(() -> upload(id, owner));
-			Thread.sleep(300);
+			awaitLockWait(connection);
 			assertThat(retry.isDone()).as("앞선 재시도가 문서 행을 쥔 동안 기다린다").isFalse();
 			try (var first = connection.prepareStatement("update thr_doc set status='UPLOADING', src_att_id=? where id=?")) {
 				first.setObject(1, UUID.randomUUID()); first.setObject(2, id); first.executeUpdate();
@@ -526,6 +526,58 @@ class ThreadDocumentPostgresTest {
 		assertThat(jdbc.update("update thr_mbr set status='REVOKED',ended_at=now(),end_rsn='OWNER_REVOKED' where thr_id=? and user_id=?", room, member.userId())).isEqualTo(1);
 		status(() -> service.change(room, id, member, "UNPINNED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
 		assertThat(service.list(room, owner).documents().get(0).pinned()).isTrue();
+	}
+
+	/** 다른 연결이 행 잠금을 기다리기 시작할 때까지 본다(시간 추측 대신 DB의 잠금 대기 상태로 확인). */
+	private static void awaitLockWait(java.sql.Connection holder) throws Exception {
+		try (var probe = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+				var query = probe.prepareStatement("select count(*) from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()")) {
+			for (int i = 0; i < 100; i++) {
+				try (var rows = query.executeQuery()) {
+					rows.next();
+					if (rows.getInt(1) > 0) return;
+				}
+				Thread.sleep(100);
+			}
+		}
+		throw new AssertionError("다른 요청이 행 잠금을 기다리지 않았다");
+	}
+
+	@Test void concurrentReprocessRequestsWithDifferentIdsLetExactlyOneThrough() throws Exception {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		failProcessing(id);
+		var executor = Executors.newFixedThreadPool(2);
+		try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+			connection.setAutoCommit(false);
+			try (var hold = connection.prepareStatement("select id from thr_doc where id=? for update")) {
+				hold.setObject(1, id); hold.executeQuery();
+			}
+			var first = executor.submit(() -> { service.change(room, id, owner, "REPROCESSED", UUID.randomUUID()); return true; });
+			var second = executor.submit(() -> { service.change(room, id, owner, "REPROCESSED", UUID.randomUUID()); return true; });
+			awaitLockWait(connection);
+			connection.commit();
+			int succeeded = 0, conflicted = 0;
+			for (var result : java.util.List.of(first, second)) {
+				try {
+					result.get(10, TimeUnit.SECONDS);
+					succeeded++;
+				} catch (java.util.concurrent.ExecutionException error) {
+					assertThat(error.getCause()).isInstanceOfSatisfying(ResponseStatusException.class,
+							status -> assertThat(status.getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
+					conflicted++;
+				}
+			}
+			assertThat(succeeded).isEqualTo(1);
+			assertThat(conflicted).isEqualTo(1);
+		} finally { executor.shutdown(); }
+		assertThat(jdbc.queryForObject("select count(*) from thr_doc_run where doc_id=? and status='PENDING'", Integer.class, id)).isEqualTo(1);
+	}
+
+	@Test void processingNeverReopensAFailedDocumentWithoutARun() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		failProcessing(id);
+		assertThatThrownBy(() -> service.processing(id, "FAILED", "PENDING")).isInstanceOf(IllegalArgumentException.class);
+		assertThat(jdbc.queryForObject("select status from thr_doc where id=?", String.class, id)).isEqualTo("FAILED");
 	}
 
 	/** ETL이 처리를 최종 실패로 끝낸 상태: 문서 FAILED, 회차 FAILED. */

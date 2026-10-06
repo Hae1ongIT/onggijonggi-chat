@@ -72,7 +72,8 @@ class IngestionIntegrationTest {
 		registry.add("app.etl.retry-delays", () -> "200ms,200ms");
 		registry.add("app.etl.poll-delay", () -> "100ms");
 		registry.add("app.etl.sweep-delay", () -> "300ms");
-		registry.add("app.etl.concurrency", () -> "1");
+		// 운영 기본값과 같은 2개 스레드로 돌려 선점 경합도 함께 지난다.
+		registry.add("app.etl.concurrency", () -> "2");
 		registry.add("app.etl.embedding.batch-size", () -> "4");
 		// 적재를 여러 요청으로 나누는 경로도 지나게 한다.
 		registry.add("app.etl.elasticsearch.bulk-size", () -> "2");
@@ -142,8 +143,10 @@ class IngestionIntegrationTest {
 	@Test
 	void documentDeletedWhileProcessingStaysDeletedAndItsChunksArePurged() throws Exception {
 		FAKE.embeddingGate = new CountDownLatch(1);
+		int before = FAKE.embeddingCalls.get();
 		Fixture doc = register("삭제.txt", "처리 중 삭제된다.");
-		await(() -> "PROCESSING".equals(status(doc)) && FAKE.embeddingCalls.get() > 0);
+		// 이 문서의 임베딩 요청이 가짜 서버에서 멈춰 있을 때(임베딩 중) 삭제한다.
+		await(() -> "PROCESSING".equals(status(doc)) && FAKE.embeddingCalls.get() > before);
 		jdbc.update("update thr_doc set status='DELETED', pnn=false, deleted_at=now() where id=?", doc.id);
 		FAKE.embeddingGate.countDown();
 
@@ -187,6 +190,39 @@ class IngestionIntegrationTest {
 		assertThat(run(doc, 1).get("err")).isEqualTo("RETRY_EXHAUSTED");
 		assertThat(run(doc, 1).get("att_cnt")).isEqualTo(3);
 		assertThat(FAKE.embeddingCalls.get()).isEqualTo(calls);
+	}
+
+	@Test
+	void twoWorkersProcessManyDocumentsWithoutClaimingTheSameRunTwice() {
+		var docs = java.util.stream.IntStream.range(0, 6)
+				.mapToObj(i -> register("동시" + i + ".txt", "동시에 처리되는 문서 " + i + "번의 본문이다."))
+				.toList();
+		await(() -> docs.stream().allMatch(doc -> "READY".equals(status(doc))));
+		for (Fixture doc : docs) {
+			assertThat(run(doc, 1)).containsEntry("status", "DONE").containsEntry("att_cnt", 1);
+			assertThat(count(doc)).isEqualTo(((Integer) run(doc, 1).get("chunk_cnt")).longValue());
+		}
+	}
+
+	@Test
+	void registeredPendingDocumentWithoutARunGetsOneAndIsProcessed() {
+		// 회차 생성 전 버전의 BFF가 확정한 등록(롤링 배포 틈): REGISTERED 사건은 있는데 회차가 없다.
+		Fixture doc = register("고아.txt", "회차 없이 남은 등록 문서다.", "PENDING", false);
+		try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+				var statement = connection.createStatement()) {
+			statement.execute("set session_replication_role = replica");
+			try (var event = connection.prepareStatement("insert into thr_doc_evt(id, tnn_id, thr_id, doc_id, act_user_id, evt_kind, req_key)"
+					+ " values (?, ?, ?, ?, ?, 'REGISTERED', ?)")) {
+				event.setObject(1, UUID.randomUUID()); event.setObject(2, doc.tenant); event.setObject(3, doc.thread);
+				event.setObject(4, doc.id); event.setObject(5, UUID.randomUUID()); event.setObject(6, doc.id);
+				event.executeUpdate();
+			}
+			statement.execute("update thr_doc set updated_at = now() - interval '2 minutes' where id = '" + doc.id + "'");
+		} catch (java.sql.SQLException error) {
+			throw new IllegalStateException(error);
+		}
+		await(() -> "READY".equals(status(doc)));
+		assertThat(run(doc, 1)).containsEntry("status", "DONE");
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }
