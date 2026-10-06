@@ -66,6 +66,11 @@ final class FakeServices implements AutoCloseable {
 
 	private void embeddings(HttpExchange exchange) throws IOException {
 		embeddingCalls.incrementAndGet();
+		// 실제 임베딩 서버(vLLM·uvicorn)는 HTTP/2 업그레이드(h2c) 요청의 본문을 받지 못해 400을 준다. 같은 조건을 재현한다.
+		if (exchange.getRequestHeaders().containsKey("Upgrade")) {
+			respond(exchange, 400, "{\"error\":{\"message\":\"body Field required\"}}");
+			return;
+		}
 		JsonNode request = json.readTree(exchange.getRequestBody().readAllBytes());
 		CountDownLatch gate = embeddingGate;
 		if (gate != null) {

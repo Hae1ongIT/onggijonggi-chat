@@ -18,7 +18,10 @@ final class HttpCalls {
 	}
 
 	static RestClient client(String baseUrl, Duration timeout) {
-		var factory = new JdkClientHttpRequestFactory(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+		// HTTP/1.1로 고정한다. JDK HttpClient의 기본(HTTP/2)은 http:// 주소에 h2c 업그레이드를 시도하는데, 사내 임베딩 서버(vLLM·uvicorn)는
+		// 그 요청의 본문을 받지 못해 "body Field required"로 거절한다.
+		var factory = new JdkClientHttpRequestFactory(HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+				.connectTimeout(Duration.ofSeconds(10)).build());
 		factory.setReadTimeout(timeout);
 		return RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
 	}
