@@ -90,9 +90,11 @@ class IngestionIntegrationTest {
 		FAKE.embeddingGate = null;
 		if (gate != null) gate.countDown();
 		FAKE.embeddingFailures.set(0);
+		FAKE.embeddingCalls.set(0);
 		FAKE.wrongDimensions = false;
 		await("진행 중 회차가 모두 끝남", () -> jdbc.queryForObject(
 				"select count(*) from thr_doc_run where status in ('PENDING', 'RUNNING')", Integer.class) == 0);
+		FAKE.sources.clear();
 	}
 
 	@AfterAll

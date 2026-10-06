@@ -115,7 +115,10 @@ public class RunStore {
 		return Boolean.TRUE.equals(alive);
 	}
 
-	/** 모든 청크를 적재·대조한 뒤 READY로 확정한다. 그사이 삭제됐으면 false — 호출자가 방금 적재한 청크를 지운다. */
+	/**
+	 * 모든 청크를 적재·대조한 뒤 READY로 확정한다. 그사이 삭제됐으면 false이고 회차는 CANCELLED가 된다 — 적재한 청크는 RunSweeper가 지운다.
+	 * 호출자가 바로 지우지 않는다: false가 이 워커의 소유가 끝난 경우일 수도 있어, 지금 소유자의 청크를 지우면 안 된다.
+	 */
 	public boolean complete(Job job, int chunks, String model, int dimensions, String chunking) {
 		Boolean done = transactions.execute(tx -> {
 			jdbc.queryForList("select id from thr_doc where id = ? for update", job.document());

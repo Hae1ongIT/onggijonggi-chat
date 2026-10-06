@@ -63,9 +63,9 @@ export class ThreadDocumentsMock {
           })
         : new Response(null, { status: 404 });
     }
-    if (!active) return new Response(null, { status: 409 });
     const url = new URL(request.url);
     if (request.method === 'POST' && !id) {
+      if (!active) return new Response(null, { status: 409 });
       const documentId = url.searchParams.get('documentId');
       if (!documentId || !/^[a-f0-9-]{36}$/i.test(documentId))
         return new Response(null, { status: 400 });
@@ -143,7 +143,7 @@ export class ThreadDocumentsMock {
         : body.pinned
           ? 'pin'
           : 'unpin';
-    // 서버와 같은 순서: 문서 확인 → 권한(403) → 재전송 판정.
+    // 서버와 같은 순서: 문서 확인 → 권한(403) → 재전송 판정 → 방 쓰기 가능. 이미 반영된 변경의 재전송은 방이 잠겨도 성공이다.
     const doc = documents.get(id);
     if (!doc) return new Response(null, { status: 404 });
     if (action !== 'pin' && !owner && doc.uploader !== actor)
@@ -155,6 +155,7 @@ export class ThreadDocumentsMock {
         status:
           previous.action === action && previous.actor === actor ? 204 : 409,
       });
+    if (!active) return new Response(null, { status: 409 });
     if (
       (action === 'pin' && doc.value.pinned) ||
       (action === 'unpin' && !doc.value.pinned) ||

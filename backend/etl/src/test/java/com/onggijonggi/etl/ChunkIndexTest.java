@@ -79,6 +79,21 @@ class ChunkIndexTest {
 	}
 
 	@Test
+	void aliasMissingWhileCountingIsTransientAndRecreatedNextTime() {
+		es.reply("/thr_doc_chunk/_count", 404, "{}");
+		assertThatThrownBy(() -> index.count(job.document(), 1))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> {
+					assertThat(failure.code()).isEqualTo("INDEX_UNAVAILABLE");
+					assertThat(failure.permanent()).isFalse();
+				});
+		long aliasChecks = es.requests.stream().filter(request -> request.path().startsWith("/_alias/")).count();
+		es.reply("/thr_doc_chunk/_bulk", 200, "{\"errors\":false,\"items\":[]}");
+		index.write(job, chunks, vectors, "bge-m3");
+		assertThat(es.requests.stream().filter(request -> request.path().startsWith("/_alias/")).count())
+				.as("404 뒤에는 별칭을 다시 확인한다").isEqualTo(aliasChecks + 1);
+	}
+
+	@Test
 	void partialOrTimedOutDeletionIsNotTreatedAsDone() {
 		es.reply("/thr_doc_chunk/_delete_by_query", 200, "{\"timed_out\":false,\"failures\":[{\"cause\":\"shard\"}]}");
 		assertThatThrownBy(() -> index.delete(job.document(), 1))

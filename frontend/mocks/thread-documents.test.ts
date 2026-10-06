@@ -94,6 +94,46 @@ describe('문서 목업 계약', () => {
       (await mock.handle(upload(), [NORMAL_THREAD_ID, 'documents'])).status,
     ).toBe(404);
   });
+  it('방이 잠겨도 이미 반영된 변경의 재전송은 성공하고 새 변경은 막으며 다시 처리를 내주지 않는다', async () => {
+    const mock = new ThreadDocumentsMock();
+    const id = crypto.randomUUID();
+    const body = new FormData();
+    body.append('file', new File(['text'], 'x.txt'));
+    await mock.handle(
+      new Request(
+        `http://local/api/threads/${NORMAL_THREAD_ID}/documents?documentId=${id}`,
+        { method: 'POST', body },
+      ),
+      [NORMAL_THREAD_ID, 'documents'],
+    );
+    mock.fail(NORMAL_THREAD_ID, id);
+    const pin = (requestId: string, active: boolean) =>
+      mock.handle(
+        new Request('http://local', {
+          method: 'PUT',
+          body: JSON.stringify({ pinned: true, requestId }),
+        }),
+        [NORMAL_THREAD_ID, 'documents', id, 'pin'],
+        'mock-owner',
+        true,
+        active,
+      );
+    const applied = crypto.randomUUID();
+    expect((await pin(applied, true)).status).toBe(204);
+    expect((await pin(applied, false)).status).toBe(204);
+    expect((await pin(crypto.randomUUID(), false)).status).toBe(409);
+    const locked = await (
+      await mock.handle(
+        new Request('http://local'),
+        [NORMAL_THREAD_ID, 'documents'],
+        'mock-owner',
+        true,
+        false,
+      )
+    ).json();
+    expect(locked.documents[0].status).toBe('FAILED');
+    expect(locked.documents[0].canReprocess).toBe(false);
+  });
   it('처리 실패 문서만 재처리하고 같은 요청 재전송은 멱등이다', async () => {
     const mock = new ThreadDocumentsMock();
     const id = crypto.randomUUID();

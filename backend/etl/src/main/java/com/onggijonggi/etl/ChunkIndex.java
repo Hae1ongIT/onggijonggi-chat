@@ -73,7 +73,7 @@ public class ChunkIndex {
 	}
 
 	/**
-	 * 한 회차의 청크를 적재한다. 청크 ID가 문서 ID라 같은 회차를 다시 적재하면 덮어쓴다. 큰 문서는 청크가 수천 개라(청크당 벡터 약
+	 * 한 회차의 청크를 적재한다. 청크 ID가 문서·회차·순번(doc:run:seq)으로 정해져 같은 회차를 다시 적재하면 덮어쓴다. 큰 문서는 청크가 수천 개라(청크당 벡터 약
 	 * 10KB) 한 요청이 수십 MB가 되므로 bulkSize개씩 나눠 보낸다. 중간에 실패하면 다음 시도가 같은 ID로 처음부터 덮어쓴다.
 	 */
 	public void write(RunStore.Job job, List<Chunker.Chunk> chunks, List<float[]> vectors, String model) {
@@ -137,6 +137,10 @@ public class ChunkIndex {
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(runQuery(document, runSeq))))
 					.retrieve().body(String.class));
 			return response.path("count").asLong(-1);
+		} catch (HttpClientErrorException.NotFound aliasMissing) {
+			// 적재와 대조 사이에 인덱스가 지워졌다. 다음 시도에서 다시 만들어 처음부터 적재한다.
+			ensured = false;
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 별칭이 없다 — 다음 시도에서 다시 만든다", aliasMissing);
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}
