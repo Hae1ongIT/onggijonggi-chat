@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Class Name : IngestionWorkersTest.java
- * Description : 처리 스레드가 예외 하나로 죽지 않는지, 임베딩 주소가 없거나 차원이 매핑과 다르면 처리를 시작하지 않는지,
+ * Description : 처리 스레드가 예외·오류(스택 넘침 포함) 하나로 죽지 않는지, 임베딩 주소가 없거나 차원이 매핑과 다르면 처리를 시작하지 않는지,
  *               종료가 처리 중인 회차를 인터럽트하지 않는지 확인한다.
  */
 class IngestionWorkersTest {
@@ -42,13 +42,14 @@ class IngestionWorkersTest {
 		when(embeddings.configured()).thenReturn(true);
 		when(embeddings.dimensions()).thenReturn(1024);
 		when(index.mappingDimensions()).thenReturn(1024);
-		when(runs.claim(any(), anyInt())).thenReturn(job, job, job).thenReturn(null);
-		doThrow(new IllegalStateException("상태 확정 중 DB 끊김")).doNothing().when(pipeline).process(job);
+		// 선점 중 오류(Error), 처리 중 예외·스택 넘침 모두 스레드를 죽이거나 프로세스를 끝내지 않는다.
+		when(runs.claim(any(), anyInt())).thenThrow(new AssertionError("선점 중 오류")).thenReturn(job, job, job).thenReturn(null);
+		doThrow(new IllegalStateException("상태 확정 중 DB 끊김")).doThrow(new StackOverflowError()).doNothing().when(pipeline).process(job);
 		var workers = workers();
 		workers.start();
 		try {
 			verify(pipeline, timeout(5000).atLeast(3)).process(job);
-			verify(runs, atLeast(3)).claim(Duration.ofMinutes(10), 2);
+			verify(runs, atLeast(4)).claim(Duration.ofMinutes(10), 2);
 		} finally {
 			workers.stop();
 		}

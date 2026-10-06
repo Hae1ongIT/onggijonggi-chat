@@ -148,7 +148,11 @@ public class RunStore {
 				+ " where id = ? and status = 'RUNNING' and att_cnt = ?", code, delay.toMillis(), job.run(), job.attempts());
 	}
 
-	/** 종료 중이라 끝내지 못한 회차를 바로 다시 집을 수 있게 놓아준다. 이번 시도는 세지 않는다. 아직 이 워커 소유일 때만. */
+	/**
+	 * 종료 중이라 끝내지 못한 회차를 바로 다시 집을 수 있게 놓아준다. 이번 시도는 세지 않는다. 아직 이 워커 소유일 때만.
+	 * 한계: 시도 횟수를 되돌리므로 다른 인스턴스가 바로 다시 집으면 같은 att_cnt가 되어, 종료 직전까지 남은 이 워커 스레드의 소유 확인이
+	 * 통과할 수 있다. ETL은 한 인스턴스로 띄우고 남은 스레드는 데몬이라 JVM과 함께 끝난다. 여러 인스턴스로 늘릴 때 소유 토큰을 따로 둔다.
+	 */
 	public void release(Job job) {
 		jdbc.update("update thr_doc_run set status = 'PENDING', att_cnt = att_cnt - 1, next_at = now(), updated_at = now()"
 				+ " where id = ? and status = 'RUNNING' and att_cnt = ?", job.run(), job.attempts());

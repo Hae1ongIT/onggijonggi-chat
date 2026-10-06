@@ -75,7 +75,8 @@ public class IngestionWorkers implements SmartLifecycle {
 			RunStore.Job job;
 			try {
 				job = runs.claim(properties.lease(), properties.retryDelays().size() + 1);
-			} catch (RuntimeException error) {
+			} catch (Throwable error) {
+				// 오류(Error)도 잡는다 — 놓치면 이 스레드가 로그 없이 죽고 동시 처리 수가 줄어든다.
 				log.warn("처리 회차를 가져오지 못했다 — 잠시 뒤 다시 본다", error);
 				job = null;
 			}
@@ -86,13 +87,9 @@ public class IngestionWorkers implements SmartLifecycle {
 			current.put(Thread.currentThread(), job);
 			try {
 				pipeline.process(job);
-			} catch (VirtualMachineError fatal) {
-				// 메모리 부족 같은 JVM 오류 뒤에는 이 프로세스를 믿을 수 없다. 끝내서 컨테이너가 다시 띄우게 한다. 이 회차는 선점 시한 뒤
-				// 다시 집히고, 같은 문서가 계속 죽이면 시도 상한(claim)에서 실패로 끝난다.
-				log.error("처리 중 JVM 오류로 워커를 종료한다: doc={} run={}", job.document(), job.runSeq(), fatal);
-				Runtime.getRuntime().halt(1);
 			} catch (Throwable unexpected) {
-				// 상태 확정(DB) 실패 등. 스레드를 살려 두고, 이 회차는 선점 시한 뒤 다시 집힌다.
+				// 상태 확정(DB) 실패, 깊게 중첩된 문서의 스택 넘침 등. 스레드를 살려 두고, 이 회차는 선점 시한 뒤 다시 집히며 같은 문서가
+				// 계속 실패하면 시도 상한(claim)에서 실패로 끝난다. 메모리 부족은 JVM 옵션(ExitOnOutOfMemoryError)이 프로세스를 끝낸다.
 				log.error("처리 중 예기치 못한 오류 — 선점 시한 뒤 다시 처리한다: doc={} run={}", job.document(), job.runSeq(), unexpected);
 			} finally {
 				current.remove(Thread.currentThread());
@@ -126,7 +123,7 @@ public class IngestionWorkers implements SmartLifecycle {
 			}
 		}
 		// 기다려도 끝나지 못한 회차는 놓아준다 — 선점 시한(10분)을 기다리지 않고 다음 워커가 바로 집고, 이번 시도는 세지 않는다.
-		// 남은 스레드는 데몬이라 JVM과 함께 끝나고, 늦게 끝나도 소유 확인(att_cnt)에서 막힌다.
+		// 남은 스레드는 데몬이라 JVM과 함께 끝난다(여러 인스턴스일 때의 한계는 RunStore.release).
 		for (RunStore.Job job : current.values()) {
 			try {
 				runs.release(job);
