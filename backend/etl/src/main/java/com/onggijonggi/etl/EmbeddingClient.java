@@ -82,7 +82,10 @@ public class EmbeddingClient {
 				throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 순번·차원 불일치: index=" + index + " dim=" + embedding.size());
 			float[] vector = new float[embedding.size()];
 			for (int i = 0; i < vector.length; i++) {
-				vector[i] = (float) embedding.get(i).asDouble();
+				JsonNode value = embedding.get(i);
+				// 숫자가 아니거나(문자열 "NaN" 등) 유한하지 않으면 계약 위반이다. asDouble()은 숫자가 아닌 값에 예외를 던진다(Jackson 3).
+				if (!value.isNumber()) throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 벡터에 숫자가 아닌 값: index=" + index);
+				vector[i] = (float) value.asDouble();
 				if (!Float.isFinite(vector[i])) throw EtlFailure.permanent("EMBEDDING_CONTRACT", "응답 벡터에 유한하지 않은 값: index=" + index);
 			}
 			ordered[index] = vector;

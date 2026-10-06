@@ -85,11 +85,14 @@ class IngestionIntegrationTest {
 
 	@AfterEach
 	void reset() {
-		FAKE.embeddingFailures.set(0);
-		FAKE.wrongDimensions = false;
+		// 장애 흉내를 먼저 걷어 낸 뒤, 워커가 이 테스트의 진행 중 회차를 모두 끝낼 때까지 기다린다 — 다음 테스트와 겹치지 않게.
 		CountDownLatch gate = FAKE.embeddingGate;
 		FAKE.embeddingGate = null;
 		if (gate != null) gate.countDown();
+		FAKE.embeddingFailures.set(0);
+		FAKE.wrongDimensions = false;
+		await("진행 중 회차가 모두 끝남", () -> jdbc.queryForObject(
+				"select count(*) from thr_doc_run where status in ('PENDING', 'RUNNING')", Integer.class) == 0);
 	}
 
 	@AfterAll
@@ -138,7 +141,7 @@ class IngestionIntegrationTest {
 		FAKE.embeddingFailures.set(100);
 		Fixture doc = register("소진.txt", "계속 실패한다.");
 		await(() -> "FAILED".equals(status(doc)));
-		assertThat(run(doc, 1)).containsEntry("err", "RETRY_EXHAUSTED").containsEntry("att_cnt", 3);
+		assertThat(run(doc, 1)).containsEntry("err", "RETRY_EXHAUSTED:EMBEDDING_UNAVAILABLE").containsEntry("att_cnt", 3);
 	}
 
 	@Test
@@ -174,8 +177,7 @@ class IngestionIntegrationTest {
 	@Test
 	void runAbandonedByADeadWorkerIsResumedAfterItsLease() {
 		Fixture doc = register("재개.txt", "죽은 워커의 회차를 다시 처리한다.", "PROCESSING", false);
-		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', 1, ?)",
-				UUID.randomUUID(), doc.id, doc.tenant, doc.thread, java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+		insertRunningRun(doc, 1, "now() - interval '1 second'");
 		await(() -> "READY".equals(status(doc)));
 		assertThat(run(doc, 1)).containsEntry("status", "DONE").containsEntry("att_cnt", 2);
 	}
@@ -185,8 +187,7 @@ class IngestionIntegrationTest {
 		Fixture doc = register("독.txt", "처리할 때마다 워커를 죽이는 문서라고 가정한다.", "PROCESSING", false);
 		int calls = FAKE.embeddingCalls.get();
 		// 재시도 간격 2개 → 최대 3회. 세 번째 시도 중 워커가 죽어 시한이 지난 상태.
-		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', 3, now() - interval '1 second')",
-				UUID.randomUUID(), doc.id, doc.tenant, doc.thread);
+		insertRunningRun(doc, 3, "now() - interval '1 second'");
 		await(() -> "FAILED".equals(status(doc)));
 		assertThat(run(doc, 1).get("err")).isEqualTo("RETRY_EXHAUSTED");
 		assertThat(run(doc, 1).get("att_cnt")).isEqualTo(3);
@@ -230,7 +231,8 @@ class IngestionIntegrationTest {
 	void deletedSearchIndexIsRecreatedWithItsMappingInsteadOfAutoCreatedBlank() {
 		Fixture first = register("인덱스1.txt", "인덱스를 지우기 전에 처리한다.");
 		await(() -> "READY".equals(status(first)));
-		// 운영자가 인덱스를 지웠다. 워커는 인덱스를 이미 확인했다고 기억하고 있다.
+		// 운영자가 인덱스를 지웠다. 워커는 인덱스를 이미 확인했다고 기억하고 있다. 공유 인덱스라 다른 테스트의 청크도 지워지지만,
+		// 다른 테스트는 자기 문서만 세고(count) 인덱스가 없으면 0으로 본다.
 		es().delete().uri("/thr_doc_chunk_v1").retrieve().toBodilessEntity();
 
 		Fixture second = register("인덱스2.txt", "인덱스를 지운 뒤에 처리한다.");
@@ -245,10 +247,8 @@ class IngestionIntegrationTest {
 	@Test
 	void runReleasedAtShutdownIsPickedUpAtOnceWithoutSpendingAnAttempt() {
 		Fixture doc = register("놓아주기.txt", "종료 대기 안에 끝나지 못해 놓아준 회차다.", "PROCESSING", false);
-		UUID run = UUID.randomUUID();
 		// 다른 워커가 처리 중(시한 10분 남음)이던 회차. 그 워커가 종료하며 놓아준다.
-		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', 1, now() + interval '10 minutes')",
-				run, doc.id, doc.tenant, doc.thread);
+		UUID run = insertRunningRun(doc, 1, "now() + interval '10 minutes'");
 		runStore.release(new RunStore.Job(run, doc.id, doc.tenant, doc.thread, 1, 1, "놓아주기.txt", null, null));
 
 		await(() -> "READY".equals(status(doc)));
@@ -256,6 +256,14 @@ class IngestionIntegrationTest {
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }
+
+	/** 워커가 처리 중이던(RUNNING) 1회차를 직접 만든다. nextAt은 선점 시한 SQL 식이다. */
+	private UUID insertRunningRun(Fixture doc, int attempts, String nextAt) {
+		UUID run = UUID.randomUUID();
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at) values (?, ?, ?, ?, 1, 'RUNNING', ?, "
+				+ nextAt + ")", run, doc.id, doc.tenant, doc.thread, attempts);
+		return run;
+	}
 
 	private Fixture register(String fileName, String text) {
 		return register(fileName, text, "PENDING", true);
@@ -303,14 +311,21 @@ class IngestionIntegrationTest {
 		}
 	}
 
+	private RestClient es;
+
 	private RestClient es() {
-		return RestClient.create("http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
+		if (es == null) es = RestClient.create("http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
+		return es;
 	}
 
 	private static void await(BooleanSupplier condition) {
+		await("조건", condition);
+	}
+
+	private static void await(String what, BooleanSupplier condition) {
 		Instant deadline = Instant.now().plusSeconds(60);
 		while (!condition.getAsBoolean()) {
-			if (Instant.now().isAfter(deadline)) throw new AssertionError("60초 안에 조건이 이뤄지지 않았다");
+			if (Instant.now().isAfter(deadline)) throw new AssertionError("60초 안에 이뤄지지 않았다: " + what);
 			try {
 				Thread.sleep(100);
 			} catch (InterruptedException interrupted) {

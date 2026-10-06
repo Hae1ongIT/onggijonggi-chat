@@ -26,6 +26,13 @@ public class RunStore {
 	/** 정리 대상 회차. */
 	public record Stale(UUID run, UUID document, int runSeq) { }
 
+	/** 한 번의 claim에서 취소·건너뛰기로 넘길 수 있는 회차 수. 넘으면 다음 폴링에서 다시 본다. */
+	private static final int MAX_SKIPS = 20;
+	/** 잠그기 전에 고르는 후보 수. 다른 워커가 잡고 있는 회차를 건너뛸 여유다. */
+	private static final int CANDIDATES = 5;
+	/** 회차 보충을 기다리는 시간. 막 등록 확정 중인 문서(회차는 같은 트랜잭션에서 생김)와 겹치지 않게 둔다. */
+	static final String ORPHAN_GRACE = "1 minute";
+
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate transactions;
 
@@ -39,7 +46,7 @@ public class RunStore {
 	 * 문서가 사라졌거나 삭제됐으면 회차를 CANCELLED로 두고 다음을 본다. 없으면 null.
 	 */
 	public Job claim(Duration lease, int maxAttempts) {
-		for (int skipped = 0; skipped < 20; skipped++) {
+		for (int skipped = 0; skipped < MAX_SKIPS; skipped++) {
 			Claim claim = transactions.execute(tx -> claimOne(lease, maxAttempts));
 			if (claim == null) return null;
 			if (claim.job() != null) return claim.job();
@@ -53,7 +60,7 @@ public class RunStore {
 		// 후보는 잠그지 않고 고른 뒤 문서 → 회차 순서로 잠근다(A의 등록·재처리와 같은 순서라 교착이 없다).
 		// 다른 워커가 같은 회차를 잡고 있으면 회차 잠금에서 건너뛰고 다음 후보를 본다.
 		var candidates = jdbc.queryForList("select id, doc_id from thr_doc_run where status in ('PENDING', 'RUNNING')"
-				+ " and next_at <= now() order by next_at, id limit 5");
+				+ " and next_at <= now() order by next_at, id limit " + CANDIDATES);
 		if (candidates.isEmpty()) return null;
 		for (var candidate : candidates) {
 			UUID run = (UUID) candidate.get("id");
@@ -181,7 +188,7 @@ public class RunStore {
 	 */
 	public int requeueOrphans(int limit) {
 		List<UUID> orphans = jdbc.queryForList("select d.id from thr_doc d where d.status = 'PENDING'"
-				+ " and d.updated_at < now() - interval '1 minute'"
+				+ " and d.updated_at < now() - interval '" + ORPHAN_GRACE + "'"
 				+ " and exists (select 1 from thr_doc_evt e where e.doc_id = d.id and e.evt_kind = 'REGISTERED')"
 				+ " and not exists (select 1 from thr_doc_run r where r.doc_id = d.id and r.status in ('PENDING', 'RUNNING'))"
 				+ " order by d.updated_at limit ?", UUID.class, limit);

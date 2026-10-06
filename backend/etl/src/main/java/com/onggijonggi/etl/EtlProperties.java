@@ -21,7 +21,7 @@ public record EtlProperties(
 		/** 할 일이 없을 때 다시 볼 간격. */
 		@DefaultValue("2s") Duration pollDelay,
 		@DefaultValue("10m") Duration lease,
-		/** 일시 오류 뒤 다음 시도까지의 간격. 길이가 곧 최대 시도 횟수(첫 시도 포함 길이+1)다. */
+		/** 일시 오류 뒤 다음 시도까지의 간격. 최대 시도 횟수는 길이+1(첫 시도 포함)이다. */
 		@DefaultValue({"30s", "2m", "10m", "30m"}) List<Duration> retryDelays,
 		/** 요청 하나의 응답 대기 상한(원본·임베딩·Elasticsearch 공통). */
 		@DefaultValue("60s") Duration requestTimeout) {

@@ -80,9 +80,15 @@ public class IngestionPipeline {
 					failure.getMessage(), failure.getCause());
 			return;
 		}
-		String code = failure.permanent() ? failure.code() : "RETRY_EXHAUSTED";
+		// 재시도를 다 쓰면 마지막 일시 오류 코드를 함께 남긴다 — 내부 key 불일치(SOURCE_UNAUTHORIZED) 같은 원인을 DB에서 볼 수 있게 한다.
+		String code = failure.permanent() ? failure.code() : truncate("RETRY_EXHAUSTED:" + failure.code());
 		runs.fail(job, code);
 		log.error("문서 처리 실패({}): doc={} run={} {}", code, job.document(), job.runSeq(), failure.getMessage(), failure.getCause());
+	}
+
+	/** thr_doc_run.err는 64자다. */
+	private static String truncate(String code) {
+		return code.length() > 64 ? code.substring(0, 64) : code;
 	}
 
 	private void alive(RunStore.Job job) {

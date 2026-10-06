@@ -3,6 +3,8 @@ package com.onggijonggi.etl;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,20 +21,19 @@ import org.springframework.stereotype.Component;
 public class IngestionWorkers implements SmartLifecycle {
 
 	private static final Logger log = LoggerFactory.getLogger(IngestionWorkers.class);
+	/** 종료 시 처리 중인 회차를 기다리는 상한. compose 종료 유예(etl은 20초) 안에 Spring 종료까지 끝나야 한다. */
+	private static final Duration STOP_WAIT = Duration.ofSeconds(8);
 
 	private final RunStore runs;
 	private final IngestionPipeline pipeline;
 	private final EmbeddingClient embeddings;
 	private final ChunkIndex index;
 	private final EtlProperties properties;
-	/** 종료 시 처리 중인 회차를 기다리는 상한. compose 기본 종료 유예(10초)보다 짧아야 강제 종료 전에 끝난다. */
-	private static final Duration STOP_WAIT = Duration.ofSeconds(8);
-
 	private final AtomicBoolean running = new AtomicBoolean();
 	/** 처리하지 않는 이유. null이면 처리 중이다. 주기 경고에 쓴다. */
 	private volatile String disabledReason;
 	/** 스레드마다 지금 처리 중인 회차. 종료 대기 안에 끝나지 못한 회차를 놓아줄 때 쓴다. */
-	private final java.util.Map<Thread, RunStore.Job> current = new java.util.concurrent.ConcurrentHashMap<>();
+	private final Map<Thread, RunStore.Job> current = new ConcurrentHashMap<>();
 	private final List<Thread> threads = new ArrayList<>();
 
 	public IngestionWorkers(RunStore runs, IngestionPipeline pipeline, EmbeddingClient embeddings, ChunkIndex index,
