@@ -47,6 +47,7 @@ class ThreadDocumentSearchTest {
 		SearchResult result = search.search(room, actor, "연차", List.of(), null).block();
 
 		assertThat(result.status()).isEqualTo(SearchResult.Status.UNAVAILABLE);
+		assertThat(result.reason()).isEqualTo(SearchResult.Reason.OVERLOADED);
 		verify(documents).searchScope(eq(room), any());
 		verifyNoInteractions(embedder);
 	}

@@ -26,6 +26,10 @@
   {"id": "noun-4", "type": "noun", "question": "종달새로 고객 파일 보내도 돼?", "document": "security.md", "contains": "종달새"},
   {"id": "noun-5", "type": "noun", "question": "OG 자산 태그는 어디 붙어 있어?", "document": "equipment.md", "contains": "자산 태그"},
 
+  {"id": "polite-1", "type": "polite", "question": "누리카드의 월 사용 한도가 얼마인지 알려주실 수 있나요?", "document": "travel.md", "contains": "300만 원"},
+  {"id": "polite-2", "type": "polite", "question": "다리망에 접속이 되지 않을 때는 어디로 문의하면 되는지 알려주세요", "document": "remote-work.md", "contains": "1450"},
+  {"id": "polite-3", "type": "polite", "question": "종달새로 고객 개인정보 파일을 보낼 때 지켜야 하는 것이 무엇인지 알려줘", "document": "security.md", "contains": "암호"},
+
   {"id": "unrelated-1", "type": "unrelated", "question": "오늘 서울 날씨 어때?"},
   {"id": "unrelated-2", "type": "unrelated", "question": "파이썬에서 리스트를 정렬하는 방법"},
   {"id": "unrelated-3", "type": "unrelated", "question": "점심 메뉴 추천해줘"},

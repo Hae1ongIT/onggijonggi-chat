@@ -35,7 +35,8 @@ import reactor.test.StepVerifier;
 /**
  * Class Name : ThreadDocumentSearchHttpTest.java
  * Description : 방 문서 검색 확인 API(#344)의 입력 검증, 서비스로 넘기는 값, 결과 모양, 설정으로 끈 경우의 404를 확인한다.
- *               인가·범위·장애 구분은 ThreadDocumentSearchIntegrationTest가 본다.
+ *               인가·범위·장애 구분은 ThreadDocumentSearchIntegrationTest가 본다. 검색(rag) 테스트지만 chat 패키지에 둔다 — 공용
+ *               픽스처(FakeChatModelConfig·FakeJwtDecoderConfig·TestJwtSupport)가 package-private이다.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
@@ -60,19 +61,21 @@ class ThreadDocumentSearchHttpTest {
 	void theQuestionHistoryAndModelReachTheSearchAndTheResultIsReturned() {
 		UUID doc = UUID.randomUUID();
 		when(search.search(eq(room), any(), eq("그럼 그거는?"), anyList(), eq("gemma"))).thenReturn(Mono.just(new SearchResult(
-				SearchResult.Status.FOUND, "연차 이월 기한", true,
-				List.of(new SearchResult.Chunk(doc, "휴가 규정.pdf", 1, 3, "page=2", "3월 말까지 이월", 0.81, 4.2)))));
+				SearchResult.Status.FOUND, null, "연차 이월 기한", true,
+				List.of(new SearchResult.Chunk(doc + ":1:3", doc, "휴가 규정.pdf", 1, 3, "page=2", "3월 말까지 이월", 0.81, 4.2)))));
 
 		client.post().uri("/api/threads/" + room + "/documents/search")
 				.header(HttpHeaders.AUTHORIZATION, bearer()).contentType(MediaType.APPLICATION_JSON)
 				.body("{\"question\":\"그럼 그거는?\",\"history\":[{\"role\":\"user\",\"content\":\"연차 이월 규정\"}],\"modelId\":\"gemma\"}")
 				.exchange()
 				.expectStatus().isOk()
+				.expectHeader().cacheControl(org.springframework.http.CacheControl.noStore())
 				.expectBody()
 				.jsonPath("$.status").isEqualTo("FOUND")
 				.jsonPath("$.query").isEqualTo("연차 이월 기한")
 				.jsonPath("$.rewritten").isEqualTo(true)
 				.jsonPath("$.chunks[0].documentId").isEqualTo(doc.toString())
+				.jsonPath("$.chunks[0].chunkId").isEqualTo(doc + ":1:3")
 				.jsonPath("$.chunks[0].loc").isEqualTo("page=2");
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<ChatMessage>> history = ArgumentCaptor.forClass(List.class);
@@ -104,13 +107,13 @@ class ThreadDocumentSearchHttpTest {
 	@Test
 	void aMissingHistoryIsAnEmptyConversation() {
 		when(search.search(eq(room), any(), eq("연차"), eq(List.of()), eq(null)))
-				.thenReturn(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, "연차", false, List.of())));
+				.thenReturn(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_PINNED_DOCUMENTS, "연차", false, List.of())));
 
 		client.post().uri("/api/threads/" + room + "/documents/search")
 				.header(HttpHeaders.AUTHORIZATION, bearer()).contentType(MediaType.APPLICATION_JSON).body("{\"question\":\"연차\"}")
 				.exchange()
 				.expectStatus().isOk()
-				.expectBody().jsonPath("$.status").isEqualTo("NO_EVIDENCE");
+				.expectBody().jsonPath("$.status").isEqualTo("NO_EVIDENCE").jsonPath("$.reason").isEqualTo("NO_PINNED_DOCUMENTS");
 	}
 
 	@Test

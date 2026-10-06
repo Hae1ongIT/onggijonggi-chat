@@ -61,7 +61,7 @@ public class Chunker {
 	private String emit(List<Chunk> chunks, UUID document, int runSeq, Section section, int paragraph, String content) {
 		int seq = chunks.size() + 1;
 		String loc = section.page() != null ? "page=" + section.page() : "para=" + paragraph;
-		chunks.add(new Chunk(document + ":" + runSeq + ":" + seq, seq, content.strip(), loc));
+		chunks.add(new Chunk(ChunkIndexContract.chunkId(document, runSeq, seq), seq, content.strip(), loc));
 		// 겹침: 끝에서 overlap 자 안쪽의 공백부터 잘라 단어 중간에서 시작하지 않게 한다.
 		if (settings.overlap() <= 0 || content.length() <= settings.overlap()) return "";
 		String tail = content.substring(content.length() - settings.overlap());

@@ -8,7 +8,9 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -25,7 +27,10 @@ import reactor.core.publisher.Mono;
 @RestController
 public class ThreadDocumentSearchController {
 
-	/** history는 질문 앞의 대화(오래된 것부터), modelId는 그 대화의 모델(다시 쓰기에 쓴다). */
+	/**
+	 * history는 질문 앞의 대화(오래된 것부터)다 — 채팅의 ChatStreamRequest.messages와 달리 현재 질문을 넣지 않는다(넣으면 다시 쓰기에
+	 * 질문이 두 번 들어간다). modelId는 그 대화의 모델(다시 쓰기에 쓴다).
+	 */
 	public record SearchRequest(@NotBlank @Size(max = 2000) String question, @Size(max = 20) List<@NotNull @Valid ChatMessage> history,
 			@Size(max = 100) String modelId) { }
 
@@ -40,9 +45,11 @@ public class ThreadDocumentSearchController {
 	}
 
 	@PostMapping("/api/threads/{threadId}/documents/search")
-	public Mono<SearchResult> search(@PathVariable UUID threadId, @Valid @RequestBody SearchRequest request) {
+	public Mono<ResponseEntity<SearchResult>> search(@PathVariable UUID threadId, @Valid @RequestBody SearchRequest request) {
 		if (!enabled) return Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND));
+		// 응답에 문서 본문이 담긴다 — 원본 내려받기처럼 브라우저·프록시가 저장하지 않게 한다(보안 설정 기본값에 기대지 않는다).
 		return actors.currentActor().flatMap(actor -> search.search(threadId, actor, request.question(),
-				request.history() == null ? List.of() : request.history(), request.modelId()));
+				request.history() == null ? List.of() : request.history(), request.modelId()))
+				.map(result -> ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(result));
 	}
 }

@@ -137,6 +137,10 @@ class ChunkIndexTest {
 					null, new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5));
 			ChunkIndex migratingIndex = new ChunkIndex(properties, JsonMapper.builder().build());
 			assertThatThrownBy(migratingIndex::ensure).isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+			// 이전 작업이 아직 돌고 있는 동안 정리 작업의 삭제는 미룬다(이전 전 인덱스에서 지우면 새 인덱스에 남는다).
+			assertThatThrownBy(() -> migratingIndex.delete(job.document(), 1))
+					.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+			assertThat(migrating.requests).noneSatisfy(request -> assertThat(request.path()).contains("_delete_by_query"));
 
 			migrating.reply("/_tasks/", 200, "{\"completed\":true,\"response\":{\"timed_out\":false,\"failures\":[]}}")
 					.reply("/thr_doc_chunk_v1/_count", 200, "{\"count\":3}")

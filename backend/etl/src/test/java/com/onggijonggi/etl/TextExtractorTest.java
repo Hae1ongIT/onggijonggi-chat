@@ -32,6 +32,14 @@ class TextExtractorTest {
 		});
 	}
 
+	/** macOS 등에서 온 분해형(NFD) 한글을 조합형(NFC)으로 맞춘다 — 그대로 두면 NFC 질문과 키워드가 맞지 않는다. */
+	@Test
+	void decomposedHangulIsComposed() {
+		String decomposed = java.text.Normalizer.normalize("연차 이월", java.text.Normalizer.Form.NFD);
+		var sections = extractor.extract("notes.txt", decomposed.getBytes(StandardCharsets.UTF_8));
+		assertThat(sections).singleElement().satisfies(section -> assertThat(section.text()).isEqualTo("연차 이월"));
+	}
+
 	@Test
 	void pdfIsReadPageByPage() throws IOException {
 		var sections = extractor.extract("guide.pdf", pdf("first page text", "second page text"));

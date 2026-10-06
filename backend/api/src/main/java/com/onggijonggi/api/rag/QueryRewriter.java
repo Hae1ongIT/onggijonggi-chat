@@ -59,6 +59,7 @@ public class QueryRewriter {
 	private final RagProperties.Rewrite settings;
 	private final String defaultModel;
 
+	/** 게이트웨이 주소·키는 채팅 자동 구성과 같은 spring.ai.openai.* 키를 읽는다 — 채팅 쪽 설정 이름이 바뀌면 여기도 함께 바꾼다. */
 	@Autowired
 	public QueryRewriter(RagProperties properties, @Value("${spring.ai.openai.base-url}") String gatewayUrl,
 			@Value("${spring.ai.openai.api-key:}") String gatewayKey,

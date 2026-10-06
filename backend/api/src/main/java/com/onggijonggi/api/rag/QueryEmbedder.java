@@ -40,7 +40,7 @@ public class QueryEmbedder {
 	}
 
 	public float[] embed(String text) {
-		if (!configured()) throw new RagUnavailableException("임베딩 주소(app.rag.embedding.url)가 비어 있다");
+		if (!configured()) throw new RagUnavailableException(SearchResult.Reason.NOT_CONFIGURED, "임베딩 주소(app.rag.embedding.url)가 비어 있다");
 		String body;
 		try {
 			body = client.post().uri("/v1/embeddings").contentType(MediaType.APPLICATION_JSON)
@@ -61,7 +61,8 @@ public class QueryEmbedder {
 		}
 		String model = response.path("model").asString("");
 		if (!model.isEmpty() && !model.equals(settings.model()))
-			throw new RagUnavailableException("임베딩 모델이 다르다: 요청 " + settings.model() + ", 응답 " + model);
+			// 서버가 설정과 다른 모델로 답한다 — 기다려도 풀리지 않는 설정 문제다.
+			throw new RagUnavailableException(SearchResult.Reason.NOT_CONFIGURED, "임베딩 모델이 다르다: 요청 " + settings.model() + ", 응답 " + model);
 		JsonNode data = response.path("data");
 		if (!data.isArray() || data.size() != 1 || data.get(0).path("index").asInt(-1) != 0)
 			throw new RagUnavailableException("임베딩 응답 개수·순번이 요청과 다르다");

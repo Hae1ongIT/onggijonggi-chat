@@ -213,6 +213,11 @@ public class RunStore {
 		return queued;
 	}
 
+	/** 정리에 실패한 회차를 정리 순서의 뒤로 미룬다 — 계속 실패하는 회차가 한 번에 보는 수(limit)를 채워 뒤 회차를 막지 않게 한다. */
+	public void postpone(Stale stale) {
+		jdbc.update("update thr_doc_run set updated_at = now() where id = ? and status in ('DONE', 'FAILED', 'CANCELLED')", stale.run());
+	}
+
 	public void purged(Stale stale) {
 		jdbc.update("update thr_doc_run set status = 'PURGED', updated_at = now() where id = ? and status in ('DONE', 'FAILED', 'CANCELLED')",
 				stale.run());

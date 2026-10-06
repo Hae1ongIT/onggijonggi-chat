@@ -6,6 +6,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -42,7 +43,10 @@ public class TextExtractor {
 		} catch (RuntimeException error) {
 			throw EtlFailure.permanent("UNREADABLE", "원본을 읽지 못했다(손상·암호)", error);
 		}
-		List<Chunker.Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank()).toList();
+		// 한글을 NFC(조합형)로 맞춘다. macOS에서 만든 파일·붙여 넣은 글은 자모가 분해된 NFD일 수 있는데, 그대로 색인하면 NFC 질문과
+		// 키워드가 맞지 않는다(검색 질문도 NFC로 맞춘다). 출처에 보이는 글자는 바뀌지 않는다(NFKC는 ①→1처럼 표시가 바뀌어 쓰지 않는다).
+		List<Chunker.Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank())
+				.map(section -> new Chunker.Section(section.page(), Normalizer.normalize(section.text(), Normalizer.Form.NFC))).toList();
 		if (nonBlank.isEmpty()) throw EtlFailure.permanent("EMPTY_TEXT", "글자를 찾지 못했다(스캔 PDF 등)");
 		return nonBlank;
 	}

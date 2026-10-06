@@ -19,6 +19,7 @@ import com.onggijonggi.common.chat.domain.ThrMbr;
 import com.onggijonggi.common.chat.domain.ThrMbrRole;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import com.onggijonggi.common.document.ChunkIndexContract;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -58,7 +59,8 @@ import tools.jackson.databind.ObjectMapper;
  * Description : 실제 PostgreSQL(Flyway)과 nori Elasticsearch, 가짜 임베딩으로 방 문서 검색(#344)을 확인한다. 다른 방·다른 고객사·
  *               고정 해제·이전 회차 청크가 섞이지 않는지, 키워드에서만 잡히는 고유명사도 채택하는지, 대상이 없으면 임베딩을 부르지
  *               않는지, 장애·모델 불일치가 근거 없음이 아니라 UNAVAILABLE인지 본다. 벡터는 축 하나만 1인 단위 벡터라 코사인 유사도가
- *               같은 축이면 1, 다른 축이면 0이다.
+ *               같은 축이면 1, 다른 축이면 0이다. 검색(rag) 테스트지만 chat 패키지에 둔다 — 공용 픽스처(FakeChatModelConfig 등)가
+ *               package-private이다.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -162,6 +164,7 @@ class ThreadDocumentSearchIntegrationTest {
 				.containsExactlyInAnyOrder(tuple(pinned, 1), tuple(reprocessed, 2));
 		assertThat(result.chunks()).allSatisfy(chunk -> {
 			assertThat(chunk.fileName()).isEqualTo("guide.txt");
+			assertThat(chunk.chunkId()).isEqualTo(chunk.documentId() + ":" + chunk.runSeq() + ":" + chunk.seq());
 			assertThat(chunk.loc()).isEqualTo("para=1");
 			assertThat(chunk.vectorScore()).isGreaterThan(0.99);
 		});
@@ -178,7 +181,8 @@ class ThreadDocumentSearchIntegrationTest {
 			assertThat(chunk.vectorScore()).as("벡터는 직교라 기준 미달").isNull();
 			assertThat(chunk.keywordScore()).isPositive();
 		});
-		assertThat(search("오늘 날씨").status()).isEqualTo(SearchResult.Status.NO_EVIDENCE);
+		assertThat(search("오늘 날씨")).extracting(SearchResult::status, SearchResult::reason)
+				.containsExactly(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_MATCH);
 	}
 
 	@Test void withoutTargetsNeitherTheEmbeddingNorTheModelIsCalled() {
@@ -187,6 +191,7 @@ class ThreadDocumentSearchIntegrationTest {
 		SearchResult result = search.search(room, owner, "연차 이월", List.of(new ChatMessage("user", "앞 질문")), "gemma").block();
 
 		assertThat(result.status()).isEqualTo(SearchResult.Status.NO_EVIDENCE);
+		assertThat(result.reason()).isEqualTo(SearchResult.Reason.NO_PINNED_DOCUMENTS);
 		assertThat(result.rewritten()).isFalse();
 		assertThat(EMBEDDING.requests).isEmpty();
 		assertThat(GATEWAY.requests).isEmpty();
@@ -212,7 +217,7 @@ class ThreadDocumentSearchIntegrationTest {
 		refresh();
 
 		EMBEDDING.reply("/v1/embeddings", 503, "{}");
-		assertThat(search("연차 이월").status()).isEqualTo(SearchResult.Status.UNAVAILABLE);
+		assertThat(search("연차 이월").reason()).isEqualTo(SearchResult.Reason.BACKEND_ERROR);
 
 		EMBEDDING.reply("/v1/embeddings", body -> new StubHttpServer.Reply(200, embedding(body)));
 		es().delete().uri("/" + INDEX + "/_alias/" + ALIAS).retrieve().toBodilessEntity();
@@ -222,7 +227,8 @@ class ThreadDocumentSearchIntegrationTest {
 
 		jdbc.update("update thr_doc_run set emb_mdl='other-model' where doc_id=?", doc);
 		int calls = EMBEDDING.requests.size();
-		assertThat(search("연차 이월").status()).isEqualTo(SearchResult.Status.UNAVAILABLE);
+		assertThat(search("연차 이월")).extracting(SearchResult::status, SearchResult::reason)
+				.containsExactly(SearchResult.Status.UNAVAILABLE, SearchResult.Reason.MODEL_MISMATCH);
 		assertThat(EMBEDDING.requests).as("모델이 다르면 질문을 임베딩하지 않는다").hasSize(calls);
 	}
 
@@ -268,7 +274,7 @@ class ThreadDocumentSearchIntegrationTest {
 
 	private void index(UUID doc, UUID thread, UUID chunkTenant, int runSeq, int seq, String content, int axis) {
 		Map<String, Object> source = new LinkedHashMap<>();
-		source.put("chunk_id", doc + ":" + runSeq + ":" + seq + ":" + chunkTenant);
+		source.put("chunk_id", ChunkIndexContract.chunkId(doc, runSeq, seq));
 		source.put("doc_id", doc.toString());
 		source.put("thr_id", thread.toString());
 		source.put("tnn_id", chunkTenant.toString());

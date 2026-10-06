@@ -1,5 +1,6 @@
 package com.onggijonggi.api.rag;
 
+import com.onggijonggi.common.document.ChunkIndexContract;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -19,7 +20,7 @@ public record RagProperties(
 		@DefaultValue("true") boolean searchApiEnabled) {
 
 	/** 검색은 항상 별칭으로 한다. 인덱스 이름·매핑은 ETL이 공용 매핑(es-thr-doc-chunk-index.json)으로 만든다. */
-	public record Elasticsearch(@DefaultValue("http://localhost:9200") String url, @DefaultValue("thr_doc_chunk") String alias,
+	public record Elasticsearch(@DefaultValue("http://localhost:9200") String url, @DefaultValue(ChunkIndexContract.ALIAS) String alias,
 			@DefaultValue("5s") Duration timeout) { }
 
 	/** 질문 임베딩. 문서를 임베딩한 ETL과 같은 엔드포인트·모델이어야 한다(다른 모델의 벡터를 섞지 않는다). */

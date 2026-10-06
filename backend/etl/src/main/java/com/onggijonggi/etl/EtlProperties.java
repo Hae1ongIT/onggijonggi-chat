@@ -1,5 +1,6 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.ChunkIndexContract;
 import com.onggijonggi.common.document.Chunker;
 import java.time.Duration;
 import java.util.List;
@@ -29,7 +30,7 @@ public record EtlProperties(
 
 	public record Worker(String url, @DefaultValue("") String apiKey) { }
 
-	public record Elasticsearch(String url, @DefaultValue("thr_doc_chunk") String alias,
+	public record Elasticsearch(String url, @DefaultValue(ChunkIndexContract.ALIAS) String alias,
 			@DefaultValue("thr_doc_chunk_v2") String index,
 			/** bulk 한 요청에 담는 청크 수. */
 			@DefaultValue("200") int bulkSize) { }

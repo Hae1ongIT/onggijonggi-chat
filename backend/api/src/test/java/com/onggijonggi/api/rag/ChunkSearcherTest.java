@@ -26,7 +26,7 @@ class ChunkSearcherTest {
 			new RagProperties.Search(3, 2, 20, 100, 0.5, "60%", 60, 2, 10), true), WebClient.builder(), JsonMapper.builder().build());
 
 	private static ChunkSearcher.Hit hit(String doc, int seq, Double vector, Double keyword) {
-		return new ChunkSearcher.Hit(doc, 1, seq, "para=" + seq, "본문" + seq, vector, keyword);
+		return new ChunkSearcher.Hit(doc + ":1:" + seq, doc, 1, seq, "para=" + seq, "본문" + seq, vector, keyword);
 	}
 
 	@Test
@@ -86,7 +86,7 @@ class ChunkSearcherTest {
 	/** 벡터 점수는 _score(=(1+cos)/2)를 코사인 유사도로 바꾸고 [-1, 1]로 자른다. 두 채널 요청에 각 기준이 실린다. */
 	@Test
 	void scoresAreConvertedAndClampedAndEachChannelCarriesItsCriterion() throws Exception {
-		String hits = "{\"hits\":{\"hits\":[{\"_score\":%s,\"_source\":{\"doc_id\":\"%s\",\"run_seq\":1,\"seq\":%d,\"loc\":\"para=1\",\"content\":\"본문\"}}]}}";
+		String hits = "{\"hits\":{\"hits\":[{\"_score\":%s,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"%s\",\"run_seq\":1,\"seq\":%d,\"loc\":\"para=1\",\"content\":\"본문\"}}]}}";
 		UUID doc = UUID.randomUUID();
 		var scope = new ThreadDocumentScope(UUID.randomUUID(), ThreadScopeFilter.of(List.of(UUID.randomUUID())),
 				List.of(new ThreadDocumentScope.Target(doc, "a.txt", 1, "bge-m3", 3)));

@@ -1,5 +1,7 @@
 package com.onggijonggi.etl;
 
+import static com.onggijonggi.common.document.ChunkIndexContract.*;
+
 import com.onggijonggi.common.document.Chunker;
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,11 +33,12 @@ import tools.jackson.databind.node.ObjectNode;
 public class ChunkIndex {
 
 	private static final Logger log = LoggerFactory.getLogger(ChunkIndex.class);
-	private static final String MAPPING = "es-thr-doc-chunk-index.json";
 	/** 이전 작업을 한 번에 기다리는 상한. 넘으면 일시 실패로 끝나고 다음 시도가 같은 작업을 이어서 기다린다. */
 	private static final Duration MIGRATION_WAIT = Duration.ofHours(2);
 	/** 이전 작업 상태 조회가 이만큼 연달아 실패하면 일시 실패로 끝낸다. */
 	private static final int POLL_FAILURES = 5;
+	/** 이전 작업 상태를 보는 간격. */
+	private static final Duration POLL_INTERVAL = Duration.ofSeconds(1);
 	/** 문자셋을 붙인다 — 붙이지 않으면 문자열 본문이 ISO-8859-1로 인코딩돼 한글 청크가 "??"로 저장된다. */
 	private static final MediaType NDJSON = MediaType.parseMediaType("application/x-ndjson;charset=UTF-8");
 
@@ -46,7 +49,7 @@ public class ChunkIndex {
 	/** 인덱스 준비·이전 잠금. 정리 작업의 삭제도 이 잠금으로 이전이 끝나기를 기다린다. */
 	private final Object preparing = new Object();
 	/** 기다리던 이전 작업. 상태 조회가 끊겨 이전이 일시 실패로 끝나도 다음 시도는 새로 복사하지 않고 이 작업을 이어서 기다린다. */
-	private String pendingTask;
+	private volatile String pendingTask;
 
 	public ChunkIndex(EtlProperties properties, ObjectMapper json) {
 		this.settings = properties.elasticsearch();
@@ -76,19 +79,33 @@ public class ChunkIndex {
 				aliases = json.readTree(client.get().uri("/_alias/{alias}", settings.alias()).retrieve().body(String.class));
 			} catch (HttpClientErrorException.NotFound missing) {
 				create(true);
-				ensured = true;
+				ready();
 				return;
 			}
 			List<String> previous = new ArrayList<>(aliases.propertyNames());
 			if (previous.isEmpty()) create(true);
 			else if (!previous.contains(settings.index())) migrate(previous);
 			else if (previous.size() > 1) detach(previous);
-			ensured = true;
+			ready();
 		} catch (EtlFailure failure) {
 			throw failure;
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}
+	}
+
+	/**
+	 * 준비가 끝났다. 기다리던 이전 작업도 더는 의미가 없다 — 상태 조회가 끊긴 뒤 운영자가 별칭을 고치는 등으로 이전을 거치지 않고
+	 * 준비가 끝나면 남은 작업 ID 때문에 청크 삭제가 영영 미뤄진다.
+	 */
+	private void ready() {
+		pendingTask = null;
+		ensured = true;
+	}
+
+	/** 인덱스 이전 작업이 진행 중인가(상태 조회가 끊겨 다음 시도를 기다리는 중 포함). 정리 작업은 이때 지우지 않고 기다린다. */
+	public boolean migrating() {
+		return pendingTask != null;
 	}
 
 	/** 설정한 인덱스를 공용 매핑으로 만든다. withAlias면 별칭도 함께 붙인다. 이미 있으면 그대로 쓴다. */
@@ -178,7 +195,7 @@ public class ChunkIndex {
 			if (System.nanoTime() > deadline)
 				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기가 " + MIGRATION_WAIT.toMinutes() + "분 안에 끝나지 않았다: " + task, null);
 			try {
-				Thread.sleep(1000);
+				Thread.sleep(POLL_INTERVAL.toMillis());
 			} catch (InterruptedException interrupted) {
 				Thread.currentThread().interrupt();
 				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기를 기다리다 중단됐다(ES 작업은 계속 돈다): " + task, interrupted);
@@ -192,7 +209,7 @@ public class ChunkIndex {
 
 	/** 매핑의 벡터 차원. 임베딩 설정과 다르면 워커가 처리를 시작하지 않는다. */
 	public int mappingDimensions() {
-		return mapping().path("mappings").path("properties").path("emb").path("dims").asInt(-1);
+		return mapping().path("mappings").path("properties").path(EMB).path("dims").asInt(-1);
 	}
 
 	/**
@@ -212,16 +229,16 @@ public class ChunkIndex {
 		for (int i = 0; i < chunks.size(); i++) {
 			Chunker.Chunk chunk = chunks.get(i);
 			Map<String, Object> source = new LinkedHashMap<>();
-			source.put("chunk_id", chunk.id());
-			source.put("doc_id", job.document().toString());
-			source.put("thr_id", job.thread().toString());
-			source.put("tnn_id", job.tenant().toString());
-			source.put("run_seq", job.runSeq());
-			source.put("seq", chunk.seq());
-			source.put("content", chunk.content());
-			source.put("loc", chunk.loc());
-			source.put("emb", vectors.get(i));
-			source.put("emb_mdl", model);
+			source.put(CHUNK_ID, chunk.id());
+			source.put(DOC_ID, job.document().toString());
+			source.put(THR_ID, job.thread().toString());
+			source.put(TNN_ID, job.tenant().toString());
+			source.put(RUN_SEQ, job.runSeq());
+			source.put(SEQ, chunk.seq());
+			source.put(CONTENT, chunk.content());
+			source.put(LOC, chunk.loc());
+			source.put(EMB, vectors.get(i));
+			source.put(EMB_MDL, model);
 			ndjson.append(json.writeValueAsString(Map.of("index", Map.of("_id", chunk.id())))).append('\n');
 			ndjson.append(json.writeValueAsString(source)).append('\n');
 		}
@@ -275,6 +292,10 @@ public class ChunkIndex {
 		// 복사된 청크가 새 인덱스에 남는다. ensure를 직접 부르지는 않는다(정리 작업이 인덱스를 새로 만들지 않게). 준비가 끝난 뒤의
 		// 적재는 이 잠금을 잡지 않아 삭제와 서로 기다리지 않는다.
 		synchronized (preparing) {
+			// 이전 작업이 아직 ES에서 돌고 있다(상태 조회가 끊겨 잠금이 풀린 경우). 지금 이전 전 인덱스에서 지우면 이미 복사 대상에 든
+			// 청크가 새 인덱스에 남아 영영 지워지지 않는다. 일시 실패로 미뤄 이전이 끝난 뒤 새 인덱스에서 지운다.
+			if (pendingTask != null)
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 이전이 끝나지 않아 청크 삭제를 미룬다", null);
 			deleteRun(document, runSeq);
 		}
 	}
@@ -301,8 +322,8 @@ public class ChunkIndex {
 
 	private static Map<String, Object> runQuery(UUID document, int runSeq) {
 		return Map.of("query", Map.of("bool", Map.of("filter", List.of(
-				Map.of("term", Map.of("doc_id", document.toString())),
-				Map.of("term", Map.of("run_seq", runSeq))))));
+				Map.of("term", Map.of(DOC_ID, document.toString())),
+				Map.of("term", Map.of(RUN_SEQ, runSeq))))));
 	}
 
 	private JsonNode mapping() {

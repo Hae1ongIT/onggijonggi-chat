@@ -1,5 +1,7 @@
 package com.onggijonggi.api.rag;
 
+import static com.onggijonggi.common.document.ChunkIndexContract.*;
+
 import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import java.util.ArrayList;
@@ -8,6 +10,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -25,9 +28,11 @@ import tools.jackson.databind.ObjectMapper;
 public class ChunkSearcher {
 
 	/** 검색 결과 청크 하나. 점수는 그 채널에서 기준을 통과했을 때만 있다(벡터는 코사인 유사도, 키워드는 BM25 — 순위에만 쓴다). */
-	public record Hit(String document, int runSeq, int seq, String loc, String content, Double vectorScore, Double keywordScore) { }
+	public record Hit(String chunkId, String document, int runSeq, int seq, String loc, String content, Double vectorScore, Double keywordScore) { }
 
-	private static final List<String> SOURCE = List.of("doc_id", "run_seq", "seq", "loc", "content");
+	/** ES 응답 버퍼. 후보 수 × 청크 최대 길이(약 1300자, UTF-8 약 4KB)에 넉넉한 여유를 둔다. */
+	private static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+	private static final List<String> SOURCE = List.of(CHUNK_ID, DOC_ID, RUN_SEQ, SEQ, LOC, CONTENT);
 
 	private final RagProperties.Elasticsearch settings;
 	private final RagProperties.Search search;
@@ -38,7 +43,7 @@ public class ChunkSearcher {
 		this.settings = properties.elasticsearch();
 		this.search = properties.search();
 		// 기본 응답 버퍼(256KB)는 candidates를 늘리면 넘는다(청크 본문 최대 약 1300자 × 후보 수). 넘으면 정상 검색이 장애가 된다.
-		this.client = builder.clone().baseUrl(settings.url()).codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(4 * 1024 * 1024)).build();
+		this.client = builder.clone().baseUrl(settings.url()).codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(MAX_RESPONSE_BYTES)).build();
 		this.json = json;
 	}
 
@@ -56,11 +61,11 @@ public class ChunkSearcher {
 		if (scope.threads().kind() != ThreadScopeFilter.Kind.THREADS)
 			throw new IllegalArgumentException("방 문서 검색은 방 범위가 필요하다: " + scope.threads().kind());
 		List<Object> documents = scope.targets().stream().<Object>map(target -> Map.of("bool", Map.of("filter", List.of(
-				Map.of("term", Map.of("doc_id", target.document().toString())),
-				Map.of("term", Map.of("run_seq", target.runSeq())))))).toList();
+				Map.of("term", Map.of(DOC_ID, target.document().toString())),
+				Map.of("term", Map.of(RUN_SEQ, target.runSeq())))))).toList();
 		return List.of(
-				Map.of("term", Map.of("tnn_id", scope.tenant().toString())),
-				Map.of("terms", Map.of("thr_id", scope.threads().threadIds().stream().map(Object::toString).toList())),
+				Map.of("term", Map.of(TNN_ID, scope.tenant().toString())),
+				Map.of("terms", Map.of(THR_ID, scope.threads().threadIds().stream().map(Object::toString).toList())),
 				Map.of("bool", Map.of("should", documents, "minimum_should_match", 1)));
 	}
 
@@ -68,7 +73,7 @@ public class ChunkSearcher {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("size", search.candidates());
 		body.put("_source", SOURCE);
-		body.put("query", Map.of("bool", Map.of("must", List.of(Map.of("match", Map.of("content", Map.of("query", query, "minimum_should_match", search.keywordMinimumShouldMatch())))), "filter", filter)));
+		body.put("query", Map.of("bool", Map.of("must", List.of(Map.of("match", Map.of(CONTENT, Map.of("query", query, "minimum_should_match", search.keywordMinimumShouldMatch())))), "filter", filter)));
 		List<Hit> hits = new ArrayList<>();
 		for (JsonNode hit : call(body)) hits.add(hit(hit, null, hit.path("_score").asDouble()));
 		return hits;
@@ -76,7 +81,7 @@ public class ChunkSearcher {
 
 	private List<Hit> vector(List<Object> filter, float[] vector) {
 		Map<String, Object> knn = new LinkedHashMap<>();
-		knn.put("field", "emb");
+		knn.put("field", EMB);
 		knn.put("query_vector", vector);
 		knn.put("k", search.candidates());
 		knn.put("num_candidates", Math.max(search.numCandidates(), search.candidates()));
@@ -100,8 +105,8 @@ public class ChunkSearcher {
 		for (List<Hit> channel : List.of(semantic, keyword)) {
 			for (int rank = 0; rank < channel.size(); rank++) {
 				Hit hit = channel.get(rank);
-				String key = hit.document() + ":" + hit.runSeq() + ":" + hit.seq();
-				merged.merge(key, hit, (a, b) -> new Hit(a.document(), a.runSeq(), a.seq(), a.loc(), a.content(),
+				String key = hit.chunkId();
+				merged.merge(key, hit, (a, b) -> new Hit(a.chunkId(), a.document(), a.runSeq(), a.seq(), a.loc(), a.content(),
 						a.vectorScore() != null ? a.vectorScore() : b.vectorScore(),
 						a.keywordScore() != null ? a.keywordScore() : b.keywordScore()));
 				scores.merge(key, 1.0 / (search.rrfK() + rank + 1), Double::sum);
@@ -125,7 +130,8 @@ public class ChunkSearcher {
 			response = client.post().uri("/{alias}/_search", settings.alias()).contentType(MediaType.APPLICATION_JSON)
 					.bodyValue(body).retrieve().bodyToMono(String.class).block(settings.timeout());
 		} catch (RuntimeException error) {
-			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화).
+			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화). 다만 ETL이 빈 인덱스를 다시
+			// 만든 뒤에는 404가 아니라 결과 0건(NO_MATCH)이 된다 — READY 문서의 청크 유실은 감지하지 못한다(설계 15절 한계).
 			throw new RagUnavailableException("Elasticsearch 검색 실패: " + error.getClass().getSimpleName(), error);
 		}
 		try {
@@ -145,7 +151,12 @@ public class ChunkSearcher {
 
 	private static Hit hit(JsonNode hit, Double vectorScore, Double keywordScore) {
 		JsonNode source = hit.path("_source");
-		return new Hit(source.path("doc_id").asString(""), source.path("run_seq").asInt(), source.path("seq").asInt(),
-				source.path("loc").asString(""), source.path("content").asString(""), vectorScore, keywordScore);
+		// chunk_id는 적재 때 정한 색인 문서 ID다. 다시 조립하지 않고 그대로 내보낸다(E가 출처로 저장하는 값).
+		String document = source.path(DOC_ID).asString("");
+		int runSeq = source.path(RUN_SEQ).asInt(), seq = source.path(SEQ).asInt();
+		String chunkId = source.path(CHUNK_ID).asString("");
+		// 비어 있으면(손으로 넣은 문서 등) 서로 다른 청크가 같은 키로 합쳐지지 않게 계약 규칙으로 만든다.
+		if (chunkId.isEmpty() && !document.isEmpty()) chunkId = chunkId(UUID.fromString(document), runSeq, seq);
+		return new Hit(chunkId, document, runSeq, seq, source.path(LOC).asString(""), source.path(CONTENT).asString(""), vectorScore, keywordScore);
 	}
 }

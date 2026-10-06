@@ -5,6 +5,7 @@ import com.onggijonggi.api.chat.ChatMessage;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import com.onggijonggi.api.chat.ThreadDocumentService;
 import com.onggijonggi.api.common.TraceIdWebFilter;
+import java.text.Normalizer;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -59,40 +60,43 @@ public class ThreadDocumentSearch {
 							.subscribeOn(scheduler)
 							.onErrorResume(RejectedExecutionException.class, full -> {
 								log.warn("방 문서 검색 대기열이 가득 찼다: thread={} traceId={}", thread, trace);
-								return Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of()));
+								return Mono.just(SearchResult.unavailable(SearchResult.Reason.OVERLOADED, question));
 							}));
 		});
 	}
 
 	private SearchResult run(UUID thread, String trace, ThreadDocumentScope scope, String question, List<ChatMessage> history,
 			String modelId) {
-		if (scope.targets().isEmpty()) return new SearchResult(SearchResult.Status.NO_EVIDENCE, question, false, List.of());
+		if (scope.targets().isEmpty()) return SearchResult.noEvidence(SearchResult.Reason.NO_PINNED_DOCUMENTS, question, false);
 		long started = System.nanoTime();
 		try {
-			if (!embedder.configured()) throw new RagUnavailableException("임베딩 주소(app.rag.embedding.url)가 비어 있다");
+			if (!embedder.configured()) throw new RagUnavailableException(SearchResult.Reason.NOT_CONFIGURED, "임베딩 주소(app.rag.embedding.url)가 비어 있다");
 			for (ThreadDocumentScope.Target target : scope.targets()) {
 				// 다른 모델로 임베딩한 문서 벡터와 질문 벡터를 섞지 않는다(지도 선택 10). 모델을 바꿨으면 문서를 다시 처리해야 한다.
 				if (!embedder.model().equals(target.embeddingModel()) || embedder.dimensions() != target.dimensions())
-					throw new RagUnavailableException("문서 임베딩 모델(" + target.embeddingModel() + "/" + target.dimensions()
+					throw new RagUnavailableException(SearchResult.Reason.MODEL_MISMATCH, "문서 임베딩 모델(" + target.embeddingModel() + "/" + target.dimensions()
 							+ ")이 검색 설정(" + embedder.model() + "/" + embedder.dimensions() + ")과 다르다 — 재처리가 필요하다: doc=" + target.document());
 			}
-			QueryRewriter.Result query = rewriter.rewrite(question, history, modelId);
+			// 색인 본문과 같이 NFC로 맞춘다(macOS 등에서 온 분해형 한글이 키워드와 어긋나지 않게).
+			QueryRewriter.Result query = rewriter.rewrite(Normalizer.normalize(question, Normalizer.Form.NFC), history, modelId);
 			List<ChunkSearcher.Hit> hits = searcher.search(scope, query.query(), embedder.embed(query.query()));
 			Map<String, ThreadDocumentScope.Target> byId = scope.targets().stream()
 					.collect(Collectors.toMap(target -> target.document().toString(), Function.identity()));
 			// 검색 조건에 이미 (문서, 현재 회차)가 걸려 있지만, 범위 밖 청크가 응답에 섞여도 내보내지 않게 한 번 더 대조한다.
 			List<SearchResult.Chunk> chunks = hits.stream()
 					.filter(hit -> byId.containsKey(hit.document()) && byId.get(hit.document()).runSeq() == hit.runSeq())
-					.map(hit -> new SearchResult.Chunk(UUID.fromString(hit.document()), byId.get(hit.document()).fileName(), hit.runSeq(),
+					.map(hit -> new SearchResult.Chunk(hit.chunkId(), UUID.fromString(hit.document()),
+							byId.get(hit.document()).fileName(), hit.runSeq(),
 							hit.seq(), hit.loc(), hit.content(), hit.vectorScore(), hit.keywordScore()))
 					.toList();
 			log.debug("방 문서 검색: thread={} traceId={} 대상 {}건 결과 {}건 다시 쓰기 {} {}ms", thread, trace, scope.targets().size(), chunks.size(),
 					query.rewritten(), (System.nanoTime() - started) / 1_000_000);
-			return new SearchResult(chunks.isEmpty() ? SearchResult.Status.NO_EVIDENCE : SearchResult.Status.FOUND, query.query(),
-					query.rewritten(), chunks);
+			return chunks.isEmpty() ? SearchResult.noEvidence(SearchResult.Reason.NO_MATCH, query.query(), query.rewritten())
+					: SearchResult.found(query.query(), query.rewritten(), chunks);
 		} catch (RagUnavailableException unavailable) {
-			log.warn("방 문서 검색을 끝내지 못했다: thread={} traceId={} {}", thread, trace, unavailable.getMessage(), unavailable.getCause());
-			return new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of());
+			log.warn("방 문서 검색을 끝내지 못했다: thread={} traceId={} reason={} {}", thread, trace, unavailable.reason(), unavailable.getMessage(),
+					unavailable.getCause());
+			return SearchResult.unavailable(unavailable.reason(), question);
 		}
 	}
 }
