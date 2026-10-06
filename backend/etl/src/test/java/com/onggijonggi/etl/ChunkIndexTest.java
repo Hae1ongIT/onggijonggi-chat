@@ -95,6 +95,61 @@ class ChunkIndexTest {
 	}
 
 	@Test
+	void deletionNeitherChecksNorCreatesTheIndex() {
+		es.reply("/thr_doc_chunk/_delete_by_query", 404, "{}");
+		index.delete(job.document(), 1);
+		assertThat(es.requests).as("정리 작업은 별칭을 확인하거나 인덱스를 만들지 않는다")
+				.noneSatisfy(request -> assertThat(request.path()).matches("/_alias/.*|/thr_doc_chunk_v1(\\?.*)?"));
+	}
+
+	@Test
+	void aFailedOrShortMigrationKeepsTheAliasOnThePreviousIndex() throws Exception {
+		try (StubHttpServer migrating = new StubHttpServer()) {
+			migrating.reply("/_alias/", 200, "{\"thr_doc_chunk_v1\":{\"aliases\":{\"thr_doc_chunk\":{}}}}")
+					.reply("/thr_doc_chunk_v2", 200, "{}")
+					.reply("/_reindex", 200, "{\"task\":\"node:1\"}")
+					.reply("/_tasks/", 200, "{\"completed\":true,\"error\":{\"type\":\"search_phase_execution_exception\"}}");
+			var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(migrating.url(), "thr_doc_chunk", "thr_doc_chunk_v2", 200),
+					null, new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5));
+			assertThatThrownBy(() -> new ChunkIndex(properties, JsonMapper.builder().build()).ensure())
+					.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+
+			migrating.reply("/_tasks/", 200, "{\"completed\":true,\"response\":{\"timed_out\":false,\"failures\":[]}}")
+					.reply("/thr_doc_chunk_v1/_count", 200, "{\"count\":5}")
+					.reply("/thr_doc_chunk_v2/_count", 200, "{\"count\":3}");
+			assertThatThrownBy(() -> new ChunkIndex(properties, JsonMapper.builder().build()).ensure())
+					.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+
+			assertThat(migrating.requests).as("옮기기가 실패하거나 모자라면 별칭을 넘기지 않는다")
+					.noneSatisfy(request -> assertThat(request.path()).startsWith("/_aliases"));
+		}
+	}
+
+	/** 상태 조회가 잇달아 끊겨 이전이 일시 실패로 끝나도, 다음 시도는 복사를 새로 시작하지 않고 같은 작업을 이어서 기다린다. */
+	@Test
+	void aMigrationWhosePollingFailedResumesTheSameTask() throws Exception {
+		try (StubHttpServer migrating = new StubHttpServer()) {
+			migrating.reply("/_alias/", 200, "{\"thr_doc_chunk_v1\":{\"aliases\":{\"thr_doc_chunk\":{}}}}")
+					.reply("/thr_doc_chunk_v2", 200, "{}")
+					.reply("/_reindex", 200, "{\"task\":\"node:1\"}")
+					.reply("/_tasks/", 503, "{}");
+			var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(migrating.url(), "thr_doc_chunk", "thr_doc_chunk_v2", 200),
+					null, new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5));
+			ChunkIndex migratingIndex = new ChunkIndex(properties, JsonMapper.builder().build());
+			assertThatThrownBy(migratingIndex::ensure).isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+
+			migrating.reply("/_tasks/", 200, "{\"completed\":true,\"response\":{\"timed_out\":false,\"failures\":[]}}")
+					.reply("/thr_doc_chunk_v1/_count", 200, "{\"count\":3}")
+					.reply("/thr_doc_chunk_v2/_count", 200, "{\"count\":3}")
+					.reply("/_aliases", 200, "{}");
+			migratingIndex.ensure();
+
+			assertThat(migrating.requests.stream().filter(request -> request.path().startsWith("/_reindex")).count()).isEqualTo(1);
+			assertThat(migrating.requests).anySatisfy(request -> assertThat(request.path()).isEqualTo("/_aliases"));
+		}
+	}
+
+	@Test
 	void partialOrTimedOutDeletionIsNotTreatedAsDone() {
 		es.reply("/thr_doc_chunk/_delete_by_query", 200, "{\"timed_out\":false,\"failures\":[{\"cause\":\"shard\"}]}");
 		assertThatThrownBy(() -> index.delete(job.document(), 1))

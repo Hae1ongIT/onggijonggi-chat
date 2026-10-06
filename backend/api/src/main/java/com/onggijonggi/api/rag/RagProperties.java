@@ -7,7 +7,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /**
  * Class Name : RagProperties.java
  * Description : 방 문서 검색(#344) 설정(app.rag.*). 검색 기준 수치(search)는 평가 세트(rag-eval, 가상 규정 5개·질문 37개)로 정한
- *               값이다 — 벡터 0.50·키워드 75%에서 답 있는 질문 30/31, 무관 질문 오채택 0/6. 실제 문서가 들어오면 ragEval로 다시 맞춘다. 임베딩 주소가 비면 검색은 UNAVAILABLE이다 — 채팅·문서 등록은 영향받지 않는다.
+ *               값이다 — 벡터 0.50·키워드 75%에서 답 있는 질문 30/31, 무관 질문 오채택 0/6. 실제 문서가 들어오면 ragEval로 다시 맞춘다.
+ *               임베딩 주소가 비면 검색은 UNAVAILABLE이다 — 채팅·문서 등록은 영향받지 않는다.
  */
 @ConfigurationProperties(prefix = "app.rag")
 public record RagProperties(

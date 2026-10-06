@@ -82,4 +82,25 @@ class ChunkSearcherTest {
 			assertThatThrownBy(() -> ChunkSearcher.filter(new ThreadDocumentScope(tenant, unscoped, scope.targets())))
 					.isInstanceOf(IllegalArgumentException.class);
 	}
+
+	/** 벡터 점수는 _score(=(1+cos)/2)를 코사인 유사도로 바꾸고 [-1, 1]로 자른다. 두 채널 요청에 각 기준이 실린다. */
+	@Test
+	void scoresAreConvertedAndClampedAndEachChannelCarriesItsCriterion() throws Exception {
+		String hits = "{\"hits\":{\"hits\":[{\"_score\":%s,\"_source\":{\"doc_id\":\"%s\",\"run_seq\":1,\"seq\":%d,\"loc\":\"para=1\",\"content\":\"본문\"}}]}}";
+		UUID doc = UUID.randomUUID();
+		var scope = new ThreadDocumentScope(UUID.randomUUID(), ThreadScopeFilter.of(List.of(UUID.randomUUID())),
+				List.of(new ThreadDocumentScope.Target(doc, "a.txt", 1, "bge-m3", 3)));
+		for (var expected : List.of(List.of("0.75", 0.5), List.of("1.0000001", 1.0))) {
+			try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, String.format(hits, expected.get(0), doc, 1))) {
+				var stubbed = new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)),
+						null, null, new RagProperties.Search(3, 2, 20, 100, 0.5, "75%", 60, 2, 10), true), WebClient.builder(), JsonMapper.builder().build());
+
+				var result = stubbed.search(scope, "연차", new float[] {1, 0, 0});
+
+				assertThat(result).singleElement().satisfies(hit -> assertThat(hit.vectorScore()).isEqualTo((Double) expected.get(1)));
+				assertThat(es.requests).anySatisfy(request -> assertThat(request.body()).contains("\"minimum_should_match\":\"75%\""));
+				assertThat(es.requests).anySatisfy(request -> assertThat(request.body()).contains("\"similarity\":0.5"));
+			}
+		}
+	}
 }

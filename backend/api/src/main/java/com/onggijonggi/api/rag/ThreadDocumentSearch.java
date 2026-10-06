@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * Class Name : ThreadDocumentSearch.java
@@ -50,12 +51,16 @@ public class ThreadDocumentSearch {
 		// 장애는 200 응답의 UNAVAILABLE이라 공통 오류 로그에 남지 않는다. 응답 헤더 X-Trace-Id로 찾을 수 있게 로그에 traceId를 단다.
 		return Mono.deferContextual(context -> {
 			String trace = context.getOrDefault(TraceIdWebFilter.TRACE_ID_ATTR, "-");
-			return Mono.fromCallable(() -> run(thread, trace, documents.searchScope(thread, actor), question, history, modelId))
-					.subscribeOn(scheduler)
-					.onErrorResume(RejectedExecutionException.class, full -> {
-						log.warn("방 문서 검색 대기열이 가득 찼다: thread={} traceId={}", thread, trace);
-						return Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of()));
-					});
+			// 방 접근 확인(DB, 가볍다)은 공용 boundedElastic에서 먼저 한다 — 검색 대기열이 차도 남의 방·없는 방은 404로 끝나야 한다.
+			// 외부 호출(다시 쓰기·임베딩·ES)만 검색 전용 스케줄러로 보낸다.
+			return Mono.fromCallable(() -> documents.searchScope(thread, actor))
+					.subscribeOn(Schedulers.boundedElastic())
+					.flatMap(scope -> Mono.fromCallable(() -> run(thread, trace, scope, question, history, modelId))
+							.subscribeOn(scheduler)
+							.onErrorResume(RejectedExecutionException.class, full -> {
+								log.warn("방 문서 검색 대기열이 가득 찼다: thread={} traceId={}", thread, trace);
+								return Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of()));
+							}));
 		});
 	}
 

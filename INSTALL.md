@@ -276,8 +276,15 @@ docker compose up -d --build
 - 리눅스 호스트에서 Elasticsearch가 `max virtual memory areas vm.max_map_count [65530] is too low`로 뜨지 않으면 `sudo sysctl -w vm.max_map_count=262144`를 한다(재부팅 뒤에도 유지하려면 `/etc/sysctl.conf`에 적는다).
 - 배포(재기동) 때 처리 중이던 문서는 다음 기동에서 이어서 처리한다.
 - 검색: BFF가 같은 `EMBEDDING_URL`로 질문을 임베딩해 현재 방의 고정·검색 준비 완료 문서 안에서 찾는다. 채팅 답변에는 아직 붙지 않았고(후속), `POST /api/threads/{방 ID}/documents/search`(본문 `{"question": "..."}`)로 무엇이 찾아지는지 확인할 수 있다. 다른 API처럼 로그인 토큰(`Authorization: Bearer ...`)이 필요하고, 그 방 참여자만 부를 수 있다(아니면 401·404). 이 확인 API를 끄려면 `.env`에 `RAG_SEARCH_API_ENABLED=false`를 넣는다(404가 된다).
-- 후속 질문("그럼 그거는?")은 검색 전에 대화 모델로 검색 문장을 다시 쓴다. 기본은 그 대화에 쓰는 모델이라 새로 외부로 나가는 경로는 없다. 사내 모델로 고정하려면 `.env`에 `RAG_REWRITE_MODEL=<LiteLLM 모델 이름>`을 넣는다.
-- 검색 인덱스는 버전 이름(`thr_doc_chunk_v2`)과 별칭(`thr_doc_chunk`)으로 나뉜다. 이전 버전(`thr_doc_chunk_v1`)이 있는 서버에 새 버전을 배포하면 ETL이 기동하면서 청크를 새 인덱스로 옮기고 별칭을 넘긴다(재처리·재임베딩 없음, `docker compose logs etl`의 `검색 인덱스를 옮겼다`). 이전 인덱스는 남겨 두므로 검색이 잘 되는지 확인한 뒤 `curl -X DELETE http://127.0.0.1:9200/thr_doc_chunk_v1`로 지운다.
+- 후속 질문("그럼 그거는?")은 검색 전에 대화 모델로 검색 문장을 다시 쓴다. 기본은 그 대화에 쓰는 모델이라 새로 외부로 나가는 경로는 없다. **운영에서는 사내 모델로 고정하기를 권한다** — `.env`에 `RAG_REWRITE_MODEL=<LiteLLM 모델 이름>`. 비워 두면 사용자가 고른 모델(외부 공급자일 수 있다)로 다시 쓰므로 비용과 외부 전송이 그 모델을 따른다. 추론(thinking)을 하는 모델은 출력 한도(512토큰)를 추론에 써서 결과가 잘리면 다시 쓰기를 버리고 질문 그대로 검색한다(BFF 로그 `출력 한도에서 잘림`) — 추론하지 않는 모델을 고른다.
+- 검색 인덱스는 버전 이름(`thr_doc_chunk_v2`)과 별칭(`thr_doc_chunk`)으로 나뉜다. 이전 버전(`thr_doc_chunk_v1`)이 있는 서버에 새 버전을 배포하면 ETL이 기동하자마자 청크를 새 인덱스로 옮기고 별칭을 넘긴다(재처리·재임베딩 없음, 청크가 많으면 몇 분 걸린다). 끝나면 `docker compose logs etl`에 `검색 인덱스를 옮겼다`가 찍힌다. 이전 인덱스는 남겨 두므로 **아래 두 가지를 확인한 뒤에만** 지운다 — 별칭이 아직 v1을 가리킬 때 지우면 청크가 모두 사라지고, 한꺼번에 다시 색인하는 도구가 없다.
+
+  ```bash
+  curl -s http://127.0.0.1:9200/_alias/thr_doc_chunk        # 결과에 thr_doc_chunk_v2만 있어야 한다
+  curl -s http://127.0.0.1:9200/thr_doc_chunk_v1/_count     # 두 count가 같아야 한다
+  curl -s http://127.0.0.1:9200/thr_doc_chunk_v2/_count
+  curl -X DELETE http://127.0.0.1:9200/thr_doc_chunk_v1     # 위가 모두 맞을 때만
+  ```
 - `docker compose down -v`나 Elasticsearch 볼륨 삭제는 검색 인덱스를 지운다. 이미 "검색 준비 완료"인 문서는 화면에 그대로 보이지만 검색 인덱스에서는 빠진다. 지금은 일괄로 다시 색인하는 운영 도구가 없으므로, 필요한 문서를 다시 등록한다.
 
 ## Keycloak 관리 클라이언트와 권한 변경 감사

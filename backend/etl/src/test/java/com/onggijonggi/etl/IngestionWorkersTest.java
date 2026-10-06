@@ -49,6 +49,7 @@ class IngestionWorkersTest {
 		workers.start();
 		try {
 			verify(pipeline, timeout(5000).atLeast(3)).process(job);
+			verify(index, timeout(5000)).ensure();
 			verify(runs, atLeast(4)).claim(Duration.ofMinutes(10), 2);
 		} finally {
 			workers.stop();
@@ -72,6 +73,7 @@ class IngestionWorkersTest {
 		assertThat(mismatched.isRunning()).isFalse();
 		mismatched.stop();
 		verify(runs, never()).claim(any(), anyInt());
+		verify(index, never()).ensure();
 	}
 
 	@Test

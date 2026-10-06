@@ -19,7 +19,7 @@ import tools.jackson.databind.ObjectMapper;
  * Description : 범위 안의 청크를 키워드(nori)와 벡터(kNN)로 따로 찾고, 채널마다 관련성 기준을 건 뒤 순위 기반(RRF)으로 합친다.
  *               두 점수는 척도가 달라 하나의 기준을 걸지 않는다(지도 선택 12). 한쪽 채널만 통과한 청크도 채택한다 — 사내 고유명사는
  *               키워드에서만 잡히고 벡터 유사도가 낮을 수 있다. 범위(고객사·방·문서별 현재 회차)는 두 채널에 같은 filter로 걸어,
- *               후보를 고른 뒤 거르는 것이 아니라 거른 범위 안에서 찾는다. 호출부는 boundedElastic에서 실행한다.
+ *               후보를 고른 뒤 거르는 것이 아니라 거른 범위 안에서 찾는다. 블로킹 호출이라 검색 전용 스케줄러(rag-search)에서 실행한다.
  */
 @Component
 public class ChunkSearcher {

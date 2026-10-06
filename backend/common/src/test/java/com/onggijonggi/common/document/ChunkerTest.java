@@ -66,18 +66,21 @@ class ChunkerTest {
 		assertThat(chunker.chunk(document, 1, sections)).isEqualTo(chunker.chunk(document, 1, sections));
 	}
 
-	/** 빈 줄 없는 큰 파일(10MB CSV·로그)은 문단 하나다. 나누는 비용이 길이에 비례해야 한다(전에는 남은 문자열을 매번 복사했다). */
+	/**
+	 * 빈 줄 없는 큰 파일(10MB CSV·로그)은 문단 하나다. 나누는 비용이 길이에 비례해야 한다. 16MB면 지금 구현은 1초 안팎이고, 남은 문자열을
+	 * 매번 복사하던 이전 구현은 수백 GB를 복사해 10초 안에 끝나지 않는다.
+	 */
 	@Test
 	void aHugeSingleParagraphIsSplitInLinearTime() {
 		var production = new Chunker(new Chunker.Settings(800, 1200, 100));
 		StringBuilder text = new StringBuilder();
-		for (int line = 0; text.length() < 4_000_000; line++) text.append("행").append(line).append(",값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값\n");
+		for (int line = 0; text.length() < 16_000_000; line++) text.append("행").append(line).append(",값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값,값\n");
 		String paragraph = text.toString().strip();
 
 		var chunks = assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
 				() -> production.chunk(document, 1, List.of(new Chunker.Section(null, paragraph))));
 
-		assertThat(chunks.size()).isGreaterThan(3000);
+		assertThat(chunks.size()).isGreaterThan(12000);
 		assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.content().length()).isLessThanOrEqualTo(1200 + 100 + 2));
 		assertThat(chunks.get(0).content()).startsWith("행0,");
 		assertThat(chunks.get(chunks.size() - 1).content()).endsWith(paragraph.substring(paragraph.length() - 20));

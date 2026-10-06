@@ -10,6 +10,7 @@ import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -79,6 +80,33 @@ class QueryRewriterTest {
 		assertThat(QueryRewriter.clean("Query: `연차 이월 기한`")).isEqualTo("연차 이월 기한");
 		assertThat(QueryRewriter.clean("질문하는 방법")).as("라벨이 아닌 낱말은 그대로").isEqualTo("질문하는 방법");
 		assertThat(QueryRewriter.clean("```\n```")).isNull();
+		assertThat(QueryRewriter.clean("1. **연차 이월 기한**")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("- 검색어: 연차 이월 기한")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("**검색어:** **연차** 이월 기한")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("2024. 연차 규정 바뀐 점")).as("연도는 목록 번호가 아니다").isEqualTo("2024. 연차 규정 바뀐 점");
+	}
+
+	@Test
+	void aModelNameIsSanitizedBeforeLogging() {
+		assertThat(QueryRewriter.loggable("gemma")).isEqualTo("gemma");
+		assertThat(QueryRewriter.loggable("openai/gpt-4o:latest@v1")).isEqualTo("openai/gpt-4o:latest@v1");
+		assertThat(QueryRewriter.loggable("x\n2026-10-06 ERROR 가짜")).doesNotContain("\n").isEqualTo("x?2026-10-06?ERROR???");
+	}
+
+	@Test
+	void anAnswerCutAtTheOutputLimitIsDiscarded() {
+		ChatModel truncated = new ChatModel() {
+			@Override
+			public ChatResponse call(Prompt prompt) {
+				return new ChatResponse(List.of(new Generation(new AssistantMessage("연차 이월 기한을 넘기면"),
+						ChatGenerationMetadata.builder().finishReason("LENGTH").build())));
+			}
+		};
+		var properties = new RagProperties(null, null, new RagProperties.Rewrite("", Duration.ofSeconds(2), 2), null, true);
+
+		var result = new QueryRewriter(ChatClient.create(truncated), properties, "default-model").rewrite("그건?", HISTORY, "gemma");
+
+		assertThat(result).isEqualTo(new QueryRewriter.Result("그건?", false));
 	}
 
 	@Test
@@ -104,19 +132,24 @@ class QueryRewriterTest {
 	/** 실제 게이트웨이 클라이언트(OpenAI 호환)로, 응답이 늦으면 시간 제한에서 연결을 끊고 질문 그대로 검색하는지 본다. 재시도하지 않는다. */
 	@Test
 	void theGatewayCallGivesUpAtTheTimeoutWithoutRetrying() throws Exception {
+		// 늦게라도 정상 응답(다시 쓴 문장)을 준다 — 질문 그대로 검색으로 떨어졌다면 원인은 시간 초과뿐이다.
 		try (StubHttpServer gateway = new StubHttpServer().reply("/v1/chat/completions", body -> {
-			try { Thread.sleep(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-			return new StubHttpServer.Reply(200, "{}");
+			try { Thread.sleep(5000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+			return new StubHttpServer.Reply(200, "{\"id\":\"r\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"gemma\","
+					+ "\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"늦은 다시 쓰기\"}}]}");
 		})) {
-			var properties = new RagProperties(null, null, new RagProperties.Rewrite("", Duration.ofMillis(500), 2), null, true);
+			var properties = new RagProperties(null, null, new RagProperties.Rewrite("", Duration.ofSeconds(1), 2), null, true);
 			var rewriter = new QueryRewriter(properties, gateway.url() + "/v1", "", "default-model");
 			long started = System.nanoTime();
 
 			var result = rewriter.rewrite("그럼 그거 넘기면?", HISTORY, "gemma");
 
 			assertThat(result).isEqualTo(new QueryRewriter.Result("그럼 그거 넘기면?", false));
-			assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofMillis(2500));
+			assertThat(Duration.ofNanos(System.nanoTime() - started)).as("5초 응답을 기다리지 않는다").isLessThan(Duration.ofMillis(4000));
 			assertThat(gateway.requests).as("재시도하지 않는다").hasSize(1);
+			// 공용 기본 옵션(모델·온도)에 덮이지 않고 요청 모델·온도 0이 실제 요청 본문에 실린다.
+			assertThat(gateway.requests.get(0).body()).contains("\"model\":\"gemma\"").contains("\"temperature\":0.0")
+					.containsPattern("\"max_(completion_)?tokens\":" + QueryRewriter.MAX_TOKENS);
 		}
 	}
 }

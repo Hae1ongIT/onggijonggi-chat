@@ -12,7 +12,7 @@ import tools.jackson.databind.ObjectMapper;
  * Class Name : QueryEmbedder.java
  * Description : 검색 문장을 문서와 같은 OpenAI 호환 임베딩 엔드포인트(사내 bge-m3)로 벡터로 바꾼다. 응답 계약 검사(모델·개수·순번·
  *               차원·유한값)는 ETL EmbeddingClient와 같은 규칙이다. ETL은 일시·영구 실패를 재시도 정책으로 나누지만 검색은 모두
- *               UNAVAILABLE이라 분류가 달라 따로 둔다. 호출부는 boundedElastic에서 실행한다.
+ *               UNAVAILABLE이라 분류가 달라 따로 둔다. 블로킹 호출이라 검색 전용 스케줄러(rag-search)에서 실행한다.
  */
 @Component
 public class QueryEmbedder {

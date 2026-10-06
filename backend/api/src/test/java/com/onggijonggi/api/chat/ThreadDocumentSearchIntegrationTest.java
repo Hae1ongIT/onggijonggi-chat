@@ -138,6 +138,7 @@ class ThreadDocumentSearchIntegrationTest {
 		room = room(owner);
 		otherRoom = room(owner);
 		EMBEDDING.requests.clear();
+		GATEWAY.requests.clear();
 		EMBEDDING.reply("/v1/embeddings", body -> new StubHttpServer.Reply(200, embedding(body)));
 		recreateIndex();
 	}
@@ -188,6 +189,7 @@ class ThreadDocumentSearchIntegrationTest {
 		assertThat(result.status()).isEqualTo(SearchResult.Status.NO_EVIDENCE);
 		assertThat(result.rewritten()).isFalse();
 		assertThat(EMBEDDING.requests).isEmpty();
+		assertThat(GATEWAY.requests).isEmpty();
 	}
 
 	@Test void aFollowUpIsSearchedWithTheRewrittenQuery() {

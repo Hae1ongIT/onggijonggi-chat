@@ -25,8 +25,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class TextExtractor {
 
-	/** 뽑은 텍스트 한 덩어리. page는 PDF만 있고 그 외는 null이다. */
-
+	/** 확장자별로 글자를 뽑아 비어 있지 않은 섹션(PDF는 페이지마다)을 돌려준다. 글자가 없으면 EMPTY_TEXT로 영구 실패한다. */
 	public List<Chunker.Section> extract(String fileName, byte[] bytes) {
 		String extension = extension(fileName);
 		List<Chunker.Section> sections;

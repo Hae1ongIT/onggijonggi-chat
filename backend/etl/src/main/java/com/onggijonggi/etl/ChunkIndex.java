@@ -4,6 +4,7 @@ import com.onggijonggi.common.document.Chunker;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +32,10 @@ public class ChunkIndex {
 
 	private static final Logger log = LoggerFactory.getLogger(ChunkIndex.class);
 	private static final String MAPPING = "es-thr-doc-chunk-index.json";
+	/** 이전 작업을 한 번에 기다리는 상한. 넘으면 일시 실패로 끝나고 다음 시도가 같은 작업을 이어서 기다린다. */
+	private static final Duration MIGRATION_WAIT = Duration.ofHours(2);
+	/** 이전 작업 상태 조회가 이만큼 연달아 실패하면 일시 실패로 끝낸다. */
+	private static final int POLL_FAILURES = 5;
 	/** 문자셋을 붙인다 — 붙이지 않으면 문자열 본문이 ISO-8859-1로 인코딩돼 한글 청크가 "??"로 저장된다. */
 	private static final MediaType NDJSON = MediaType.parseMediaType("application/x-ndjson;charset=UTF-8");
 
@@ -38,6 +43,10 @@ public class ChunkIndex {
 	private final ObjectMapper json;
 	private final EtlProperties.Elasticsearch settings;
 	private volatile boolean ensured;
+	/** 인덱스 준비·이전 잠금. 정리 작업의 삭제도 이 잠금으로 이전이 끝나기를 기다린다. */
+	private final Object preparing = new Object();
+	/** 기다리던 이전 작업. 상태 조회가 끊겨 이전이 일시 실패로 끝나도 다음 시도는 새로 복사하지 않고 이 작업을 이어서 기다린다. */
+	private String pendingTask;
 
 	public ChunkIndex(EtlProperties properties, ObjectMapper json) {
 		this.settings = properties.elasticsearch();
@@ -51,8 +60,16 @@ public class ChunkIndex {
 	 * 벡터는 그대로 옮기므로 원본 재추출·재임베딩이 없다. 이전 인덱스는 지우지 않는다(확인 뒤 운영자가 지운다). 옮기는 동안 검색은
 	 * 이전 인덱스로 계속 된다. 처리 스레드가 함께 부르므로 직렬화한다.
 	 */
-	public synchronized void ensure() {
+	public void ensure() {
+		// 준비가 끝났으면 잠금 없이 돌아간다 — 평소의 적재가 정리 작업(delete)과 서로 기다리지 않게 한다.
 		if (ensured) return;
+		synchronized (preparing) {
+			if (ensured) return;
+			prepare();
+		}
+	}
+
+	private void prepare() {
 		try {
 			JsonNode aliases;
 			try {
@@ -95,10 +112,21 @@ public class ChunkIndex {
 	private void migrate(List<String> previous) {
 		log.info("검색 인덱스를 옮긴다: {} → {}", previous, settings.index());
 		create(false);
-		JsonNode result = json.readTree(client.post().uri("/_reindex?wait_for_completion=true&refresh=true")
-				.contentType(MediaType.APPLICATION_JSON)
-				.body(utf8(json.writeValueAsString(Map.of("source", Map.of("index", previous), "dest", Map.of("index", settings.index())))))
-				.retrieve().body(String.class));
+		// 작업으로 띄우고 끝날 때까지 상태를 본다. 응답을 기다리게 하면 청크가 많을 때 요청 시간 제한(기본 60초)에 끊기고, ES 쪽 작업은
+		// 계속 도는데 다음 시도가 같은 복사를 처음부터 또 시작한다.
+		if (pendingTask == null) {
+			String task = json.readTree(client.post().uri("/_reindex?wait_for_completion=false&refresh=true")
+					.contentType(MediaType.APPLICATION_JSON)
+					.body(utf8(json.writeValueAsString(Map.of("source", Map.of("index", previous), "dest", Map.of("index", settings.index())))))
+					.retrieve().body(String.class)).path("task").asString("");
+			if (task.isEmpty()) throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기 작업을 시작하지 못했다", null);
+			pendingTask = task;
+		}
+		JsonNode status = waitFor(pendingTask);
+		pendingTask = null;
+		if (status.has("error"))
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기가 실패했다: " + HttpCalls.abbreviate(status.path("error").toString()), null);
+		JsonNode result = status.path("response");
 		if (result.path("timed_out").asBoolean(false) || !result.path("failures").isEmpty())
 			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기가 끝나지 않았다: " + HttpCalls.abbreviate(result.toString()), null);
 		long before = 0;
@@ -128,6 +156,34 @@ public class ChunkIndex {
 		client.post().uri("/_aliases").contentType(MediaType.APPLICATION_JSON)
 				.body(utf8(json.writeValueAsString(Map.of("actions", actions)))).retrieve().toBodilessEntity();
 		log.warn("검색 별칭이 여러 인덱스를 가리켜 {} 외의 인덱스를 뗐다: {}", settings.index(), previous);
+	}
+
+	/** ES 작업이 끝날 때까지 1초 간격으로 본다. 끝난 작업의 상태(response 또는 error)를 돌려준다. 한 번 기다리는 상한은 MIGRATION_WAIT다. */
+	private JsonNode waitFor(String task) {
+		long deadline = System.nanoTime() + MIGRATION_WAIT.toNanos();
+		int failures = 0;
+		while (true) {
+			try {
+				JsonNode status = json.readTree(client.get().uri("/_tasks/{task}", task).retrieve().body(String.class));
+				if (status.path("completed").asBoolean(false)) return status;
+				failures = 0;
+			} catch (HttpClientErrorException.NotFound gone) {
+				// 작업 기록이 없다(ES 재시작 등). 다음 시도에서 처음부터 다시 옮긴다.
+				pendingTask = null;
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기 작업을 찾지 못했다: " + task, gone);
+			} catch (RuntimeException error) {
+				// 상태 조회가 잠깐 끊긴 것은 작업 실패가 아니다. 연속으로 실패할 때만 일시 실패로 끝낸다(작업은 이어서 기다린다).
+				if (++failures >= POLL_FAILURES) throw HttpCalls.classify("INDEX", error);
+			}
+			if (System.nanoTime() > deadline)
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기가 " + MIGRATION_WAIT.toMinutes() + "분 안에 끝나지 않았다: " + task, null);
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기를 기다리다 중단됐다(ES 작업은 계속 돈다): " + task, interrupted);
+			}
+		}
 	}
 
 	private long indexCount(String index) {
@@ -215,9 +271,15 @@ public class ChunkIndex {
 
 	/** 한 회차의 청크를 지운다. 멱등이다 — 인덱스가 아직 없으면 지울 것도 없다. */
 	public void delete(UUID document, int runSeq) {
-		// 정리 작업은 처리 스레드와 따로 돈다. 인덱스를 옮기는 중이면 끝날 때까지 기다린다 — 옮기기 전 인덱스에서만 지우면 이미 복사된
-		// 청크가 새 인덱스에 남는다.
-		ensure();
+		// 정리 작업은 처리 스레드와 따로 돈다. 인덱스 준비·이전 잠금을 잡아 옮기는 동안에는 기다린다 — 옮기기 전 인덱스에서만 지우면 이미
+		// 복사된 청크가 새 인덱스에 남는다. ensure를 직접 부르지는 않는다(정리 작업이 인덱스를 새로 만들지 않게). 준비가 끝난 뒤의
+		// 적재는 이 잠금을 잡지 않아 삭제와 서로 기다리지 않는다.
+		synchronized (preparing) {
+			deleteRun(document, runSeq);
+		}
+	}
+
+	private void deleteRun(UUID document, int runSeq) {
 		try {
 			JsonNode response = json.readTree(client.post().uri("/{alias}/_delete_by_query?refresh=true&conflicts=proceed", settings.alias())
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(runQuery(document, runSeq))))

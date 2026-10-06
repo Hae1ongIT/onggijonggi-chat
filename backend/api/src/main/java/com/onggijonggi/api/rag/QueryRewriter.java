@@ -8,6 +8,8 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -31,8 +33,15 @@ public class QueryRewriter {
 	private static final Logger log = LoggerFactory.getLogger(QueryRewriter.class);
 	/** 다시 쓴 문장이 이보다 길면 답을 지어냈거나 지시를 따르지 않은 것으로 보고 버린다. */
 	static final int MAX_LENGTH = 300;
+	/**
+	 * 출력 토큰 상한. 지시를 어기고 길게 답해도 비용이 늘지 않게 한다. 추론(thinking) 토큰까지 한도에 넣는 모델이 있어 검색 문장 한 줄보다
+	 * 넉넉히 둔다 — 한도에서 잘린 응답은 버린다.
+	 */
+	static final int MAX_TOKENS = 512;
 	/** 대화 기록의 메시지 하나를 보여 줄 최대 글자 수. */
 	private static final int MESSAGE_LIMIT = 1000;
+	/** 목록 표시("1. ", "2) ", "- ", "• "). */
+	private static final Pattern LIST_MARK = Pattern.compile("^(?:\\d{1,2}[.)]|[-•])\\s+");
 	/** 모델이 붙이기 쉬운 앞머리 라벨("검색 질문:", "검색어:", "질문:", "Query:"). */
 	private static final Pattern LABEL = Pattern.compile(
 			"^(?:검색\\s*(?:질문|문장|쿼리)|검색어|질문|쿼리|search\\s*query|query)\\s*[:：]\\s*", Pattern.CASE_INSENSITIVE);
@@ -65,29 +74,35 @@ public class QueryRewriter {
 		this.defaultModel = defaultModel;
 	}
 
-	/** history는 질문 앞의 대화(오래된 것부터)다. 질문 자체는 넣지 않는다. 블로킹 호출이라 호출부는 boundedElastic에서 실행한다. */
+	/** history는 질문 앞의 대화(오래된 것부터)다. 질문 자체는 넣지 않는다. 블로킹 호출이라 검색 전용 스케줄러(rag-search)에서 실행한다. */
 	public Result rewrite(String question, List<ChatMessage> history, String requestModel) {
 		List<ChatMessage> recent = recent(history);
 		if (recent.isEmpty()) return new Result(question, false);
 		String model = !settings.model().isBlank() ? settings.model()
 				: requestModel != null && !requestModel.isBlank() ? requestModel : defaultModel;
+		// 요청의 modelId는 사용자가 정한다. 로그에 넣기 전에 허용 문자 밖을 바꿔 줄바꿈 등으로 가짜 로그 줄을 만들지 못하게 한다.
+		String logged = loggable(model);
 		long started = System.nanoTime();
 		try {
-			String output = chatClient.prompt()
+			ChatResponse response = chatClient.prompt()
 					.system(SYSTEM_PROMPT)
 					.user(prompt(recent, question))
-					.options(ChatOptions.builder().model(model).temperature(0.0))
+					.options(ChatOptions.builder().model(model).temperature(0.0).maxTokens(MAX_TOKENS))
 					.call()
-					.content();
-			String query = clean(output);
+					.chatResponse();
+			Generation generation = response == null ? null : response.getResult();
+			// 출력 한도에서 잘렸으면(추론 토큰이 한도를 먹는 모델 등) 문장 중간일 수 있어 버린다.
+			String finish = generation == null ? null : generation.getMetadata().getFinishReason();
+			String query = finish != null && finish.equalsIgnoreCase("length") ? null
+					: clean(generation == null ? null : generation.getOutput().getText());
 			if (query == null) {
-				log.warn("검색 문장 다시 쓰기 결과를 버렸다(비었거나 {}자 초과) — 질문 그대로 검색한다: model={}", MAX_LENGTH, model);
+				log.warn("검색 문장 다시 쓰기 결과를 버렸다(비었거나 {}자 초과이거나 출력 한도에서 잘림) — 질문 그대로 검색한다: model={}", MAX_LENGTH, logged);
 				return new Result(question, false);
 			}
-			log.debug("검색 문장을 다시 썼다: model={} {}ms", model, Duration.ofNanos(System.nanoTime() - started).toMillis());
+			log.debug("검색 문장을 다시 썼다: model={} {}ms", logged, Duration.ofNanos(System.nanoTime() - started).toMillis());
 			return new Result(query, !query.equals(question.strip()));
 		} catch (RuntimeException error) {
-			log.warn("검색 문장 다시 쓰기 실패 — 질문 그대로 검색한다: model={} {}ms {}", model,
+			log.warn("검색 문장 다시 쓰기 실패 — 질문 그대로 검색한다: model={} {}ms {}", logged,
 					Duration.ofNanos(System.nanoTime() - started).toMillis(), error.getClass().getSimpleName());
 			return new Result(question, false);
 		}
@@ -109,18 +124,25 @@ public class QueryRewriter {
 		return "[대화 기록]\n" + conversation + "\n\n[마지막 질문]\n" + question.strip();
 	}
 
+	/** 로그용 모델 이름. 허용 문자(영숫자·_·.·:·/·@·-) 밖은 ?로 바꾼다. */
+	static String loggable(String model) {
+		return model.replaceAll("[^\\w.:/@-]", "?");
+	}
+
 	/** 긴 AI 답변이 프롬프트를 키우지 않게 메시지마다 앞부분만 보여 준다. 가리키는 대상은 보통 앞부분에 있다. */
 	private static String abbreviate(String content) {
 		return content.length() <= MESSAGE_LIMIT ? content : content.substring(0, MESSAGE_LIMIT) + "…";
 	}
 
-	/** 한 줄로 정리한다. 코드 펜스 줄은 건너뛰고 앞머리 라벨·감싼 따옴표·백틱을 뗀다. 비었거나 너무 길면 null. */
+	/** 한 줄로 정리한다. 코드 펜스 줄은 건너뛰고 목록 표시·앞머리 라벨·감싼 따옴표·백틱·굵게(**)를 뗀다. 비었거나 너무 길면 null. */
 	static String clean(String output) {
 		if (output == null) return null;
 		String line = output.strip().lines().map(String::strip)
 				.filter(value -> !value.isEmpty() && !value.startsWith("```")).findFirst().orElse("");
+		// 굵게(**)는 어디에 있든 지운다 — 라벨을 감싼 경우(**검색어:**)도 있어 라벨보다 먼저 지운다.
+		line = LIST_MARK.matcher(line.replace("**", "")).replaceFirst("");
 		line = LABEL.matcher(line).replaceFirst("");
-		line = line.replaceAll("^[\"'“”‘’`]+|[\"'“”‘’`]+$", "").strip();
+		line = line.replaceAll("^[\"'“”‘’`*]+|[\"'“”‘’`*]+$", "").strip();
 		return line.isEmpty() || line.length() > MAX_LENGTH ? null : line;
 	}
 }
