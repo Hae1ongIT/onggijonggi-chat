@@ -20,13 +20,6 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
@@ -45,7 +38,8 @@ import tools.jackson.databind.json.JsonMapper;
  *               검색 기준 조합마다 돌려 적중률·무관 질문 오채택률·다시 쓰기 효과·지연을 표로 낸다(build/rag-eval/report.md).
  *               실제 사내 모델이 필요해 기본 test·CI에서 빠지고 ragEval로만 돈다:
  *                 RAG_EVAL_EMBEDDING_URL  임베딩 엔드포인트(OpenAI 호환, bge-m3). 없으면 건너뛴다.
- *                 RAG_EVAL_LLM_URL        다시 쓰기용 대화 모델 엔드포인트(OpenAI 호환, /v1 앞까지). 없으면 후속 질문은 다시 쓰지 않는다.
+ *                 RAG_EVAL_LLM_URL        다시 쓰기용 대화 모델 엔드포인트(OpenAI 호환, /v1 앞까지). 운영과 같은 클라이언트로 부른다.
+ *                                         없으면 후속 질문은 다시 쓰지 않는다.
  *                 RAG_EVAL_LLM_MODEL      대화 모델 이름(기본 gemma).
  *               평가용 모델은 사내망 엔드포인트만 쓴다 — 평가 문서·질문이 외부 공급자로 나가지 않게 한다.
  */
@@ -92,7 +86,7 @@ class RagEvaluationTest {
 
 			// 질문마다 검색 문장(다시 쓰기 포함)과 벡터를 한 번만 만든다. 기준 조합은 같은 입력으로 비교한다.
 			QueryRewriter rewriter = llmUrl == null || llmUrl.isBlank() ? null
-					: new QueryRewriter(ChatClient.builder(new OpenAiCompatibleChatModel(llmUrl)), properties(esUrl, embeddingUrl, 0.5, "60%"), llmModel);
+					: new QueryRewriter(properties(esUrl, embeddingUrl, 0.5, "75%"), llmUrl + "/v1", "", llmModel);
 			Map<String, QueryRewriter.Result> queries = new LinkedHashMap<>();
 			Map<String, float[]> vectors = new HashMap<>();
 			List<Long> rewriteMillis = new ArrayList<>(), embedMillis = new ArrayList<>();
@@ -260,30 +254,6 @@ class RagEvaluationTest {
 						node.hasNonNull("contains") ? node.path("contains").asString() : null, history));
 			}
 			return questions;
-		}
-	}
-
-	/** OpenAI 호환 /v1/chat/completions를 직접 부르는 최소 ChatModel. 평가에서만 쓴다(게이트웨이 없이 사내 모델에 붙는다). */
-	private final class OpenAiCompatibleChatModel implements ChatModel {
-		private final RestClient client;
-
-		OpenAiCompatibleChatModel(String baseUrl) {
-			this.client = RestClient.create(baseUrl);
-		}
-
-		@Override
-		public ChatResponse call(Prompt prompt) {
-			List<Map<String, String>> messages = new ArrayList<>();
-			for (Message message : prompt.getInstructions())
-				messages.add(Map.of("role", message.getMessageType().getValue(), "content", message.getText()));
-			Map<String, Object> body = new LinkedHashMap<>();
-			body.put("model", prompt.getOptions().getModel());
-			body.put("messages", messages);
-			if (prompt.getOptions().getTemperature() != null) body.put("temperature", prompt.getOptions().getTemperature());
-			String response = client.post().uri("/v1/chat/completions").contentType(MediaType.APPLICATION_JSON)
-					.body(json.writeValueAsString(body).getBytes(StandardCharsets.UTF_8)).retrieve().body(String.class);
-			String content = json.readTree(response).path("choices").path(0).path("message").path("content").asString("");
-			return new ChatResponse(List.of(new Generation(new AssistantMessage(content))));
 		}
 	}
 }

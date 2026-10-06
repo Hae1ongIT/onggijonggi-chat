@@ -83,6 +83,29 @@ class ChunkIndexMigrationTest {
 		assertThat(index.count(doc, 1)).isEqualTo(3);
 	}
 
+	@Test
+	void anAliasPointingAtTheCurrentAndAnotherIndexKeepsOnlyTheCurrent() throws IOException {
+		RestClient es = RestClient.create(url());
+		byte[] v1;
+		try (InputStream in = new ClassPathResource("es-thr-doc-chunk-index-v1.json").getInputStream()) {
+			v1 = in.readAllBytes();
+		}
+		// 운영자가 별칭을 손으로 두 인덱스에 붙였다.
+		es.put().uri("/manual_old").contentType(MediaType.APPLICATION_JSON).body(v1).retrieve().toBodilessEntity();
+		es.put().uri("/manual_current").contentType(MediaType.APPLICATION_JSON).body(v1).retrieve().toBodilessEntity();
+		es.put().uri("/manual_old/_alias/manual_alias").retrieve().toBodilessEntity();
+		es.put().uri("/manual_current/_alias/manual_alias").retrieve().toBodilessEntity();
+		var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(url(), "manual_alias", "manual_current", 200), null,
+				new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(30));
+
+		new ChunkIndex(properties, json).ensure();
+
+		JsonNode aliases = json.readTree(es.get().uri("/_alias/manual_alias").retrieve().body(String.class));
+		assertThat(aliases.propertyNames()).containsExactly("manual_current");
+		assertThat(json.readTree(es.get().uri("/manual_old/_count").retrieve().body(String.class)).has("count"))
+				.as("뗀 인덱스는 지우지 않는다").isTrue();
+	}
+
 	private ChunkIndex index(String name) {
 		var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(url(), ALIAS, name, 200), null,
 				new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(30));

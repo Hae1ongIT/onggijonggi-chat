@@ -92,6 +92,15 @@ class ThreadDocumentSearchHttpTest {
 	}
 
 	@Test
+	void anUnauthenticatedRequestIsRejected() {
+		client.post().uri("/api/threads/" + room + "/documents/search")
+				.contentType(MediaType.APPLICATION_JSON).body("{\"question\":\"연차\"}")
+				.exchange()
+				.expectStatus().isUnauthorized();
+		verify(search, never()).search(any(), any(), any(), any(), any());
+	}
+
+	@Test
 	void aMissingHistoryIsAnEmptyConversation() {
 		when(search.search(eq(room), any(), eq("연차"), eq(List.of()), eq(null)))
 				.thenReturn(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, "연차", false, List.of())));

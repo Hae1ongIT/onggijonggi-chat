@@ -9,6 +9,8 @@ import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.web.reactive.function.client.WebClient;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -50,6 +52,20 @@ class ChunkSearcherTest {
 		assertThat(fused).hasSize(3);
 		assertThat(fused).filteredOn(hit -> hit.document().equals("a")).hasSize(2);
 		assertThat(fused).anySatisfy(hit -> assertThat(hit.document()).isEqualTo("b"));
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"{\"timed_out\":true,\"hits\":{\"hits\":[]}}", "{\"_shards\":{\"failed\":1},\"hits\":{\"hits\":[]}}",
+			"{\"took\":1}", "", "<html>proxy</html>"})
+	void anIncompleteOrMalformedResponseIsAnOutageNotAnEmptyResult(String body) throws Exception {
+		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, body)) {
+			var stubbed = new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)),
+					null, null, new RagProperties.Search(3, 2, 20, 100, 0.5, "75%", 60), true), WebClient.builder(), JsonMapper.builder().build());
+			var scope = new ThreadDocumentScope(UUID.randomUUID(), ThreadScopeFilter.of(List.of(UUID.randomUUID())),
+					List.of(new ThreadDocumentScope.Target(UUID.randomUUID(), "a.txt", 1, "bge-m3", 3)));
+
+			assertThatThrownBy(() -> stubbed.search(scope, "연차", new float[] {1, 0, 0})).isInstanceOf(RagUnavailableException.class);
+		}
 	}
 
 	@Test

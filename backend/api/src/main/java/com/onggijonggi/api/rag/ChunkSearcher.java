@@ -107,6 +107,7 @@ public class ChunkSearcher {
 		}
 		Map<String, Integer> perDocument = new HashMap<>();
 		List<Hit> result = new ArrayList<>();
+		// 동점이면 먼저 들어온 쪽(벡터 채널, 그다음 키워드 채널의 순위 순)이 앞선다 — 안정 정렬이라 결정적이다.
 		merged.entrySet().stream().sorted(Comparator.comparing((Map.Entry<String, Hit> entry) -> scores.get(entry.getKey())).reversed())
 				.forEach(entry -> {
 					if (result.size() >= search.topK()) return;
@@ -129,7 +130,10 @@ public class ChunkSearcher {
 			JsonNode tree = json.readTree(response == null ? "" : response);
 			if (tree.path("timed_out").asBoolean(false) || tree.path("_shards").path("failed").asInt(0) > 0)
 				throw new RagUnavailableException("Elasticsearch 검색이 일부 샤드에서 끝나지 않았다");
-			return tree.path("hits").path("hits");
+			// 결과 목록이 없는 응답(빈 본문, 프록시 오류 페이지를 JSON으로 감싼 것 등)을 "결과 0건"으로 읽으면 장애가 근거 없음으로 숨는다.
+			JsonNode hits = tree.path("hits").path("hits");
+			if (!hits.isArray()) throw new RagUnavailableException("Elasticsearch 응답에 검색 결과 목록이 없다");
+			return hits;
 		} catch (RagUnavailableException error) {
 			throw error;
 		} catch (RuntimeException unreadable) {

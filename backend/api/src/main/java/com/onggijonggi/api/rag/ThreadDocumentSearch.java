@@ -60,7 +60,9 @@ public class ThreadDocumentSearch {
 			List<ChunkSearcher.Hit> hits = searcher.search(scope, query.query(), embedder.embed(query.query()));
 			Map<String, ThreadDocumentScope.Target> byId = scope.targets().stream()
 					.collect(Collectors.toMap(target -> target.document().toString(), Function.identity()));
-			List<SearchResult.Chunk> chunks = hits.stream().filter(hit -> byId.containsKey(hit.document()))
+			// 검색 조건에 이미 (문서, 현재 회차)가 걸려 있지만, 범위 밖 청크가 응답에 섞여도 내보내지 않게 한 번 더 대조한다.
+			List<SearchResult.Chunk> chunks = hits.stream()
+					.filter(hit -> byId.containsKey(hit.document()) && byId.get(hit.document()).runSeq() == hit.runSeq())
 					.map(hit -> new SearchResult.Chunk(UUID.fromString(hit.document()), byId.get(hit.document()).fileName(), hit.runSeq(),
 							hit.seq(), hit.loc(), hit.content(), hit.vectorScore(), hit.keywordScore()))
 					.toList();

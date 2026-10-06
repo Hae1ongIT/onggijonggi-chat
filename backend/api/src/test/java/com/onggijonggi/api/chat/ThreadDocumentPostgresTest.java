@@ -613,6 +613,8 @@ class ThreadDocumentPostgresTest {
 		status(() -> service.searchScope(room, member), HttpStatus.NOT_FOUND);
 		jdbc.update("update thr set status='LOCKED',locked_at=now() where id=?", room);
 		assertThat(service.searchScope(room, owner).targets()).hasSize(1);
+		jdbc.update("update thr set status='ARCHIVED',archived_at=now() where id=?", room);
+		assertThat(service.searchScope(room, owner).targets()).hasSize(1);
 	}
 
 	/** ETL이 1회차를 끝낸 상태: 문서 READY, 회차 DONE. */

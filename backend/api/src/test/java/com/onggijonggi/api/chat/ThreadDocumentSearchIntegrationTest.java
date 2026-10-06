@@ -80,10 +80,16 @@ class ThreadDocumentSearchIntegrationTest {
 	/** 질문에 이 낱말이 있으면 그 축의 단위 벡터를 돌려준다. 없으면 다른 어떤 청크와도 직교하는 축이다. */
 	static final Map<String, Integer> AXES = new LinkedHashMap<>(Map.of("이월", 0, "보안", 1));
 	static final StubHttpServer EMBEDDING;
+	/** 검색 문장 다시 쓰기용 게이트웨이(OpenAI 호환). 다시 쓰기는 채팅의 ChatModel이 아니라 전용 클라이언트로 부른다. */
+	static final StubHttpServer GATEWAY;
+	static final String REWRITTEN = "연차 이월 기한이 지나면 어떻게 되나";
 
 	static {
 		try {
 			EMBEDDING = new StubHttpServer();
+			GATEWAY = new StubHttpServer().reply("/v1/chat/completions", 200, "{\"id\":\"r\",\"object\":\"chat.completion\",\"created\":0,"
+					+ "\"model\":\"gemma\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\""
+					+ REWRITTEN + "\"}}]}");
 		} catch (IOException error) {
 			throw new IllegalStateException(error);
 		}
@@ -99,10 +105,12 @@ class ThreadDocumentSearchIntegrationTest {
 		r.add("app.rbac.workspace-setup-path", () -> Path.of("../../infra/config/workspace-setup.default.yml").toAbsolutePath().normalize().toString());
 		r.add("app.rag.elasticsearch.url", ThreadDocumentSearchIntegrationTest::elasticsearchUrl);
 		r.add("app.rag.embedding.url", EMBEDDING::url);
+		r.add("spring.ai.openai.base-url", () -> GATEWAY.url() + "/v1");
 	}
 
 	@AfterAll static void stopEmbedding() {
 		EMBEDDING.close();
+		GATEWAY.close();
 	}
 
 	@Autowired ThreadDocumentSearch search;
@@ -191,8 +199,9 @@ class ThreadDocumentSearchIntegrationTest {
 				new ChatMessage("assistant", "3월 말까지 이월할 수 있습니다.")), "gemma").block();
 
 		assertThat(result.rewritten()).isTrue();
-		assertThat(result.query()).isEqualTo(FakeChatModelConfig.FAKE_REPLY);
-		assertThat(EMBEDDING.requests).singleElement().satisfies(request -> assertThat(request.body()).contains(FakeChatModelConfig.FAKE_REPLY));
+		assertThat(result.query()).isEqualTo(REWRITTEN);
+		assertThat(EMBEDDING.requests).singleElement().satisfies(request -> assertThat(request.body()).contains(REWRITTEN));
+		assertThat(GATEWAY.requests).singleElement().satisfies(request -> assertThat(request.body()).contains("\"temperature\":0.0"));
 	}
 
 	@Test void outagesAndAModelMismatchAreUnavailableNotNoEvidence() {

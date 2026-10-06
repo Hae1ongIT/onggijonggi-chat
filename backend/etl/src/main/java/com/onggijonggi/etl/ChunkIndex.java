@@ -65,6 +65,7 @@ public class ChunkIndex {
 			List<String> previous = new ArrayList<>(aliases.propertyNames());
 			if (previous.isEmpty()) create(true);
 			else if (!previous.contains(settings.index())) migrate(previous);
+			else if (previous.size() > 1) detach(previous);
 			ensured = true;
 		} catch (EtlFailure failure) {
 			throw failure;
@@ -105,12 +106,28 @@ public class ChunkIndex {
 		long after = indexCount(settings.index());
 		if (after < before)
 			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "옮긴 청크 수(" + after + ")가 이전 인덱스(" + before + ")보다 적다", null);
+		// 많은 것은 막지 않는다 — 앞선 시도가 남긴 청크일 수 있고, 막으면 이전이 영원히 끝나지 않는다. 지난 회차 청크라면 검색 조건
+		// (문서, 현재 회차)이 거르고 정리 작업이 지운다.
+		if (after > before) log.warn("옮긴 청크 수({})가 이전 인덱스({})보다 많다 — 앞선 이전 시도의 잔여일 수 있다", after, before);
 		List<Object> actions = new ArrayList<>();
 		for (String index : previous) actions.add(Map.of("remove", Map.of("index", index, "alias", settings.alias())));
 		actions.add(Map.of("add", Map.of("index", settings.index(), "alias", settings.alias())));
 		client.post().uri("/_aliases").contentType(MediaType.APPLICATION_JSON)
 				.body(utf8(json.writeValueAsString(Map.of("actions", actions)))).retrieve().toBodilessEntity();
 		log.info("검색 인덱스를 옮겼다: 청크 {}개, 별칭 {} → {}. 이전 인덱스 {}는 확인 뒤 지운다", after, settings.alias(), settings.index(), previous);
+	}
+
+	/**
+	 * 별칭이 설정한 인덱스와 다른 인덱스를 함께 가리킨다(운영자가 손으로 붙인 경우). 그대로 두면 별칭으로 쓰는 bulk가 "쓰기 인덱스
+	 * 없음"으로 거절돼 모든 문서가 실패하고, 검색은 같은 청크를 두 번 센다. 다른 인덱스를 별칭에서 한 번에 뗀다(지우지는 않는다).
+	 */
+	private void detach(List<String> previous) {
+		List<Object> actions = new ArrayList<>();
+		for (String index : previous)
+			if (!index.equals(settings.index())) actions.add(Map.of("remove", Map.of("index", index, "alias", settings.alias())));
+		client.post().uri("/_aliases").contentType(MediaType.APPLICATION_JSON)
+				.body(utf8(json.writeValueAsString(Map.of("actions", actions)))).retrieve().toBodilessEntity();
+		log.warn("검색 별칭이 여러 인덱스를 가리켜 {} 외의 인덱스를 뗐다: {}", settings.index(), previous);
 	}
 
 	private long indexCount(String index) {
@@ -198,6 +215,9 @@ public class ChunkIndex {
 
 	/** 한 회차의 청크를 지운다. 멱등이다 — 인덱스가 아직 없으면 지울 것도 없다. */
 	public void delete(UUID document, int runSeq) {
+		// 정리 작업은 처리 스레드와 따로 돈다. 인덱스를 옮기는 중이면 끝날 때까지 기다린다 — 옮기기 전 인덱스에서만 지우면 이미 복사된
+		// 청크가 새 인덱스에 남는다.
+		ensure();
 		try {
 			JsonNode response = json.readTree(client.post().uri("/{alias}/_delete_by_query?refresh=true&conflicts=proceed", settings.alias())
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(runQuery(document, runSeq))))

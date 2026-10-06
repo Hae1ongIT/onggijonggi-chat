@@ -33,7 +33,7 @@ class QueryRewriterTest {
 			}
 		};
 		var properties = new RagProperties(null, null, new RagProperties.Rewrite(configuredModel, timeout, 2), null, true);
-		return new QueryRewriter(ChatClient.builder(model), properties, "default-model");
+		return new QueryRewriter(ChatClient.create(model), properties, "default-model");
 	}
 
 	private static final List<ChatMessage> HISTORY = List.of(
@@ -73,17 +73,50 @@ class QueryRewriterTest {
 	}
 
 	@Test
+	void fencesLabelsAndQuotesAroundTheRewrittenQueryAreRemoved() {
+		assertThat(QueryRewriter.clean("```\n검색어: 연차 이월 기한\n```")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("검색 질문 : \"연차 이월 기한\"")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("Query: `연차 이월 기한`")).isEqualTo("연차 이월 기한");
+		assertThat(QueryRewriter.clean("질문하는 방법")).as("라벨이 아닌 낱말은 그대로").isEqualTo("질문하는 방법");
+		assertThat(QueryRewriter.clean("```\n```")).isNull();
+	}
+
+	@Test
+	void aLongEarlierAnswerIsShortenedInThePrompt() {
+		var history = List.of(new ChatMessage("user", "규정 알려줘"), new ChatMessage("assistant", "가".repeat(1500) + "끝부분"));
+		rewriter("", Duration.ofSeconds(2), prompt -> "검색 문장").rewrite("그건?", history, "gemma");
+
+		String user = prompts.get(0).getUserMessage().getText();
+		assertThat(user).contains("가".repeat(1000) + "…").doesNotContain("끝부분");
+	}
+
+	@Test
 	void failureTimeoutOrAnUnusableAnswerFallsBackToTheQuestion() {
 		String question = "그럼 그거 넘기면 어떻게 돼?";
 		var failing = rewriter("", Duration.ofSeconds(2), prompt -> { throw new IllegalStateException("gateway down"); });
-		var slow = rewriter("", Duration.ofMillis(100), prompt -> {
-			try { Thread.sleep(1000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-			return "늦은 답";
-		});
 		var verbose = rewriter("", Duration.ofSeconds(2), prompt -> "답".repeat(QueryRewriter.MAX_LENGTH + 1));
 		var blank = rewriter("", Duration.ofSeconds(2), prompt -> "  \n ");
 
-		for (QueryRewriter rewriter : List.of(failing, slow, verbose, blank))
+		for (QueryRewriter rewriter : List.of(failing, verbose, blank))
 			assertThat(rewriter.rewrite(question, HISTORY, "gemma")).isEqualTo(new QueryRewriter.Result(question, false));
+	}
+
+	/** 실제 게이트웨이 클라이언트(OpenAI 호환)로, 응답이 늦으면 시간 제한에서 연결을 끊고 질문 그대로 검색하는지 본다. 재시도하지 않는다. */
+	@Test
+	void theGatewayCallGivesUpAtTheTimeoutWithoutRetrying() throws Exception {
+		try (StubHttpServer gateway = new StubHttpServer().reply("/v1/chat/completions", body -> {
+			try { Thread.sleep(3000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+			return new StubHttpServer.Reply(200, "{}");
+		})) {
+			var properties = new RagProperties(null, null, new RagProperties.Rewrite("", Duration.ofMillis(500), 2), null, true);
+			var rewriter = new QueryRewriter(properties, gateway.url() + "/v1", "", "default-model");
+			long started = System.nanoTime();
+
+			var result = rewriter.rewrite("그럼 그거 넘기면?", HISTORY, "gemma");
+
+			assertThat(result).isEqualTo(new QueryRewriter.Result("그럼 그거 넘기면?", false));
+			assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofMillis(2500));
+			assertThat(gateway.requests).as("재시도하지 않는다").hasSize(1);
+		}
 	}
 }
