@@ -14,8 +14,11 @@ export interface ThreadDocument {
   canUnpin: boolean;
   canDelete: boolean;
   canReadOriginal: boolean;
+  canReprocess: boolean;
   createdAt: string;
 }
+/** 처리 실패 문서를 보관된 원본으로 다시 처리하는 reprocess도 같은 요청 UUID 재시도 규칙을 따른다. */
+export type ThreadDocumentAction = 'pin' | 'unpin' | 'delete' | 'reprocess';
 export interface ThreadDocumentsListing {
   threadStatus: string;
   canUpload: boolean;
@@ -111,10 +114,20 @@ export async function uploadThreadDocument(
 export async function changeThreadDocument(
   thread: string,
   id: string,
-  action: 'pin' | 'unpin' | 'delete',
+  action: ThreadDocumentAction,
   requestId: string,
 ): Promise<void> {
   const base = `${path(thread)}/${encodeURIComponent(id)}`;
+  if (action === 'reprocess') {
+    await checked(
+      await fetchDocument(bffUrl(`${base}/reprocess`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId }),
+      }),
+    );
+    return;
+  }
   await checked(
     await fetchDocument(
       bffUrl(

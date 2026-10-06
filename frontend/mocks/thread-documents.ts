@@ -13,6 +13,12 @@ export class ThreadDocumentsMock {
   private events = new Map<string, { action: string; actor: string }>();
   private deleted = new Set<string>();
 
+  /** 목업에는 ETL이 없다. 재처리 화면을 검증할 때만 문서를 처리 실패로 만든다. */
+  fail(thread: string, id: string) {
+    const doc = this.rooms.get(thread)?.get(id);
+    if (doc) doc.value.status = 'FAILED';
+  }
+
   async handle(
     request: Request,
     segments: string[],
@@ -35,6 +41,10 @@ export class ThreadDocumentsMock {
       canPin: active,
       canUnpin: active && (owner || doc.uploader === actor),
       canDelete: active && (owner || doc.uploader === actor),
+      canReprocess:
+        active &&
+        (owner || doc.uploader === actor) &&
+        doc.value.status === 'FAILED',
     });
     if (request.method === 'GET' && !id)
       return Response.json({
@@ -53,9 +63,9 @@ export class ThreadDocumentsMock {
           })
         : new Response(null, { status: 404 });
     }
-    if (!active) return new Response(null, { status: 409 });
     const url = new URL(request.url);
     if (request.method === 'POST' && !id) {
+      if (!active) return new Response(null, { status: 409 });
       const documentId = url.searchParams.get('documentId');
       if (!documentId || !/^[a-f0-9-]{36}$/i.test(documentId))
         return new Response(null, { status: 400 });
@@ -103,6 +113,7 @@ export class ThreadDocumentsMock {
           canUnpin: true,
           canDelete: true,
           canReadOriginal: true,
+          canReprocess: false,
           createdAt: new Date().toISOString(),
         },
         bytes,
@@ -112,9 +123,11 @@ export class ThreadDocumentsMock {
       documents.set(documentId, doc);
       return Response.json(view(doc), { status: 201 });
     }
-    if (request.method !== 'PUT' && request.method !== 'DELETE')
+    const reprocess = request.method === 'POST' && operation === 'reprocess';
+    if (request.method !== 'PUT' && request.method !== 'DELETE' && !reprocess)
       return new Response(null, { status: 405 });
-    const body = request.method === 'PUT' ? await request.json() : null;
+    const body =
+      request.method === 'PUT' || reprocess ? await request.json() : null;
     const requestId = body?.requestId ?? url.searchParams.get('requestId');
     if (
       !requestId ||
@@ -123,8 +136,18 @@ export class ThreadDocumentsMock {
         (operation !== 'pin' || typeof body?.pinned !== 'boolean'))
     )
       return new Response(null, { status: 400 });
-    const action =
-      request.method === 'DELETE' ? 'delete' : body.pinned ? 'pin' : 'unpin';
+    const action = reprocess
+      ? 'reprocess'
+      : request.method === 'DELETE'
+        ? 'delete'
+        : body.pinned
+          ? 'pin'
+          : 'unpin';
+    // 서버와 같은 순서: 문서 확인 → 권한(403) → 재전송 판정 → 방 쓰기 가능. 이미 반영된 변경의 재전송은 방이 잠겨도 성공이다.
+    const doc = documents.get(id);
+    if (!doc) return new Response(null, { status: 404 });
+    if (action !== 'pin' && !owner && doc.uploader !== actor)
+      return new Response(null, { status: 403 });
     const key = `${thread}:${id}:${requestId}`;
     const previous = this.events.get(key);
     if (previous)
@@ -132,19 +155,18 @@ export class ThreadDocumentsMock {
         status:
           previous.action === action && previous.actor === actor ? 204 : 409,
       });
-    const doc = documents.get(id);
-    if (!doc) return new Response(null, { status: 404 });
-    if (action !== 'pin' && !owner && doc.uploader !== actor)
-      return new Response(null, { status: 403 });
+    if (!active) return new Response(null, { status: 409 });
     if (
       (action === 'pin' && doc.value.pinned) ||
-      (action === 'unpin' && !doc.value.pinned)
+      (action === 'unpin' && !doc.value.pinned) ||
+      (action === 'reprocess' && doc.value.status !== 'FAILED')
     )
       return new Response(null, { status: 409 });
     if (action === 'delete') {
       documents.delete(id);
       this.deleted.add(`${thread}:${id}`);
-    } else doc.value.pinned = action === 'pin';
+    } else if (action === 'reprocess') doc.value.status = 'PENDING';
+    else doc.value.pinned = action === 'pin';
     this.events.set(key, { action, actor });
     return new Response(null, { status: 204 });
   }

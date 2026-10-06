@@ -69,12 +69,21 @@ class ThreadDocumentHttpTest {
 		verify(documents).change(eq(room), eq(document), any(), eq("PINNED"), eq(pin));
 		verify(documents).change(eq(room), eq(document), any(), eq("UNPINNED"), eq(unpin));
 		verify(documents).change(eq(room), eq(document), any(), eq("DELETED"), eq(delete));
+
+		UUID reprocess = UUID.randomUUID();
+		client.post().uri("/api/threads/" + room + "/documents/" + document + "/reprocess")
+				.header(HttpHeaders.AUTHORIZATION, bearer())
+				.contentType(MediaType.APPLICATION_JSON)
+				.body("{\"requestId\":\"" + reprocess + "\"}")
+				.exchange()
+				.expectStatus().isNoContent();
+		verify(documents).change(eq(room), eq(document), any(), eq("REPROCESSED"), eq(reprocess));
 	}
 
 	@Test
 	void uploadPassesTheFileNameAndBytesAndAMissingRequestIdIsRejected() {
 		when(documents.upload(any(), any(), any(), anyString(), any())).thenReturn(new ThreadDocumentView(document, "회의록.txt", 6,
-				"PENDING", false, true, false, false, true, false, java.time.Instant.now()));
+				"PENDING", false, true, false, false, true, false, false, java.time.Instant.now()));
 		MultipartBodyBuilder body = new MultipartBodyBuilder();
 		body.part("file", new ByteArrayResource("본문".getBytes(StandardCharsets.UTF_8)) {
 			@Override public String getFilename() { return "회의록.txt"; }

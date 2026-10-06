@@ -17,6 +17,7 @@ import {
   downloadThreadDocument,
   listThreadDocuments,
   uploadThreadDocument,
+  type ThreadDocumentAction,
   type ThreadDocumentsListing,
 } from '@/lib/api/thread-documents';
 
@@ -58,7 +59,7 @@ export function ThreadDocuments({
   const writing = useRef(false);
   const uploadId = useRef<string | null>(null);
   const changes = useRef(
-    new Map<string, { action: 'pin' | 'unpin' | 'delete'; id: string }>(),
+    new Map<string, { action: ThreadDocumentAction; id: string }>(),
   );
   const scope = useRef(0);
   const reading = useRef(false);
@@ -194,7 +195,7 @@ export function ThreadDocuments({
     }
   }
 
-  function change(id: string, action: 'pin' | 'unpin' | 'delete') {
+  function change(id: string, action: ThreadDocumentAction) {
     if (writing.current) return;
     const pending = changes.current.get(id);
     const operation =
@@ -331,6 +332,18 @@ export function ThreadDocuments({
                     onClick={() => change(doc.id, doc.pinned ? 'unpin' : 'pin')}
                   >
                     {doc.pinned ? '고정 해제' : '고정'}
+                  </Button>
+                )}
+                {doc.canReprocess && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-describedby={`thread-document-${doc.id}`}
+                    disabled={busy}
+                    onClick={() => change(doc.id, 'reprocess')}
+                  >
+                    다시 처리
                   </Button>
                 )}
                 {doc.canDelete && (
