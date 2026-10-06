@@ -94,6 +94,60 @@ describe('문서 목업 계약', () => {
       (await mock.handle(upload(), [NORMAL_THREAD_ID, 'documents'])).status,
     ).toBe(404);
   });
+  it('처리 실패 문서만 재처리하고 같은 요청 재전송은 멱등이다', async () => {
+    const mock = new ThreadDocumentsMock();
+    const id = crypto.randomUUID();
+    const body = new FormData();
+    body.append('file', new File(['text'], 'x.txt'));
+    await mock.handle(
+      new Request(
+        `http://local/api/threads/${NORMAL_THREAD_ID}/documents?documentId=${id}`,
+        { method: 'POST', body },
+      ),
+      [NORMAL_THREAD_ID, 'documents'],
+    );
+    const requestId = crypto.randomUUID();
+    const reprocess = () =>
+      mock.handle(
+        new Request('http://local', {
+          method: 'POST',
+          body: JSON.stringify({ requestId }),
+        }),
+        [NORMAL_THREAD_ID, 'documents', id, 'reprocess'],
+      );
+    expect((await reprocess()).status).toBe(409);
+    mock.fail(NORMAL_THREAD_ID, id);
+    const failed = await (
+      await mock.handle(new Request('http://local'), [
+        NORMAL_THREAD_ID,
+        'documents',
+      ])
+    ).json();
+    expect(failed.documents[0].canReprocess).toBe(true);
+    const fresh = crypto.randomUUID();
+    expect(
+      (
+        await mock.handle(
+          new Request('http://local', {
+            method: 'POST',
+            body: JSON.stringify({ requestId: fresh }),
+          }),
+          [NORMAL_THREAD_ID, 'documents', id, 'reprocess'],
+        )
+      ).status,
+    ).toBe(204);
+    expect(
+      (
+        await mock.handle(
+          new Request('http://local', {
+            method: 'POST',
+            body: JSON.stringify({ requestId: fresh }),
+          }),
+          [NORMAL_THREAD_ID, 'documents', id, 'reprocess'],
+        )
+      ).status,
+    ).toBe(204);
+  });
   it('방향 제어 문자가 든 파일명은 서버와 같이 400이다', async () => {
     const mock = new ThreadDocumentsMock();
     const body = new FormData();

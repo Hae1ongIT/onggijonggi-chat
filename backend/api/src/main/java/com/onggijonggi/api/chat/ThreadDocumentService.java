@@ -9,6 +9,7 @@ import com.onggijonggi.common.chat.domain.ThrMbrStatus;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import com.onggijonggi.common.document.ThreadDocumentStates;
 import com.onggijonggi.common.user.AppUserRepository;
 import com.onggijonggi.common.user.AppUserStatus;
 import jakarta.persistence.EntityManager;
@@ -60,7 +61,8 @@ public class ThreadDocumentService {
 	private static final int CLEANUP_ALERT_ATTEMPTS = 10;
 	/** 원본이 아직 없거나(업로드 중) 이미 지운 문서. 고정·열람·관리 대상이 아니다. */
 	private static final Set<String> UNSETTLED = Set.of("UPLOADING", "DELETED");
-	private static final Set<String> CHANGES = Set.of("PINNED", "UNPINNED", "DELETED");
+	/** 사용자 변경 종류. REPROCESSED는 처리 실패(FAILED) 문서를 보관된 원본으로 다시 처리하는 요청이다(#340). */
+	private static final Set<String> CHANGES = Set.of("PINNED", "UNPINNED", "DELETED", "REPROCESSED");
 	private static final Set<String> EXTENSIONS = Set.of("txt", "md", "csv", "pdf", "docx");
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate transactions;
@@ -144,6 +146,8 @@ public class ThreadDocumentService {
 				if (!latest.status().equals("UPLOADING") || !Objects.equals(latest.attempt(), reservation.attempt())) throw conflict();
 				jdbc.update("update thr_doc set status = 'PENDING', updated_at = now(), err = null where id = ?", id);
 				record(latest, actor.userId(), "REGISTERED", id);
+				// 등록과 처리 작업을 한 트랜잭션에 둬, 등록됐는데 ETL 작업이 없는 문서가 생기지 않게 한다(#340).
+				ThreadDocumentStates.createRun(jdbc, id, latest.tenant(), latest.thread());
 				jdbc.update("delete from thr_doc_end where doc_id = ?", id);
 				return view(find(id, true), access);
 			});
@@ -201,30 +205,42 @@ public class ThreadDocumentService {
 
 	public void change(UUID thread, UUID id, CurrentActor actor, String action, UUID requestId) {
 		if (!CHANGES.contains(action)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
-		transactions.executeWithoutResult(tx -> {
-			// 방 상태(쓰기 가능)보다 재전송 여부를 먼저 본다. 이미 반영된 변경의 응답이 유실된 뒤 방이 잠겼어도
-			// 재전송은 성공으로 끝나야 한다. 접근권 자체는 재전송에도 최신 기준으로 다시 확인한다.
-			Access access = access(thread, actor, false);
-			Document doc = findIn(thread, id);
-			if (!action.equals("PINNED") && !access.owner() && !doc.uploader().equals(actor.userId()))
-				throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-			var previous = jdbc.queryForList("select evt_kind, act_user_id from thr_doc_evt where doc_id = ? and req_key = ?", id, requestId);
-			if (!previous.isEmpty()) {
-				if (!action.equals(previous.get(0).get("evt_kind")) || !actor.userId().equals(previous.get(0).get("act_user_id"))) throw conflict();
-				return;
-			}
-			if (!access.writable()) throw conflict();
-			if (doc.status().equals("UPLOADING")) throw conflict();
-			if (doc.status().equals("DELETED")) throw notFound();
-			if (!action.equals("DELETED") && !registered(id)) throw conflict();
-			// 기록되지 않은 no-op을 성공으로 수락하지 않는다. 늦은 재전송이 이후 반대 변경을 되돌리지 않게 한다.
-			if ((action.equals("PINNED") && doc.pinned()) || (action.equals("UNPINNED") && !doc.pinned())) throw conflict();
-			if (action.equals("DELETED")) {
-				jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now(), updated_at = now() where id = ?", id);
-				queue(doc, 0);
-			} else jdbc.update("update thr_doc set pnn = ?, updated_at = now() where id = ?", action.equals("PINNED"), id);
-			record(doc, actor.userId(), action, requestId);
-		});
+		try {
+			transactions.executeWithoutResult(tx -> applyChange(thread, id, actor, action, requestId));
+		} catch (DuplicateKeyException activeRun) {
+			// 이전 처리 회차가 아직 진행 중으로 남아 있다(ETL이 실패 확정 전). 상태가 정리된 뒤 다시 요청하면 된다.
+			throw conflict();
+		}
+	}
+
+	/** change()의 한 트랜잭션 본문. 진행 중 처리 회차와 충돌하면 DuplicateKeyException을 그대로 올린다. */
+	private void applyChange(UUID thread, UUID id, CurrentActor actor, String action, UUID requestId) {
+		// 방 상태(쓰기 가능)보다 재전송 여부를 먼저 본다. 이미 반영된 변경의 응답이 유실된 뒤 방이 잠겼어도
+		// 재전송은 성공으로 끝나야 한다. 접근권 자체는 재전송에도 최신 기준으로 다시 확인한다.
+		Access access = access(thread, actor, false);
+		Document doc = findIn(thread, id);
+		if (!action.equals("PINNED") && !access.owner() && !doc.uploader().equals(actor.userId()))
+			throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+		var previous = jdbc.queryForList("select evt_kind, act_user_id from thr_doc_evt where doc_id = ? and req_key = ?", id, requestId);
+		if (!previous.isEmpty()) {
+			if (!action.equals(previous.get(0).get("evt_kind")) || !actor.userId().equals(previous.get(0).get("act_user_id"))) throw conflict();
+			return;
+		}
+		if (!access.writable()) throw conflict();
+		if (doc.status().equals("UPLOADING")) throw conflict();
+		if (doc.status().equals("DELETED")) throw notFound();
+		if (!action.equals("DELETED") && !registered(id)) throw conflict();
+		// 기록되지 않은 no-op을 성공으로 수락하지 않는다. 늦은 재전송이 이후 반대 변경을 되돌리지 않게 한다.
+		if ((action.equals("PINNED") && doc.pinned()) || (action.equals("UNPINNED") && !doc.pinned())) throw conflict();
+		if (action.equals("REPROCESSED")) {
+			// 처리 실패 문서만 다시 처리한다. 진행 중 회차가 이미 있으면 부분 유일 인덱스가 막는다.
+			if (!ThreadDocumentStates.transition(jdbc, id, "FAILED", "PENDING")) throw conflict();
+			ThreadDocumentStates.createRun(jdbc, id, doc.tenant(), doc.thread());
+		} else if (action.equals("DELETED")) {
+			jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now(), updated_at = now() where id = ?", id);
+			queue(doc, 0);
+		} else jdbc.update("update thr_doc set pnn = ?, updated_at = now() where id = ?", action.equals("PINNED"), id);
+		record(doc, actor.userId(), action, requestId);
 	}
 
 	public Original original(UUID thread, UUID id, CurrentActor actor) {
@@ -253,13 +269,9 @@ public class ThreadDocumentService {
 		return new Original(doc.name(), bytes);
 	}
 
-	/** B가 실제 추출·색인 결과를 반영하는 내부 업무 경계다. 사용자 설정 API는 제공하지 않는다. */
+	/** ETL 처리 결과 전이. 규칙은 ETL 워커와 같은 ThreadDocumentStates를 쓴다. 사용자 설정 API는 제공하지 않는다. */
 	public boolean processing(UUID id, String expected, String next) {
-		if (!(expected.equals("PENDING") && next.equals("PROCESSING"))
-				&& !(expected.equals("PROCESSING") && Set.of("READY", "FAILED").contains(next)))
-			throw new IllegalArgumentException("허용하지 않은 처리 상태 전이");
-		return transactions.execute(tx -> jdbc.update("update thr_doc set status = ?, updated_at = now() where id = ? and status = ?",
-				next, id, expected) == 1);
+		return transactions.execute(tx -> ThreadDocumentStates.transition(jdbc, id, expected, next));
 	}
 
 	@Scheduled(fixedDelayString = "${app.document.cleanup-delay-ms:10000}")
@@ -347,7 +359,8 @@ public class ThreadDocumentService {
 		boolean manageable = writable && (own || access.owner());
 		return new ThreadDocumentView(doc.id(), doc.name(), doc.size(), doc.status(), doc.pinned(), own,
 				writable && registered, manageable && registered, manageable,
-				registered && !UNSETTLED.contains(doc.status()), doc.created());
+				registered && !UNSETTLED.contains(doc.status()),
+				manageable && registered && doc.status().equals("FAILED"), doc.created());
 	}
 	private void validate(String name, byte[] content) {
 		// 방향 제어 문자는 목록·내려받은 이름의 확장자를 다르게 보이게 한다(예: 오른쪽→왼쪽 재정렬 문자로 .pdf가 .txt처럼 보임).

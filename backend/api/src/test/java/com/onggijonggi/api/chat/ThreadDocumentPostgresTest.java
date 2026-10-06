@@ -201,6 +201,55 @@ class ThreadDocumentPostgresTest {
 		verify(storage, times(1)).save(any(), any(), any(), any(), any(), any(), any());
 	}
 
+	@Test void registrationQueuesTheFirstProcessingRunButAFailedUploadDoesNot() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		assertThat(jdbc.queryForList("select run_seq, status from thr_doc_run where doc_id=?", id))
+				.singleElement().satisfies(run -> assertThat(run).containsEntry("run_seq", 1).containsEntry("status", "PENDING"));
+		UUID failed = UUID.randomUUID();
+		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		assertThatThrownBy(() -> upload(failed, owner)).isInstanceOf(IllegalStateException.class);
+		assertThat(jdbc.queryForObject("select count(*) from thr_doc_run where doc_id=?", Integer.class, failed)).isZero();
+	}
+
+	@Test void onlyTheUploaderOrOwnerReprocessesAFailedRegisteredDocumentOnce() {
+		UUID id = UUID.randomUUID(); service.upload(room, id, member, "guide.txt", bytes);
+		failProcessing(id);
+		CurrentActor other = actor();
+		members.saveAndFlush(new ThrMbr(room, other.userId(), ThrMbrRole.MEMBER, owner.userId()));
+		assertThat(service.list(room, member).documents().get(0).canReprocess()).isTrue();
+		assertThat(service.list(room, owner).documents().get(0).canReprocess()).isTrue();
+		assertThat(service.list(room, other).documents().get(0).canReprocess()).isFalse();
+		status(() -> service.change(room, id, other, "REPROCESSED", UUID.randomUUID()), HttpStatus.FORBIDDEN);
+		status(() -> service.change(room, id, actor(), "REPROCESSED", UUID.randomUUID()), HttpStatus.NOT_FOUND);
+
+		UUID request = UUID.randomUUID();
+		service.change(room, id, owner, "REPROCESSED", request);
+		service.change(room, id, owner, "REPROCESSED", request);
+		assertThat(jdbc.queryForObject("select status from thr_doc where id=?", String.class, id)).isEqualTo("PENDING");
+		assertThat(jdbc.queryForList("select run_seq from thr_doc_run where doc_id=? and status='PENDING'", Integer.class, id)).containsExactly(2);
+		assertThat(service.list(room, member).documents().get(0).canReprocess()).isFalse();
+		status(() -> service.change(room, id, member, "REPROCESSED", UUID.randomUUID()), HttpStatus.CONFLICT);
+	}
+
+	@Test void reprocessIsRefusedInALockedRoomForAnUnregisteredFailureAndWhileARunIsStillActive() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		failProcessing(id);
+		jdbc.update("update thr_doc_run set status='RUNNING' where doc_id=?", id);
+		status(() -> service.change(room, id, owner, "REPROCESSED", UUID.randomUUID()), HttpStatus.CONFLICT);
+		assertThat(jdbc.queryForObject("select status from thr_doc where id=?", String.class, id)).isEqualTo("FAILED");
+		jdbc.update("update thr_doc_run set status='FAILED' where doc_id=?", id);
+		jdbc.update("update thr set status='LOCKED',locked_at=now() where id=?", room);
+		status(() -> service.change(room, id, owner, "REPROCESSED", UUID.randomUUID()), HttpStatus.CONFLICT);
+		jdbc.update("update thr set status='ACTIVE',locked_at=null where id=?", room);
+
+		UUID unregistered = UUID.randomUUID();
+		doThrow(new IllegalStateException("저장 실패")).when(storage).save(any(), any(), any(), any(), any(), any(), any());
+		assertThatThrownBy(() -> upload(unregistered, owner)).isInstanceOf(IllegalStateException.class);
+		assertThat(service.list(room, owner).documents()).filteredOn(doc -> doc.id().equals(unregistered))
+				.singleElement().satisfies(doc -> assertThat(doc.canReprocess()).isFalse());
+		status(() -> service.change(room, unregistered, owner, "REPROCESSED", UUID.randomUUID()), HttpStatus.CONFLICT);
+	}
+
 	@Test void severalDocumentsCanBePinnedAndUnpinningOneKeepsTheOthers() {
 		UUID first = UUID.randomUUID(); upload(first, owner);
 		UUID second = UUID.randomUUID(); service.upload(room, second, member, "second.txt", "둘째 원문".getBytes(StandardCharsets.UTF_8));
@@ -479,6 +528,12 @@ class ThreadDocumentPostgresTest {
 		assertThat(service.list(room, owner).documents().get(0).pinned()).isTrue();
 	}
 
+	/** ETL이 처리를 최종 실패로 끝낸 상태: 문서 FAILED, 회차 FAILED. */
+	private void failProcessing(UUID id) {
+		assertThat(service.processing(id, "PENDING", "PROCESSING")).isTrue();
+		assertThat(service.processing(id, "PROCESSING", "FAILED")).isTrue();
+		jdbc.update("update thr_doc_run set status='FAILED' where doc_id=?", id);
+	}
 	private ThreadDocumentView upload(UUID id, CurrentActor actor) { return service.upload(room, id, actor, "guide.txt", bytes); }
 	private int events(UUID id) { return jdbc.queryForObject("select count(*) from thr_doc_evt where doc_id=?", Integer.class, id); }
 	private CurrentActor actor() {

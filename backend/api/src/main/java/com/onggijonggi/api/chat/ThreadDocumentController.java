@@ -75,6 +75,17 @@ public class ThreadDocumentController {
 				actor, request.pinned() ? "PINNED" : "UNPINNED", request.requestId())).subscribeOn(Schedulers.boundedElastic())).then();
 	}
 
+	/** 처리 실패 문서를 보관된 원본으로 다시 처리한다(#340). requestId는 재전송 식별자다. */
+	public record ReprocessRequest(@NotNull UUID requestId) { }
+
+	@PostMapping("/api/threads/{threadId}/documents/{documentId}/reprocess")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public Mono<Void> reprocess(@PathVariable UUID threadId, @PathVariable UUID documentId,
+			@Valid @RequestBody ReprocessRequest request) {
+		return actors.currentActor().flatMap(actor -> Mono.fromRunnable(() -> documents.change(threadId, documentId,
+				actor, "REPROCESSED", request.requestId())).subscribeOn(Schedulers.boundedElastic())).then();
+	}
+
 	@DeleteMapping("/api/threads/{threadId}/documents/{documentId}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
 	public Mono<Void> delete(@PathVariable UUID threadId, @PathVariable UUID documentId, @RequestParam UUID requestId) {

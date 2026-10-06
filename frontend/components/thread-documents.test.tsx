@@ -28,6 +28,7 @@ const doc: api.ThreadDocument = {
   canUnpin: true,
   canDelete: true,
   canReadOriginal: true,
+  canReprocess: false,
   createdAt: '2026-10-02T00:00:00Z',
 };
 const listing: api.ThreadDocumentsListing = {
@@ -416,6 +417,33 @@ describe('방 문서 실제 UI', () => {
       visibility.mockRestore();
       vi.useRealTimers();
     }
+  });
+  it('처리 실패 문서만 다시 처리하고 응답 유실 뒤 재시도는 같은 요청 UUID를 쓴다', async () => {
+    vi.mocked(api.listThreadDocuments).mockResolvedValue({
+      ...listing,
+      documents: [{ ...doc, status: 'FAILED', canReprocess: true }],
+    });
+    vi.mocked(api.changeThreadDocument)
+      .mockRejectedValueOnce(new Error('응답 유실'))
+      .mockResolvedValue();
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText(/처리 실패/);
+    fireEvent.click(screen.getByRole('button', { name: '다시 처리' }));
+    await screen.findByText('응답 유실');
+    fireEvent.click(screen.getByRole('button', { name: '다시 처리' }));
+    await waitFor(() =>
+      expect(api.changeThreadDocument).toHaveBeenCalledTimes(2),
+    );
+    const calls = vi.mocked(api.changeThreadDocument).mock.calls;
+    expect(calls[0][2]).toBe('reprocess');
+    expect(calls[1][3]).toBe(calls[0][3]);
+  });
+  it('처리 대기 문서에는 다시 처리 버튼이 없다', async () => {
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText('guide.txt');
+    expect(screen.queryByRole('button', { name: '다시 처리' })).toBeNull();
   });
   it('작업 버튼은 어느 문서의 것인지 설명으로 알린다', async () => {
     render(<ThreadDocuments threadId="room" />);

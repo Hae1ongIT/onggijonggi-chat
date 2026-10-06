@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.common.document.ThreadSourcePaths;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -33,7 +34,7 @@ public class ThreadSourceStorage {
 
 	private String path(UUID thread, UUID document, String digest) {
 		if (apiKey.isBlank()) throw new IllegalStateException("문서 워커 내부 API key(app.document.internal-api-key)가 비어 있다");
-		return "/api/v1/thread-sources/" + thread + "/" + document + "/" + digest;
+		return ThreadSourcePaths.path(thread, document, digest);
 	}
 
 	public void save(UUID tenant, UUID thread, UUID document, String digest, byte[] content, Instant expiresAt, UUID attempt) {
@@ -43,9 +44,9 @@ public class ThreadSourceStorage {
 		});
 		try {
 			client.put().uri(path(thread, document, digest))
-					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
-					.header("X-Source-Expires-At", Long.toString(expiresAt.getEpochSecond()))
-					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
+					.header(ThreadSourcePaths.API_KEY_HEADER, apiKey).header(ThreadSourcePaths.TENANT_HEADER, tenant.toString())
+					.header(ThreadSourcePaths.EXPIRES_HEADER, Long.toString(expiresAt.getEpochSecond()))
+					.headers(headers -> { if (attempt != null) headers.set(ThreadSourcePaths.ATTEMPT_HEADER, attempt.toString()); })
 					.contentType(MediaType.MULTIPART_FORM_DATA).bodyValue(body)
 					.retrieve().toBodilessEntity().block(Duration.ofSeconds(60));
 		} catch (RuntimeException error) { throw unavailable(error); }
@@ -54,8 +55,8 @@ public class ThreadSourceStorage {
 	public byte[] read(UUID tenant, UUID thread, UUID document, String digest, UUID attempt) {
 		try {
 			byte[] content = client.get().uri(path(thread, document, digest))
-					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
-					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
+					.headers(headers -> { if (attempt != null) headers.set(ThreadSourcePaths.ATTEMPT_HEADER, attempt.toString()); })
+					.header(ThreadSourcePaths.API_KEY_HEADER, apiKey).header(ThreadSourcePaths.TENANT_HEADER, tenant.toString())
 					.retrieve().bodyToMono(byte[].class).block(Duration.ofSeconds(60));
 			if (content == null) throw new IllegalStateException("원본 응답이 비어 있다");
 			return content;
@@ -65,8 +66,8 @@ public class ThreadSourceStorage {
 	public void delete(UUID tenant, UUID thread, UUID document, String digest, UUID attempt) {
 		try {
 			client.delete().uri(path(thread, document, digest))
-					.headers(headers -> { if (attempt != null) headers.set("X-Source-Attempt-Id", attempt.toString()); })
-					.header("X-Internal-Api-Key", apiKey).header("X-Tenant-Id", tenant.toString())
+					.headers(headers -> { if (attempt != null) headers.set(ThreadSourcePaths.ATTEMPT_HEADER, attempt.toString()); })
+					.header(ThreadSourcePaths.API_KEY_HEADER, apiKey).header(ThreadSourcePaths.TENANT_HEADER, tenant.toString())
 					.retrieve().toBodilessEntity().block(Duration.ofSeconds(60));
 		} catch (RuntimeException error) { throw unavailable(error); }
 	}
