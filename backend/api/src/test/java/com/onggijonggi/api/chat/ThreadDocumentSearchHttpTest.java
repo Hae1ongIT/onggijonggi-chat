@@ -83,7 +83,8 @@ class ThreadDocumentSearchHttpTest {
 	@Test
 	void aBlankOrOversizedQuestionIsRejectedBeforeSearching() {
 		for (String body : List.of("{\"question\":\" \"}", "{\"question\":\"" + "가".repeat(2001) + "\"}",
-				"{\"question\":\"질문\",\"history\":[{\"role\":\"user\",\"content\":\"\"}]}"))
+				"{\"question\":\"질문\",\"history\":[{\"role\":\"user\",\"content\":\"\"}]}",
+				"{\"question\":\"질문\",\"history\":[null]}"))
 			client.post().uri("/api/threads/" + room + "/documents/search")
 					.header(HttpHeaders.AUTHORIZATION, bearer()).contentType(MediaType.APPLICATION_JSON).body(body)
 					.exchange()

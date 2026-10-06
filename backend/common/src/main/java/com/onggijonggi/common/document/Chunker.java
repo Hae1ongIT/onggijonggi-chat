@@ -81,22 +81,26 @@ public class Chunker {
 	/** 최대 길이를 넘는 문단을 문장 경계(마침표·물음표·느낌표·줄바꿈)에서 자른다. 경계가 없으면 최대 길이에서 자른다. */
 	private List<String> splitLong(String paragraph) {
 		if (paragraph.length() <= settings.max()) return List.of(paragraph);
+		// 시작 위치만 옮긴다. 남은 문자열을 매번 잘라 복사하면 빈 줄 없는 큰 파일(10MB CSV·로그는 문단 하나)에서 복사량이 길이의
+		// 제곱으로 늘어 처리 스레드가 몇 분씩 묶인다.
 		List<String> pieces = new ArrayList<>();
-		String rest = paragraph;
-		while (rest.length() > settings.max()) {
-			int cut = boundary(rest, settings.max());
-			pieces.add(rest.substring(0, cut).strip());
-			rest = rest.substring(cut).strip();
+		int start = 0;
+		while (paragraph.length() - start > settings.max()) {
+			int cut = boundary(paragraph, start, settings.max());
+			pieces.add(paragraph.substring(start, cut).strip());
+			start = cut;
+			while (start < paragraph.length() && Character.isWhitespace(paragraph.charAt(start))) start++;
 		}
-		if (!rest.isEmpty()) pieces.add(rest);
+		if (start < paragraph.length()) pieces.add(paragraph.substring(start));
 		return pieces;
 	}
 
-	private int boundary(String text, int max) {
+	/** start부터 max자 안에서 가장 뒤의 문장 경계 바로 다음 위치(절대 위치). 없으면 start + max. */
+	private int boundary(String text, int start, int max) {
 		for (int i = max; i > settings.target() / 2; i--) {
-			char c = text.charAt(i - 1);
-			if (c == '.' || c == '?' || c == '!' || c == '\n' || c == '。') return i;
+			char c = text.charAt(start + i - 1);
+			if (c == '.' || c == '?' || c == '!' || c == '\n' || c == '。') return start + i;
 		}
-		return max;
+		return start + max;
 	}
 }

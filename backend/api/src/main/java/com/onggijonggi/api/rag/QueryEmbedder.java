@@ -74,6 +74,8 @@ public class QueryEmbedder {
 			if (!value.isNumber() || !Double.isFinite(value.asDouble()))
 				throw new RagUnavailableException("임베딩 벡터에 숫자가 아닌 값이 있다");
 			vector[i] = (float) value.asDouble();
+			// double로는 유한해도 float 범위를 넘으면 무한대가 된다(ETL EmbeddingClient와 같은 검사).
+			if (!Float.isFinite(vector[i])) throw new RagUnavailableException("임베딩 벡터 값이 float 범위를 넘는다");
 		}
 		return vector;
 	}

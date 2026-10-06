@@ -4,6 +4,7 @@ import com.onggijonggi.api.auth.CurrentActorProvider;
 import com.onggijonggi.api.chat.ChatMessage;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.UUID;
@@ -25,7 +26,7 @@ import reactor.core.publisher.Mono;
 public class ThreadDocumentSearchController {
 
 	/** history는 질문 앞의 대화(오래된 것부터), modelId는 그 대화의 모델(다시 쓰기에 쓴다). */
-	public record SearchRequest(@NotBlank @Size(max = 2000) String question, @Size(max = 20) List<@Valid ChatMessage> history,
+	public record SearchRequest(@NotBlank @Size(max = 2000) String question, @Size(max = 20) List<@NotNull @Valid ChatMessage> history,
 			@Size(max = 100) String modelId) { }
 
 	private final CurrentActorProvider actors;

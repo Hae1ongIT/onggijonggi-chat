@@ -49,7 +49,7 @@ class QueryEmbedderTest {
 	}
 
 	@ParameterizedTest
-	@ValueSource(strings = {"model", "count", "index", "dimension", "nonNumber", "notJson", "serverError"})
+	@ValueSource(strings = {"model", "count", "index", "dimension", "nonNumber", "floatOverflow", "notJson", "serverError"})
 	void anyContractViolationOrFailureIsUnavailable(String violation) {
 		switch (violation) {
 			case "model" -> server.reply("/v1/embeddings", 200, response("other", "[{\"index\":0,\"embedding\":[1,0,0]}]"));
@@ -57,6 +57,7 @@ class QueryEmbedderTest {
 			case "index" -> server.reply("/v1/embeddings", 200, response("bge-m3", "[{\"index\":3,\"embedding\":[1,0,0]}]"));
 			case "dimension" -> server.reply("/v1/embeddings", 200, response("bge-m3", "[{\"index\":0,\"embedding\":[1,0]}]"));
 			case "nonNumber" -> server.reply("/v1/embeddings", 200, response("bge-m3", "[{\"index\":0,\"embedding\":[\"NaN\",0,0]}]"));
+			case "floatOverflow" -> server.reply("/v1/embeddings", 200, response("bge-m3", "[{\"index\":0,\"embedding\":[1e39,0,0]}]"));
 			case "notJson" -> server.reply("/v1/embeddings", 200, "<html>gateway</html>");
 			default -> server.reply("/v1/embeddings", 503, "{}");
 		}

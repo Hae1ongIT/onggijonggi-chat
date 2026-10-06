@@ -199,7 +199,7 @@ class RagEvaluationTest {
 		return new RagProperties(new RagProperties.Elasticsearch(esUrl, ALIAS, Duration.ofSeconds(10)),
 				new RagProperties.Embedding(embeddingUrl, "bge-m3", DIMENSIONS, Duration.ofSeconds(30)),
 				new RagProperties.Rewrite("", Duration.ofSeconds(30), 6),
-				new RagProperties.Search(5, 3, 20, 100, vectorMinimum, keywordMinimum, 60), true);
+				new RagProperties.Search(5, 3, 20, 100, vectorMinimum, keywordMinimum, 60, 2, 10), true);
 	}
 
 	/** ETL과 같은 공용 매핑·청킹(800/1200/100)으로 색인한다. 문서 ID → 파일 이름. */

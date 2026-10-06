@@ -37,7 +37,8 @@ public class ChunkSearcher {
 	public ChunkSearcher(RagProperties properties, WebClient.Builder builder, ObjectMapper json) {
 		this.settings = properties.elasticsearch();
 		this.search = properties.search();
-		this.client = builder.clone().baseUrl(settings.url()).build();
+		// 기본 응답 버퍼(256KB)는 candidates를 늘리면 넘는다(청크 본문 최대 약 1300자 × 후보 수). 넘으면 정상 검색이 장애가 된다.
+		this.client = builder.clone().baseUrl(settings.url()).codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(4 * 1024 * 1024)).build();
 		this.json = json;
 	}
 
@@ -87,7 +88,8 @@ public class ChunkSearcher {
 		body.put("_source", SOURCE);
 		body.put("knn", knn);
 		List<Hit> hits = new ArrayList<>();
-		for (JsonNode hit : call(body)) hits.add(hit(hit, 2 * hit.path("_score").asDouble() - 1, null));
+		// 부동소수점 오차로 1을 살짝 넘을 수 있어 [-1, 1]로 자른다.
+		for (JsonNode hit : call(body)) hits.add(hit(hit, Math.max(-1, Math.min(1, 2 * hit.path("_score").asDouble() - 1)), null));
 		return hits;
 	}
 

@@ -23,7 +23,7 @@ class ChunkSearcherTest {
 
 	private final ChunkSearcher searcher = new ChunkSearcher(new RagProperties(
 			new RagProperties.Elasticsearch("http://localhost:1", "thr_doc_chunk", Duration.ofSeconds(1)), null, null,
-			new RagProperties.Search(3, 2, 20, 100, 0.5, "60%", 60), true), WebClient.builder(), JsonMapper.builder().build());
+			new RagProperties.Search(3, 2, 20, 100, 0.5, "60%", 60, 2, 10), true), WebClient.builder(), JsonMapper.builder().build());
 
 	private static ChunkSearcher.Hit hit(String doc, int seq, Double vector, Double keyword) {
 		return new ChunkSearcher.Hit(doc, 1, seq, "para=" + seq, "본문" + seq, vector, keyword);
@@ -60,7 +60,7 @@ class ChunkSearcherTest {
 	void anIncompleteOrMalformedResponseIsAnOutageNotAnEmptyResult(String body) throws Exception {
 		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, body)) {
 			var stubbed = new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)),
-					null, null, new RagProperties.Search(3, 2, 20, 100, 0.5, "75%", 60), true), WebClient.builder(), JsonMapper.builder().build());
+					null, null, new RagProperties.Search(3, 2, 20, 100, 0.5, "75%", 60, 2, 10), true), WebClient.builder(), JsonMapper.builder().build());
 			var scope = new ThreadDocumentScope(UUID.randomUUID(), ThreadScopeFilter.of(List.of(UUID.randomUUID())),
 					List.of(new ThreadDocumentScope.Target(UUID.randomUUID(), "a.txt", 1, "bge-m3", 3)));
 

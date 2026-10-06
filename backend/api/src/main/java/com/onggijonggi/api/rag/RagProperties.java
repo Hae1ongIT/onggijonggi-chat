@@ -23,7 +23,7 @@ public record RagProperties(
 
 	/** 질문 임베딩. 문서를 임베딩한 ETL과 같은 엔드포인트·모델이어야 한다(다른 모델의 벡터를 섞지 않는다). */
 	public record Embedding(@DefaultValue("") String url, @DefaultValue("bge-m3") String model,
-			@DefaultValue("1024") int dimensions, @DefaultValue("10s") Duration timeout) { }
+			@DefaultValue("1024") int dimensions, @DefaultValue("5s") Duration timeout) { }
 
 	/**
 	 * 후속 질문을 독립된 검색 문장으로 다시 쓰는 LLM 호출. model이 비면 그 요청의 대화 모델을 쓴다 — 이미 같은 대화를 받는 모델이라
@@ -36,8 +36,11 @@ public record RagProperties(
 	 * 척도가 달라 따로 건다. 키워드에 BM25 점수 하한을 쓰지 않는 이유: 점수가 색인 전체의 문서 수(IDF)에 따라 흔들려, 문서가 적은
 	 * 색인에서는 정확히 맞은 고유명사도 하한 아래로 떨어진다.
 	 * 기준을 통과한 후보를 순위 기반(RRF)으로 합쳐 topK개, 문서당 perDocument개까지 돌려준다.
+	 * threads·queue는 검색 전용 스레드 수와 대기 상한이다 — 검색은 외부 호출을 블로킹으로 기다리므로(최악 약 20초) BFF 공용
+	 * boundedElastic(모든 DB 호출이 쓴다)과 나눈다. 대기 상한을 넘으면 UNAVAILABLE이다.
 	 */
 	public record Search(@DefaultValue("5") int topK, @DefaultValue("3") int perDocument, @DefaultValue("20") int candidates,
 			@DefaultValue("100") int numCandidates, @DefaultValue("0.5") double vectorMinSimilarity,
-			@DefaultValue("75%") String keywordMinimumShouldMatch, @DefaultValue("60") int rrfK) { }
+			@DefaultValue("75%") String keywordMinimumShouldMatch, @DefaultValue("60") int rrfK,
+			@DefaultValue("8") int threads, @DefaultValue("100") int queue) { }
 }

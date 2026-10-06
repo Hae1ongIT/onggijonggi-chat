@@ -4,16 +4,19 @@ import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.chat.ChatMessage;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import com.onggijonggi.api.chat.ThreadDocumentService;
+import com.onggijonggi.api.common.TraceIdWebFilter;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
+import reactor.core.scheduler.Scheduler;
 
 /**
  * Class Name : ThreadDocumentSearch.java
@@ -31,21 +34,33 @@ public class ThreadDocumentSearch {
 	private final QueryRewriter rewriter;
 	private final QueryEmbedder embedder;
 	private final ChunkSearcher searcher;
+	private final Scheduler scheduler;
 
-	public ThreadDocumentSearch(ThreadDocumentService documents, QueryRewriter rewriter, QueryEmbedder embedder, ChunkSearcher searcher) {
+	public ThreadDocumentSearch(ThreadDocumentService documents, QueryRewriter rewriter, QueryEmbedder embedder, ChunkSearcher searcher,
+			@Qualifier("ragSearchScheduler") Scheduler scheduler) {
 		this.documents = documents;
 		this.rewriter = rewriter;
 		this.embedder = embedder;
 		this.searcher = searcher;
+		this.scheduler = scheduler;
 	}
 
 	/** history는 질문 앞의 대화(오래된 것부터), modelId는 그 대화의 모델(다시 쓰기 기본값)이다. */
 	public Mono<SearchResult> search(UUID thread, CurrentActor actor, String question, List<ChatMessage> history, String modelId) {
-		return Mono.fromCallable(() -> run(thread, documents.searchScope(thread, actor), question, history, modelId))
-				.subscribeOn(Schedulers.boundedElastic());
+		// 장애는 200 응답의 UNAVAILABLE이라 공통 오류 로그에 남지 않는다. 응답 헤더 X-Trace-Id로 찾을 수 있게 로그에 traceId를 단다.
+		return Mono.deferContextual(context -> {
+			String trace = context.getOrDefault(TraceIdWebFilter.TRACE_ID_ATTR, "-");
+			return Mono.fromCallable(() -> run(thread, trace, documents.searchScope(thread, actor), question, history, modelId))
+					.subscribeOn(scheduler)
+					.onErrorResume(RejectedExecutionException.class, full -> {
+						log.warn("방 문서 검색 대기열이 가득 찼다: thread={} traceId={}", thread, trace);
+						return Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of()));
+					});
+		});
 	}
 
-	private SearchResult run(UUID thread, ThreadDocumentScope scope, String question, List<ChatMessage> history, String modelId) {
+	private SearchResult run(UUID thread, String trace, ThreadDocumentScope scope, String question, List<ChatMessage> history,
+			String modelId) {
 		if (scope.targets().isEmpty()) return new SearchResult(SearchResult.Status.NO_EVIDENCE, question, false, List.of());
 		long started = System.nanoTime();
 		try {
@@ -66,12 +81,12 @@ public class ThreadDocumentSearch {
 					.map(hit -> new SearchResult.Chunk(UUID.fromString(hit.document()), byId.get(hit.document()).fileName(), hit.runSeq(),
 							hit.seq(), hit.loc(), hit.content(), hit.vectorScore(), hit.keywordScore()))
 					.toList();
-			log.debug("방 문서 검색: thread={} 대상 {}건 결과 {}건 다시 쓰기 {} {}ms", thread, scope.targets().size(), chunks.size(),
+			log.debug("방 문서 검색: thread={} traceId={} 대상 {}건 결과 {}건 다시 쓰기 {} {}ms", thread, trace, scope.targets().size(), chunks.size(),
 					query.rewritten(), (System.nanoTime() - started) / 1_000_000);
 			return new SearchResult(chunks.isEmpty() ? SearchResult.Status.NO_EVIDENCE : SearchResult.Status.FOUND, query.query(),
 					query.rewritten(), chunks);
 		} catch (RagUnavailableException unavailable) {
-			log.warn("방 문서 검색을 끝내지 못했다: thread={} {}", thread, unavailable.getMessage(), unavailable.getCause());
+			log.warn("방 문서 검색을 끝내지 못했다: thread={} traceId={} {}", thread, trace, unavailable.getMessage(), unavailable.getCause());
 			return new SearchResult(SearchResult.Status.UNAVAILABLE, question, false, List.of());
 		}
 	}
