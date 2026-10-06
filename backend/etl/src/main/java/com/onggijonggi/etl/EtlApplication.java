@@ -1,8 +1,10 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.Chunker;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -14,6 +16,12 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @ConfigurationPropertiesScan
 @EnableScheduling
 public class EtlApplication {
+
+	/** 청킹 규칙은 공용 모듈(common)에 있다 — 검색 평가 세트도 같은 규칙으로 나눈다(#345). */
+	@Bean
+	Chunker chunker(EtlProperties properties) {
+		return new Chunker(properties.chunk().settings());
+	}
 
 	/** main: 스프링 부트 애플리케이션을 구동한다. */
 	public static void main(String[] args) {

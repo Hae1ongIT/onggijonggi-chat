@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.onggijonggi.common.document.Chunker;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -27,7 +28,7 @@ class ChunkIndexTest {
 
 	@BeforeEach
 	void setUp() throws Exception {
-		es = new StubHttpServer().reply("/_alias/", 200, "{}");
+		es = new StubHttpServer().reply("/_alias/", 200, "{\"thr_doc_chunk_v1\":{\"aliases\":{\"thr_doc_chunk\":{}}}}");
 		var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(es.url(), "thr_doc_chunk", "thr_doc_chunk_v1", 200),
 				null, new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5));
 		index = new ChunkIndex(properties, JsonMapper.builder().build());

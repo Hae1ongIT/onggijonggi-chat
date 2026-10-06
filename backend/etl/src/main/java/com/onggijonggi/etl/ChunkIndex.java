@@ -1,12 +1,16 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.Chunker;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -18,13 +22,14 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Class Name : ChunkIndex.java
- * Description : 청크를 Elasticsearch에 적재·대조·삭제한다. 인덱스 매핑은 C(검색)가 소유하지만 C 착수 전에는 B가 기동·첫 적재 때
- *               최소 매핑(es-thr-doc-chunk-index.json)으로 인덱스와 별칭을 만든다. 쓰기·조회는 항상 별칭으로 한다.
+ * Description : 청크를 Elasticsearch에 적재·대조·삭제한다. 인덱스 매핑(공용 모듈의 es-thr-doc-chunk-index.json)은 검색(#345)이
+ *               소유하고, ETL은 기동·첫 적재 때 그 매핑으로 인덱스와 별칭을 만들거나 이전 인덱스에서 옮긴다. 쓰기·조회는 항상 별칭으로 한다.
  *               청크 문서에는 본문(content)을 함께 둬, 매핑·분석기 변경은 원본 재추출 없이 Elasticsearch 안에서 다시 색인한다.
  */
 @Component
 public class ChunkIndex {
 
+	private static final Logger log = LoggerFactory.getLogger(ChunkIndex.class);
 	private static final String MAPPING = "es-thr-doc-chunk-index.json";
 	/** 문자셋을 붙인다 — 붙이지 않으면 문자열 본문이 ISO-8859-1로 인코딩돼 한글 청크가 "??"로 저장된다. */
 	private static final MediaType NDJSON = MediaType.parseMediaType("application/x-ndjson;charset=UTF-8");
@@ -40,31 +45,76 @@ public class ChunkIndex {
 		this.json = json;
 	}
 
-	/** 별칭이 없으면 인덱스와 별칭을 만든다. 이미 있으면 아무것도 하지 않는다. */
-	public void ensure() {
+	/**
+	 * 별칭이 없으면 인덱스와 별칭을 만든다. 별칭이 설정한 인덱스가 아닌 이전 인덱스를 가리키면(매핑·분석기를 바꿔 인덱스 이름을
+	 * 올린 배포) 새 인덱스를 만들어 이전 인덱스의 청크를 _reindex로 옮긴 뒤 별칭을 한 번에 넘긴다. 본문을 새 분석기로 다시 분석하고
+	 * 벡터는 그대로 옮기므로 원본 재추출·재임베딩이 없다. 이전 인덱스는 지우지 않는다(확인 뒤 운영자가 지운다). 옮기는 동안 검색은
+	 * 이전 인덱스로 계속 된다. 처리 스레드가 함께 부르므로 직렬화한다.
+	 */
+	public synchronized void ensure() {
 		if (ensured) return;
 		try {
+			JsonNode aliases;
 			try {
-				client.get().uri("/_alias/{alias}", settings.alias()).retrieve().toBodilessEntity();
+				aliases = json.readTree(client.get().uri("/_alias/{alias}", settings.alias()).retrieve().body(String.class));
 			} catch (HttpClientErrorException.NotFound missing) {
-				ObjectNode body = (ObjectNode) mapping();
-				body.putObject("aliases").putObject(settings.alias());
-				try {
-					client.put().uri("/{index}", settings.index()).contentType(MediaType.APPLICATION_JSON)
-							.body(utf8(json.writeValueAsString(body))).retrieve().toBodilessEntity();
-				} catch (HttpClientErrorException.BadRequest rejected) {
-					String reason = rejected.getResponseBodyAsString();
-					// 다른 워커가 먼저 만들었거나 인덱스만 있고 별칭이 없다. 별칭만 붙인다. 그 밖의 400(nori 플러그인 없음, 매핑 오류)은
-					// 원인을 그대로 남기고 영구 실패로 둔다 — 별칭 붙이기로 넘어가면 진짜 원인이 "인덱스 없음"으로 가려진다.
-					if (!reason.contains("resource_already_exists_exception"))
-						throw EtlFailure.permanent("INDEX_REJECTED", "인덱스 생성 거절: " + HttpCalls.abbreviate(reason), rejected);
-					client.put().uri("/{index}/_alias/{alias}", settings.index(), settings.alias()).retrieve().toBodilessEntity();
-				}
+				create(true);
+				ensured = true;
+				return;
 			}
+			List<String> previous = new ArrayList<>(aliases.propertyNames());
+			if (previous.isEmpty()) create(true);
+			else if (!previous.contains(settings.index())) migrate(previous);
 			ensured = true;
+		} catch (EtlFailure failure) {
+			throw failure;
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}
+	}
+
+	/** 설정한 인덱스를 공용 매핑으로 만든다. withAlias면 별칭도 함께 붙인다. 이미 있으면 그대로 쓴다. */
+	private void create(boolean withAlias) {
+		ObjectNode body = (ObjectNode) mapping();
+		if (withAlias) body.putObject("aliases").putObject(settings.alias());
+		try {
+			client.put().uri("/{index}", settings.index()).contentType(MediaType.APPLICATION_JSON)
+					.body(utf8(json.writeValueAsString(body))).retrieve().toBodilessEntity();
+		} catch (HttpClientErrorException.BadRequest rejected) {
+			String reason = rejected.getResponseBodyAsString();
+			// 다른 워커가 먼저 만들었거나 인덱스만 있고 별칭이 없다. 별칭만 붙인다. 그 밖의 400(nori 플러그인 없음, 매핑 오류)은
+			// 원인을 그대로 남기고 영구 실패로 둔다 — 별칭 붙이기로 넘어가면 진짜 원인이 "인덱스 없음"으로 가려진다.
+			if (!reason.contains("resource_already_exists_exception"))
+				throw EtlFailure.permanent("INDEX_REJECTED", "인덱스 생성 거절: " + HttpCalls.abbreviate(reason), rejected);
+			if (withAlias) client.put().uri("/{index}/_alias/{alias}", settings.index(), settings.alias()).retrieve().toBodilessEntity();
+		}
+	}
+
+	/** 이전 인덱스의 청크를 새 인덱스로 옮기고 별칭을 원자적으로 넘긴다. 건수가 맞지 않으면 넘기지 않는다(다음 시도에서 다시). */
+	private void migrate(List<String> previous) {
+		log.info("검색 인덱스를 옮긴다: {} → {}", previous, settings.index());
+		create(false);
+		JsonNode result = json.readTree(client.post().uri("/_reindex?wait_for_completion=true&refresh=true")
+				.contentType(MediaType.APPLICATION_JSON)
+				.body(utf8(json.writeValueAsString(Map.of("source", Map.of("index", previous), "dest", Map.of("index", settings.index())))))
+				.retrieve().body(String.class));
+		if (result.path("timed_out").asBoolean(false) || !result.path("failures").isEmpty())
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 옮기기가 끝나지 않았다: " + HttpCalls.abbreviate(result.toString()), null);
+		long before = 0;
+		for (String index : previous) before += indexCount(index);
+		long after = indexCount(settings.index());
+		if (after < before)
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "옮긴 청크 수(" + after + ")가 이전 인덱스(" + before + ")보다 적다", null);
+		List<Object> actions = new ArrayList<>();
+		for (String index : previous) actions.add(Map.of("remove", Map.of("index", index, "alias", settings.alias())));
+		actions.add(Map.of("add", Map.of("index", settings.index(), "alias", settings.alias())));
+		client.post().uri("/_aliases").contentType(MediaType.APPLICATION_JSON)
+				.body(utf8(json.writeValueAsString(Map.of("actions", actions)))).retrieve().toBodilessEntity();
+		log.info("검색 인덱스를 옮겼다: 청크 {}개, 별칭 {} → {}. 이전 인덱스 {}는 확인 뒤 지운다", after, settings.alias(), settings.index(), previous);
+	}
+
+	private long indexCount(String index) {
+		return json.readTree(client.get().uri("/{index}/_count", index).retrieve().body(String.class)).path("count").asLong();
 	}
 
 	/** 매핑의 벡터 차원. 임베딩 설정과 다르면 워커가 처리를 시작하지 않는다. */

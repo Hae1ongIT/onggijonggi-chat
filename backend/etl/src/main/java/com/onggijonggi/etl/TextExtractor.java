@@ -1,5 +1,6 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.Chunker;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
@@ -25,17 +26,16 @@ import org.springframework.stereotype.Component;
 public class TextExtractor {
 
 	/** 뽑은 텍스트 한 덩어리. page는 PDF만 있고 그 외는 null이다. */
-	public record Section(Integer page, String text) { }
 
-	public List<Section> extract(String fileName, byte[] bytes) {
+	public List<Chunker.Section> extract(String fileName, byte[] bytes) {
 		String extension = extension(fileName);
-		List<Section> sections;
+		List<Chunker.Section> sections;
 		try {
 			sections = switch (extension) {
-				case "txt", "md", "csv" -> List.of(new Section(null, stripBom(decodeText(bytes))));
+				case "txt", "md", "csv" -> List.of(new Chunker.Section(null, stripBom(decodeText(bytes))));
 				case "pdf" -> pdf(bytes);
 				// Tika는 DOCX 문단 사이에 줄바꿈 하나만 넣는다. 빈 줄로 바꿔 청킹이 문단을 알아보게 한다(출처 위치 para=N).
-				case "docx" -> List.of(new Section(null, tika(bytes).replaceAll("\\n+", "\n\n")));
+				case "docx" -> List.of(new Chunker.Section(null, tika(bytes).replaceAll("\\n+", "\n\n")));
 				default -> throw EtlFailure.permanent("UNSUPPORTED_FILE", "지원하지 않는 형식: " + extension);
 			};
 		} catch (EtlFailure failure) {
@@ -43,15 +43,15 @@ public class TextExtractor {
 		} catch (RuntimeException error) {
 			throw EtlFailure.permanent("UNREADABLE", "원본을 읽지 못했다(손상·암호)", error);
 		}
-		List<Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank()).toList();
+		List<Chunker.Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank()).toList();
 		if (nonBlank.isEmpty()) throw EtlFailure.permanent("EMPTY_TEXT", "글자를 찾지 못했다(스캔 PDF 등)");
 		return nonBlank;
 	}
 
-	private static List<Section> pdf(byte[] bytes) {
+	private static List<Chunker.Section> pdf(byte[] bytes) {
 		var config = PdfDocumentReaderConfig.builder().withPagesPerDocument(1).build();
 		List<Document> pages = new PagePdfDocumentReader(new ByteArrayResource(bytes), config).get();
-		return pages.stream().map(page -> new Section(pageNumber(page), tidyLayout(page.getText()))).toList();
+		return pages.stream().map(page -> new Chunker.Section(pageNumber(page), tidyLayout(page.getText()))).toList();
 	}
 
 	/** PDF 페이지 리더는 화면 배치를 공백으로 흉내 낸다. 검색·청크 길이에 의미 없는 공백을 줄인다. */

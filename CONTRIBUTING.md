@@ -336,6 +336,8 @@ PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다
 
 `app.etl.embedding.url`을 비우면 문서를 처리하지 않고 경고만 남긴다. 테스트(`.\gradlew.bat :etl:test`)는 Docker로 PostgreSQL과 nori를 넣은 Elasticsearch를 띄우고 문서 워커·임베딩 서버는 가짜로 대신한다(처음엔 Elasticsearch 이미지 빌드로 몇 분 걸린다).
 
+방 문서 검색(BFF, #345)을 로컬에서 확인하려면 `application-local.properties`에 ETL과 같은 `app.rag.embedding.url`을 넣는다. 비우면 검색 결과가 `UNAVAILABLE`이다. Elasticsearch는 기본 `localhost:9200`을 본다. 검색 기준 수치를 바꿀 때는 평가 세트를 실제 임베딩으로 돌려 비교한다(`.\gradlew.bat :api:ragEval` — 필요한 환경변수는 테스트 클래스 `RagEvaluationTest` 주석에 있다).
+
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 
 `http://localhost:8090/actuator/health`가 `{"status":"UP"}`이면 정상이다.

@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -578,6 +579,47 @@ class ThreadDocumentPostgresTest {
 		failProcessing(id);
 		assertThatThrownBy(() -> service.processing(id, "FAILED", "PENDING")).isInstanceOf(IllegalArgumentException.class);
 		assertThat(jdbc.queryForObject("select status from thr_doc where id=?", String.class, id)).isEqualTo("FAILED");
+	}
+
+	@Test void searchScopeHasOnlyPinnedReadyDocumentsWithTheirCurrentCompletedRun() {
+		UUID ready = UUID.randomUUID(), unpinned = UUID.randomUUID(), pending = UUID.randomUUID(), failed = UUID.randomUUID(),
+				deleted = UUID.randomUUID(), reprocessed = UUID.randomUUID();
+		for (UUID id : List.of(ready, unpinned, pending, failed, deleted, reprocessed)) upload(id, owner);
+		for (UUID id : List.of(ready, unpinned, deleted, reprocessed)) completeProcessing(id);
+		failProcessing(failed);
+		for (UUID id : List.of(ready, pending, failed, deleted, reprocessed)) service.change(room, id, owner, "PINNED", UUID.randomUUID());
+		service.change(room, deleted, owner, "DELETED", UUID.randomUUID());
+		// 재처리로 2회차가 완료됐다. 1회차는 정리 작업이 지우기 전이라 DONE으로 남아 있어도 현재 회차는 2다.
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, emb_mdl, emb_dim) values (?, ?, ?, ?, 2, 'DONE', 'bge-m3', 1024)",
+				UUID.randomUUID(), reprocessed, tenant, room);
+
+		var scope = service.searchScope(room, member);
+
+		assertThat(scope.tenant()).isEqualTo(tenant);
+		assertThat(scope.threads().threadIds()).containsExactly(room);
+		assertThat(scope.targets()).extracting(ThreadDocumentScope.Target::document, ThreadDocumentScope.Target::runSeq)
+				.containsExactlyInAnyOrder(tuple(ready, 1), tuple(reprocessed, 2));
+		assertThat(scope.targets()).extracting(ThreadDocumentScope.Target::fileName).containsOnly("guide.txt");
+		assertThat(scope.targets()).extracting(ThreadDocumentScope.Target::embeddingModel, ThreadDocumentScope.Target::dimensions)
+				.containsOnly(tuple("bge-m3", 1024));
+	}
+
+	@Test void searchScopeRequiresTheSameRoomAccessAndIgnoresTheRoomState() {
+		UUID id = UUID.randomUUID(); upload(id, owner);
+		completeProcessing(id);
+		service.change(room, id, owner, "PINNED", UUID.randomUUID());
+		status(() -> service.searchScope(room, actor()), HttpStatus.NOT_FOUND);
+		when(authorizer.canViewBlocking(eq(member.subject()), any())).thenReturn(false);
+		status(() -> service.searchScope(room, member), HttpStatus.NOT_FOUND);
+		jdbc.update("update thr set status='LOCKED',locked_at=now() where id=?", room);
+		assertThat(service.searchScope(room, owner).targets()).hasSize(1);
+	}
+
+	/** ETL이 1회차를 끝낸 상태: 문서 READY, 회차 DONE. */
+	private void completeProcessing(UUID id) {
+		assertThat(service.processing(id, "PENDING", "PROCESSING")).isTrue();
+		assertThat(service.processing(id, "PROCESSING", "READY")).isTrue();
+		jdbc.update("update thr_doc_run set status='DONE', emb_mdl='bge-m3', emb_dim=1024 where doc_id=?", id);
 	}
 
 	/** ETL이 처리를 최종 실패로 끝낸 상태: 문서 FAILED, 회차 FAILED. */

@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.onggijonggi.common.document.Chunker;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -34,7 +35,7 @@ class TextExtractorTest {
 	@Test
 	void pdfIsReadPageByPage() throws IOException {
 		var sections = extractor.extract("guide.pdf", pdf("first page text", "second page text"));
-		assertThat(sections).extracting(TextExtractor.Section::page).containsExactly(1, 2);
+		assertThat(sections).extracting(Chunker.Section::page).containsExactly(1, 2);
 		assertThat(sections.get(1).text()).contains("second page text");
 	}
 

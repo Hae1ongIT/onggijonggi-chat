@@ -1,32 +1,42 @@
-package com.onggijonggi.etl;
+package com.onggijonggi.common.document;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import org.springframework.stereotype.Component;
 
 /**
  * Class Name : Chunker.java
  * Description : 문단 우선으로 청크를 나눈다. 문단을 목표 길이까지 이어 붙이고, 최대 길이를 넘는 문단만 문장 경계에서 자른다.
  *               다음 청크 앞에 직전 청크의 끝부분을 겹쳐 문맥이 끊기지 않게 한다. 청크는 섹션(PDF 페이지)을 넘지 않는다.
  *               청크 ID는 문서·회차·순번으로 정해져 같은 회차를 다시 처리해도 같은 청크를 덮어쓴다(중복 없음).
+ *               ETL 적재와 검색 평가 세트(#345)가 같은 규칙으로 나눠야 관련성 기준이 실제 색인과 맞아 공용 모듈에 둔다.
  */
-@Component
 public class Chunker {
+
+	/** 추출한 텍스트 한 덩어리. page는 PDF 페이지 번호이고 그 외 형식은 null이다. */
+	public record Section(Integer page, String text) { }
 
 	/** 청크 하나. loc은 출처 위치(PDF는 page=N, 그 외는 para=N — 청크가 시작하는 문단 순번). */
 	public record Chunk(String id, int seq, String content, String loc) { }
 
-	private final EtlProperties.Chunk settings;
-
-	public Chunker(EtlProperties properties) {
-		this.settings = properties.chunk();
+	/** 문단 우선 분할 설정. target까지 문단을 이어 붙이고, max를 넘는 문단만 자르며, 다음 청크 앞에 overlap자를 겹친다. */
+	public record Settings(int target, int max, int overlap) {
+		/** 처리 회차에 남기는 청킹 설정 지문. 설정이 바뀐 문서를 골라 재처리할 때 쓴다. */
+		public String fingerprint() {
+			return "para-v1:" + target + "/" + max + "/" + overlap;
+		}
 	}
 
-	public List<Chunk> chunk(UUID document, int runSeq, List<TextExtractor.Section> sections) {
+	private final Settings settings;
+
+	public Chunker(Settings settings) {
+		this.settings = settings;
+	}
+
+	public List<Chunk> chunk(UUID document, int runSeq, List<Section> sections) {
 		List<Chunk> chunks = new ArrayList<>();
 		int paragraphIndex = 0;
-		for (TextExtractor.Section section : sections) {
+		for (Section section : sections) {
 			StringBuilder current = new StringBuilder();
 			int startParagraph = paragraphIndex + 1;
 			String previousTail = "";
@@ -48,7 +58,7 @@ public class Chunker {
 		return chunks;
 	}
 
-	private String emit(List<Chunk> chunks, UUID document, int runSeq, TextExtractor.Section section, int paragraph, String content) {
+	private String emit(List<Chunk> chunks, UUID document, int runSeq, Section section, int paragraph, String content) {
 		int seq = chunks.size() + 1;
 		String loc = section.page() != null ? "page=" + section.page() : "para=" + paragraph;
 		chunks.add(new Chunk(document + ":" + runSeq + ":" + seq, seq, content.strip(), loc));
