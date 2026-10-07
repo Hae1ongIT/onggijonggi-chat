@@ -20,7 +20,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 /**
  * Class Name : RebuildStoreTest.java
  * Description : 다시 만들기 회차(#348)의 대상 선정·운영자 요청 처리와, 그 회차를 워커가 집고 끝낼 때 문서 상태가 바뀌지 않는지를 실제
- *               최신 스키마(PostgreSQL)에서 확인한다. Elasticsearch·워커 없이 돈다. 테스트마다 문서·회차를 비운다(선점은 전체 회차를 본다).
+ *               최신 스키마(PostgreSQL)에서 확인한다. 다시 만들기 회차의 선점·연장·완료·실패·정리(RunStore의 종류별 분기)도 여기서 본다.
+ *               Elasticsearch·워커 없이 돈다. 테스트마다 문서·회차를 비운다(선점은 전체 회차를 본다).
  */
 @Testcontainers(disabledWithoutDocker = true)
 class RebuildStoreTest {
@@ -115,7 +116,9 @@ class RebuildStoreTest {
 		var rest = rebuilds.currentRuns(first.get(1).document(), 2);
 		assertThat(first).hasSize(2);
 		assertThat(rest).hasSize(1);
-		assertThat(first).extracting(RebuildStore.CurrentRun::document).doesNotContain(rest.get(0).document());
+		assertThat(java.util.stream.Stream.concat(first.stream(), rest.stream()).map(RebuildStore.CurrentRun::document).toList())
+				.as("이어 읽어 빠짐·겹침 없이 모두").containsExactlyInAnyOrderElementsOf(
+						jdbc.queryForList("select id from thr_doc", UUID.class));
 	}
 
 	@Test
@@ -153,7 +156,8 @@ class RebuildStoreTest {
 
 		assertThat(status(rebuilt)).as("이전 조각이 남아 있어 검색은 된다").isEqualTo("READY");
 		assertThat(status(recovered)).as("조각이 없으니 사용자에게 처리 실패와 다시 처리를 보인다").isEqualTo("FAILED");
-		assertThat(jdbc.queryForList("select status from thr_doc_run where run_seq = 2", String.class)).containsOnly("FAILED");
+		assertThat(jdbc.queryForList("select status || '/' || err from thr_doc_run where run_seq = 2", String.class))
+				.containsExactly("FAILED/SOURCE_MISSING", "FAILED/SOURCE_MISSING");
 	}
 
 	@Test
@@ -166,6 +170,124 @@ class RebuildStoreTest {
 
 		assertThat(runs.claim(LEASE, 5)).isNull();
 		assertThat(jdbc.queryForObject("select status from thr_doc_run where id = ?", String.class, run)).isEqualTo("CANCELLED");
+	}
+
+	/** 다시 만들기로 대체된 회차는 유예가 지난 뒤에 정리 대상이 된다 — 바뀌기 직전에 범위를 읽은 검색이 빈 결과가 되지 않게. */
+	@Test
+	void aSupersededRunIsPurgedOnlyAfterTheGrace() throws SQLException {
+		UUID doc = readyDocument("bge-m3", 1024, "800/1200/100");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, chunk_cnt, run_kind) values (?, ?, ?, ?, 2, 'DONE', 3, 'REBUILD')",
+				UUID.randomUUID(), doc, UUID.randomUUID(), UUID.randomUUID());
+
+		assertThat(runs.stale(20, Duration.ofMinutes(2))).as("막 대체됐다").isEmpty();
+		assertThat(runs.stale(20, Duration.ZERO)).singleElement().satisfies(stale -> {
+			assertThat(stale.document()).isEqualTo(doc);
+			assertThat(stale.runSeq()).isEqualTo(1);
+		});
+	}
+
+	/** 임베딩 서버·ES 장애로 재시도를 다 쓴 자동 복구는 문서를 READY로 둔다 — 장애가 풀린 뒤 다음 대조가 다시 잡는다. */
+	@Test
+	void aRecoveryThatRanOutOfRetriesLeavesTheDocumentReadyForTheNextCheck() throws SQLException {
+		UUID doc = readyDocument("bge-m3", 1024, "800/1200/100");
+		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).isTrue();
+
+		runs.fail(runs.claim(LEASE, 5), RunStore.RETRY_EXHAUSTED + ":EMBEDDING_UNAVAILABLE");
+
+		assertThat(status(doc)).isEqualTo("READY");
+		assertThat(jdbc.queryForMap("select status, err from thr_doc_run where doc_id = ? and run_seq = 2", doc))
+				.containsEntry("status", "FAILED").containsEntry("err", "RETRY_EXHAUSTED:EMBEDDING_UNAVAILABLE");
+		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).as("다음 대조가 다시 만든다").isTrue();
+	}
+
+	/** 자동 설정 변경 재처리는 이미 실패한 문서를 다시 잡지 않는다 — 금방 실패하는 문서만 주기마다 돌며 뒤 문서를 막지 않게. */
+	@Test
+	void automaticOutdatedRebuildSkipsDocumentsWhoseRebuildAlreadyFailed() throws SQLException {
+		UUID failedBefore = readyDocument("old-model", 1024, "800/1200/100");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, err, run_kind) values (?, ?, ?, ?, 2, 'PURGED', 'SOURCE_MISSING', 'REBUILD')",
+				UUID.randomUUID(), failedBefore, UUID.randomUUID(), UUID.randomUUID());
+		UUID waiting = readyDocument("old-model", 1024, "800/1200/100");
+
+		assertThat(rebuilds.queueOutdated("bge-m3", 1024, "800/1200/100", 200)).isEqualTo(1);
+		assertThat(newRuns(waiting)).isEqualTo(1);
+		assertThat(newRuns(failedBefore)).as("실패한 회차 하나뿐").isEqualTo(1);
+
+		UUID request = UUID.randomUUID();
+		jdbc.update("insert into doc_rbl(id, kind, status, req_subj) values (?, 'OUTDATED', 'PENDING', 'admin')", request);
+		jdbc.update("update thr_doc_run set status = 'DONE', emb_mdl = 'bge-m3', chnk_cnf = '800/1200/100', emb_dim = 1024 where doc_id = ? and run_seq = 2", waiting);
+		assertThat(rebuilds.handleNextRequest("bge-m3", 1024, "800/1200/100").targets()).as("운영자 요청은 다시 시도한다").isEqualTo(1);
+		assertThat(newRuns(failedBefore)).isEqualTo(2);
+	}
+
+	/** 처리 중 워커가 죽어 시도를 다 쓴 다시 만들기도 종류별 실패 규칙을 따른다 — 둘 다 일시 소진이라 문서는 READY로 남는다. */
+	@Test
+	void rebuildAndRecoveryRunsThatKilledTheirWorkersFailWithoutFailingTheDocument() throws SQLException {
+		for (String kind : new String[] {RunStore.REBUILD, RunStore.RECOVER}) {
+			UUID doc = readyDocument("bge-m3", 1024, "800/1200/100");
+			UUID run = UUID.randomUUID();
+			jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, att_cnt, next_at, run_kind)"
+					+ " values (?, ?, ?, ?, 2, 'RUNNING', 5, now() - interval '1 second', ?)", run, doc, UUID.randomUUID(), UUID.randomUUID(), kind);
+
+			assertThat(runs.claim(LEASE, 5)).as(kind).isNull();
+
+			assertThat(status(doc)).as(kind).isEqualTo("READY");
+			assertThat(jdbc.queryForMap("select status, err from thr_doc_run where id = ?", run)).as(kind)
+					.containsEntry("status", "FAILED").containsEntry("err", RunStore.RETRY_EXHAUSTED);
+		}
+	}
+
+	/** 다시 만드는 도중 사용자가 문서를 지우면 결과를 버리고 회차를 취소한다. 적재한 청크는 정리 작업이 지운다. */
+	@Test
+	void aRebuildOfADocumentDeletedMeanwhileIsCancelledAtEveryStep() throws SQLException {
+		UUID completed = readyDocument("old-model", 1024, "800/1200/100");
+		readyDocument("old-model", 1024, "800/1200/100");
+		rebuilds.queueOutdated("bge-m3", 1024, "800/1200/100", 10);
+		RunStore.Job first = runs.claim(LEASE, 5);
+		RunStore.Job second = runs.claim(LEASE, 5);
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now()");
+
+		assertThat(runs.extend(first, LEASE)).isFalse();
+		RunStore.Job toComplete = first.document().equals(completed) ? first : second;
+		RunStore.Job toFail = toComplete == first ? second : first;
+		assertThat(runs.complete(toComplete, 4, "bge-m3", 1024, "800/1200/100")).isFalse();
+		runs.fail(toFail, "SOURCE_MISSING");
+
+		assertThat(jdbc.queryForList("select status from thr_doc_run where run_seq = 2", String.class)).containsOnly("CANCELLED").hasSize(2);
+		assertThat(jdbc.queryForList("select status from thr_doc", String.class)).containsOnly("DELETED");
+		assertThat(runs.stale(20, Duration.ofMinutes(2))).extracting(RunStore.Stale::runSeq).as("정리 대상").contains(2);
+	}
+
+	/** 자동 경로가 워커보다 빨리 쌓지 않게 보는 대기 수 — 사용자 처리(INGEST)와 끝난 회차는 세지 않는다. */
+	@Test
+	void backlogCountsOnlyWaitingAndRunningRebuilds() throws SQLException {
+		UUID a = readyDocument("bge-m3", 1024, "800/1200/100");
+		UUID b = readyDocument("bge-m3", 1024, "800/1200/100");
+		UUID c = document("PENDING");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, run_kind) values (?, ?, ?, ?, 2, 'PENDING', 'REBUILD')",
+				UUID.randomUUID(), a, UUID.randomUUID(), UUID.randomUUID());
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, run_kind) values (?, ?, ?, ?, 2, 'RUNNING', 'RECOVER')",
+				UUID.randomUUID(), b, UUID.randomUUID(), UUID.randomUUID());
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, run_kind) values (?, ?, ?, ?, 3, 'FAILED', 'REBUILD')",
+				UUID.randomUUID(), a, UUID.randomUUID(), UUID.randomUUID());
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status) values (?, ?, ?, ?, 1, 'PENDING')",
+				UUID.randomUUID(), c, UUID.randomUUID(), UUID.randomUUID());
+
+		assertThat(rebuilds.backlog()).isEqualTo(2);
+	}
+
+	/** 자동 설정 변경 재처리가 빼는 것은 실패한 REBUILD뿐이다 — 상태가 FAILED 그대로여도 빼고, 실패한 자동 복구(RECOVER)는 빼지 않는다. */
+	@Test
+	void onlyAFailedRebuildExcludesADocumentFromTheAutomaticOutdatedRebuild() throws SQLException {
+		UUID failedRebuild = readyDocument("old-model", 1024, "800/1200/100");
+		UUID failedRecovery = readyDocument("old-model", 1024, "800/1200/100");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, err, run_kind) values (?, ?, ?, ?, 2, 'FAILED', 'SOURCE_MISSING', 'REBUILD')",
+				UUID.randomUUID(), failedRebuild, UUID.randomUUID(), UUID.randomUUID());
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, err, run_kind) values (?, ?, ?, ?, 2, 'FAILED', 'RETRY_EXHAUSTED', 'RECOVER')",
+				UUID.randomUUID(), failedRecovery, UUID.randomUUID(), UUID.randomUUID());
+
+		assertThat(rebuilds.queueOutdated("bge-m3", 1024, "800/1200/100", 200)).isEqualTo(1);
+		assertThat(newRuns(failedRecovery)).isEqualTo(2);
+		assertThat(newRuns(failedRebuild)).isEqualTo(1);
 	}
 
 	private int newRuns(UUID doc) {

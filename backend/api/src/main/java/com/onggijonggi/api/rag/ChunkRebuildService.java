@@ -1,10 +1,14 @@
 package com.onggijonggi.api.rag;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -37,6 +41,8 @@ public class ChunkRebuildService {
 	private static final String IN_PROGRESS = " where r.status = 'PENDING' or exists (select 1 from thr_doc_run x where x.rbl_id = r.id"
 			+ " and x.status in ('PENDING', 'RUNNING'))";
 
+	private static final Logger log = LoggerFactory.getLogger(ChunkRebuildService.class);
+
 	private final JdbcTemplate jdbc;
 
 	public ChunkRebuildService(JdbcTemplate jdbc) {
@@ -48,17 +54,20 @@ public class ChunkRebuildService {
 	 * 다음 문장을 거부한다. 확인과 삽입 사이의 경합은 대기 중 요청 유일 인덱스가 막는다.
 	 */
 	public Rebuild request(Scope scope, String requester) {
-		Optional<Rebuild> running = first(SELECT + IN_PROGRESS + " order by r.created_at desc limit 1");
-		if (running.isPresent()) throw new ChunkRebuildInProgressException(running.get().id());
-		UUID id = UUID.randomUUID();
-		try {
-			jdbc.update("insert into doc_rbl(id, kind, status, req_subj) values (?, ?, 'PENDING', ?)", id, scope.name(), requester);
-		} catch (DuplicateKeyException concurrent) {
-			// 같은 순간 다른 요청이 먼저 들어갔다(대기 중 요청은 하나뿐 — uq_doc_rbl_pending).
-			UUID other = jdbc.queryForObject("select id from doc_rbl where status = 'PENDING'", UUID.class);
-			throw new ChunkRebuildInProgressException(other);
+		// 확인 뒤 삽입 전에 다른 요청이 먼저 들어갈 수 있다. 그 요청이 다시 읽기 전에 이미 끝났으면(ETL이 바로 처리) 한 번 더 시도한다.
+		for (int attempt = 0; attempt < 2; attempt++) {
+			Optional<Rebuild> running = first(SELECT + IN_PROGRESS + " order by r.created_at desc limit 1");
+			if (running.isPresent()) throw new ChunkRebuildInProgressException(running.get().id());
+			UUID id = UUID.randomUUID();
+			try {
+				jdbc.update("insert into doc_rbl(id, kind, status, req_subj) values (?, ?, 'PENDING', ?)", id, scope.name(), requester);
+				log.info("일괄 재처리 요청: request={} 범위={} 요청자={}", id, scope, requester);
+				return find(id).orElseThrow();
+			} catch (DuplicateKeyException concurrent) {
+				// 같은 순간 다른 요청이 먼저 들어갔다(대기 중 요청은 하나뿐 — uq_doc_rbl_pending). 다음 바퀴가 그 요청을 진행 중으로 본다.
+			}
 		}
-		return find(id).orElseThrow();
+		throw new ChunkRebuildInProgressException(null);
 	}
 
 	@Transactional(readOnly = true)
@@ -75,7 +84,7 @@ public class ChunkRebuildService {
 		return jdbc.query(sql, (rs, row) -> map(rs), args).stream().findFirst();
 	}
 
-	private static Rebuild map(java.sql.ResultSet rs) throws java.sql.SQLException {
+	private static Rebuild map(ResultSet rs) throws SQLException {
 		Timestamp completed = rs.getTimestamp(6);
 		return new Rebuild(rs.getObject(1, UUID.class), Scope.valueOf(rs.getString(2)), rs.getString(3), rs.getString(4),
 				rs.getTimestamp(5).toInstant(), completed == null ? null : completed.toInstant(), (Integer) rs.getObject(7),

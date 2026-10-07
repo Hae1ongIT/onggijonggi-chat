@@ -1,10 +1,11 @@
 package com.onggijonggi.api.rag;
 
-import com.onggijonggi.api.auth.CurrentActorProvider;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -27,19 +28,20 @@ public class ChunkRebuildController {
 	/** scope: ALL(READY 전체) · OUTDATED(임베딩 모델·차원·청킹 설정이 지금 ETL 설정과 다른 문서). */
 	public record RebuildRequest(String scope) { }
 
-	private final CurrentActorProvider actors;
 	private final ChunkRebuildService service;
 
-	public ChunkRebuildController(CurrentActorProvider actors, ChunkRebuildService service) {
-		this.actors = actors;
+	public ChunkRebuildController(ChunkRebuildService service) {
 		this.service = service;
 	}
 
 	@PostMapping("/api/platform/rag/rebuilds")
 	public Mono<ResponseEntity<ChunkRebuildService.Rebuild>> request(@RequestBody(required = false) RebuildRequest body) {
 		ChunkRebuildService.Scope scope = scope(body);
-		return actors.currentActor()
-				.flatMap(actor -> Mono.fromCallable(() -> service.request(scope, actor.subject())).subscribeOn(Schedulers.boundedElastic()))
+		// 요청자는 토큰의 sub만 쓴다 — 사용자 조회(CurrentActorProvider)는 처음 보는 계정이면 사용자 행을 만들어, 운영 API 호출에 부수효과가 생긴다.
+		return ReactiveSecurityContextHolder.getContext().map(context -> context.getAuthentication())
+				.filter(JwtAuthenticationToken.class::isInstance).cast(JwtAuthenticationToken.class)
+				.switchIfEmpty(Mono.error(() -> new ResponseStatusException(HttpStatus.FORBIDDEN)))
+				.flatMap(token -> Mono.fromCallable(() -> service.request(scope, token.getName())).subscribeOn(Schedulers.boundedElastic()))
 				.map(rebuild -> ResponseEntity.status(HttpStatus.ACCEPTED).body(rebuild));
 	}
 

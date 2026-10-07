@@ -286,9 +286,9 @@ docker compose up -d --build
   curl -X DELETE http://127.0.0.1:9200/thr_doc_chunk_v1     # 위가 모두 맞을 때만
   ```
 - **다시 만들기(자동)**: ETL은 "검색 준비 완료" 문서의 검색 조각을 스스로 다시 만든다. 그동안 문서는 "검색 준비 완료" 그대로이고 이전 조각으로 계속 검색되며, 새 조각이 다 만들어지는 순간 바뀐다. 사용자가 새로 올린 문서를 먼저 처리하고, 처리량은 평소 동시 처리 수(2) 그대로다.
-  - **조각이 사라졌을 때**: Elasticsearch 볼륨 삭제·서버 이전 등으로 조각이 없어지면 10분마다 하는 대조에서 찾아 원본에서 다시 만든다(`docker compose logs etl`의 `검색 조각이 빠진 문서 N건을 다시 만든다`). 복구가 끝나기 전에는 검색이 "근거 없음"(`NO_EVIDENCE`)으로 나온다. 원본까지 없어 다시 만들 수 없는 문서는 "처리 실패"가 된다. Elasticsearch가 응답하지 않는 동안에는 대조하지 않는다.
-  - **설정을 바꿨을 때**: 임베딩 모델·차원(`EMBEDDING_MODEL` 등)이나 청킹 설정을 바꿔 ETL을 다시 띄우면, 이전 설정으로 처리된 문서를 기동 30초 뒤부터 다시 만든다(`처리 설정이 바뀐 문서 N건을 다시 만든다`).
-- **다시 만들기(운영자)**: `PLATFORM_ADMIN` 계정 토큰으로 `POST /api/platform/rag/rebuilds`(본문 `{"scope":"ALL"}` 전체 또는 `{"scope":"OUTDATED"}` 설정이 바뀐 문서만)를 부르면 ETL이 30초 안에 대상을 골라 다시 만든다. 진행 상황은 `GET /api/platform/rag/rebuilds`(최근 10건)·`/api/platform/rag/rebuilds/{id}`의 `targets`(대상)·`remaining`(남음)·`failed`(실패)로 본다. 앞 요청이 아직 끝나지 않았으면 409(`REBUILD_IN_PROGRESS`, 문구에 진행 중 요청 ID)다.
+  - **조각이 사라졌을 때**: Elasticsearch 볼륨 삭제·서버 이전 등으로 조각이 없어지면 10분마다 하는 대조에서 찾아 원본에서 다시 만든다(`docker compose logs etl`의 `검색 조각이 빠진 문서 N건을 다시 만든다`). 복구가 끝나기 전에는 검색이 "근거 없음"(`NO_EVIDENCE`)으로 나온다. 원본까지 없어 다시 만들 수 없는 문서는 "처리 실패"가 된다. 임베딩 서버·Elasticsearch가 오래 끊겨 재시도를 다 써도 "처리 실패"로 바꾸지 않고 다음 대조 때 다시 한다. Elasticsearch가 응답하지 않는 동안에는 대조하지 않는다.
+  - **설정을 바꿨을 때**: 임베딩 모델·차원(`EMBEDDING_MODEL` 등)이나 청킹 설정을 바꿔 ETL을 다시 띄우면, 이전 설정으로 처리된 문서를 기동 30초 뒤부터 다시 만든다(`처리 설정이 바뀐 문서 N건을 다시 만든다`). 다시 만들기에 실패한 문서는 이전 설정 조각으로 계속 검색되고(임베딩 모델을 바꾼 경우 그 방은 `MODEL_MISMATCH`), ETL 재기동이나 운영자 요청(`OUTDATED`) 때 다시 시도한다.
+- **다시 만들기(운영자)**: `PLATFORM_ADMIN` 계정 토큰으로 `POST /api/platform/rag/rebuilds`(본문 `{"scope":"ALL"}` 전체 또는 `{"scope":"OUTDATED"}` 설정이 바뀐 문서만)를 부르면 ETL이 30초 안에 대상을 골라 다시 만든다. ETL의 문서 처리가 꺼져 있거나(임베딩 주소 없음 등) 검색 인덱스 준비·이전이 끝나지 않았으면 요청은 `PENDING`으로 기다리고, 그동안 새 요청은 409다 — GET에서 `status`가 계속 `PENDING`이면 `docker compose logs etl`부터 본다. 진행 상황은 `GET /api/platform/rag/rebuilds`(최근 10건)·`/api/platform/rag/rebuilds/{id}`의 `targets`(대상)·`remaining`(남음)·`failed`(실패)로 본다. 앞 요청이 아직 끝나지 않았으면 409(`REBUILD_IN_PROGRESS`, 문구에 진행 중 요청 ID)다.
 - 문서의 한글이 자모 분해형(macOS에서 만든 파일 등)이면 이번 버전부터 조합형으로 맞춰 색인한다. 그 전에 올린 그런 문서는 키워드 검색이 맞지 않으므로 운영자 다시 만들기(`ALL`)로 한 번 다시 처리한다.
 - 이전 버전 이미지로 되돌려도 `thr_doc_chunk_v2`는 지우지 않는다 — 되돌린 ETL도 별칭이 가리키는 v2에 쓴다. ETL은 한 대로 띄운다(여러 대면 인덱스 이전이 겹친다).
 

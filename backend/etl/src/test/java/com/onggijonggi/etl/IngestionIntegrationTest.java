@@ -74,6 +74,8 @@ class IngestionIntegrationTest {
 		registry.add("app.etl.sweep-delay", () -> "300ms");
 		// 다시 만들기 주기는 테스트가 직접 부른다 — 저절로 돌면 다른 테스트의 회차 번호·건수가 흔들린다.
 		registry.add("app.etl.rebuild-delay", () -> "1h");
+		// 대체된 회차 정리 유예(운영 2분)를 없애 정리 결과를 바로 본다. 유예 자체는 RebuildStoreTest가 본다.
+		registry.add("app.etl.superseded-grace", () -> "0s");
 		// 운영 기본값과 같은 2개 스레드로 돌려 선점 경합도 함께 지난다.
 		registry.add("app.etl.concurrency", () -> "2");
 		registry.add("app.etl.embedding.batch-size", () -> "4");
@@ -265,6 +267,7 @@ class IngestionIntegrationTest {
 	void operatorRebuildKeepsTheOldChunksSearchableUntilTheNewRunIsDone() {
 		Fixture doc = register("전체재처리.txt", "다시 만드는 동안에도 검색된다. ".repeat(40));
 		await(() -> "READY".equals(status(doc)));
+		onlyThisDocumentIsLive(doc);
 		long before = count(doc);
 		FAKE.embeddingGate = new CountDownLatch(1);
 		UUID request = UUID.randomUUID();
@@ -291,6 +294,7 @@ class IngestionIntegrationTest {
 	void documentsWhoseChunksVanishedWithTheIndexAreRecoveredFromTheirSources() {
 		Fixture doc = register("자동복구.txt", "인덱스가 지워져도 다시 만들어진다. ".repeat(40));
 		await(() -> "READY".equals(status(doc)));
+		onlyThisDocumentIsLive(doc);
 		es().delete().uri("/thr_doc_chunk_v2").retrieve().toBodilessEntity();
 
 		rebuilder.verify();
@@ -302,6 +306,11 @@ class IngestionIntegrationTest {
 		});
 		assertThat(run(doc, 2)).containsEntry("run_kind", "RECOVER");
 		assertThat(count(doc)).isEqualTo(((Integer) run(doc, 2).get("chunk_cnt")).longValue());
+	}
+
+	/** 앞 테스트들이 남긴 문서를 지운 것으로 둔다 — 전체 재처리·자동 복구가 원본이 이미 없는 그 문서들까지 잡아 결과가 섞이지 않게. */
+	private void onlyThisDocumentIsLive(Fixture doc) {
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id <> ? and status <> 'DELETED'", doc.id);
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }

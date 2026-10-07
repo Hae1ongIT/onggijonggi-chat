@@ -77,14 +77,15 @@ public class IngestionPipeline {
 		if (!failure.permanent() && job.attempts() <= delays.size()) {
 			Duration delay = delays.get(job.attempts() - 1);
 			runs.retryLater(job, failure.code(), delay);
-			log.warn("문서 처리 일시 실패 — {} 뒤 다시 시도({}회째): doc={} run={} {}", delay, job.attempts(), job.document(), job.runSeq(),
-					failure.getMessage(), failure.getCause());
+			// 스택 없이 한 줄로 남긴다 — 임베딩 서버가 오래 끊기면 다시 만들기 회차 수천 건이 모두 여기를 지난다.
+			log.warn("문서 처리 일시 실패 — {} 뒤 다시 시도({}회째): doc={} run={} kind={} {}{}", delay, job.attempts(), job.document(),
+					job.runSeq(), job.kind(), failure.getMessage(), failure.getCause() == null ? "" : " (" + failure.getCause() + ")");
 			return;
 		}
 		// 재시도를 다 쓰면 마지막 일시 오류 코드를 함께 남긴다 — 내부 key 불일치(SOURCE_UNAUTHORIZED) 같은 원인을 DB에서 볼 수 있게 한다.
-		String code = failure.permanent() ? failure.code() : truncate("RETRY_EXHAUSTED:" + failure.code());
+		String code = failure.permanent() ? failure.code() : truncate(RunStore.RETRY_EXHAUSTED + ":" + failure.code());
 		runs.fail(job, code);
-		log.error("문서 처리 실패({}): doc={} run={} {}", code, job.document(), job.runSeq(), failure.getMessage(), failure.getCause());
+		log.error("문서 처리 실패({}): doc={} run={} kind={} {}", code, job.document(), job.runSeq(), job.kind(), failure.getMessage(), failure.getCause());
 	}
 
 	/** thr_doc_run.err는 64자다. */

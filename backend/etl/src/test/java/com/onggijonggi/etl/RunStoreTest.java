@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -36,6 +37,12 @@ class RunStoreTest {
 		var dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
 		jdbc = new JdbcTemplate(dataSource);
 		runs = new RunStore(jdbc, new DataSourceTransactionManager(dataSource));
+	}
+
+	/** 선점(claim)은 전체 회차를 보므로 테스트마다 비운다 — 앞 테스트가 남긴 대기 회차를 집으면 결과가 실행 순서에 달린다. */
+	@BeforeEach
+	void clear() {
+		jdbc.execute("truncate thr_doc_run, thr_doc cascade");
 	}
 
 	@Test

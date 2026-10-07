@@ -39,8 +39,6 @@ public class ChunkIndex {
 	private static final int POLL_FAILURES = 5;
 	/** 이전 작업 상태를 보는 간격. */
 	private static final Duration POLL_INTERVAL = Duration.ofSeconds(1);
-	/** 청크 수 집계에서 문서 하나에 세는 회차 수. 정리 전 지난 회차가 잠시 함께 남아도 현재 회차가 빠지지 않을 만큼. */
-	private static final int RUNS_PER_DOCUMENT = 20;
 	/** 문자셋을 붙인다 — 붙이지 않으면 문자열 본문이 ISO-8859-1로 인코딩돼 한글 청크가 "??"로 저장된다. */
 	private static final MediaType NDJSON = MediaType.parseMediaType("application/x-ndjson;charset=UTF-8");
 
@@ -294,15 +292,17 @@ public class ChunkIndex {
 	}
 
 	/**
-	 * 문서들의 회차별 적재된 청크 수(자동 복구의 대조용). 키는 runKey(문서, 회차)이고, 하나도 없는 회차는 키가 없다(0건).
+	 * 문서마다 지정한 회차(현재 회차)에 적재된 청크 수(자동 복구의 대조용). 정리 전 지난 회차의 청크는 세지 않는다 — 회차별로 묶으면
+	 * 남은 회차가 많을 때 현재 회차가 집계 상위에서 잘려 멀쩡한 문서가 빠진 것으로 보인다. 하나도 없는 문서는 키가 없다(0건).
 	 * 별칭이 없으면(인덱스가 지워짐) 다음 준비 때 다시 만들도록 표시하고 일시 실패로 끝낸다 — 호출자는 그 주기를 건너뛴다.
 	 */
-	public Map<String, Long> runCounts(List<UUID> documents) {
-		if (documents.isEmpty()) return Map.of();
+	public Map<UUID, Long> runCounts(Map<UUID, Integer> runs) {
+		if (runs.isEmpty()) return Map.of();
+		List<Object> pairs = runs.entrySet().stream().<Object>map(run -> Map.of("bool", Map.of("filter", List.of(
+				Map.of("term", Map.of(DOC_ID, run.getKey().toString())), Map.of("term", Map.of(RUN_SEQ, run.getValue())))))).toList();
 		var body = Map.of("size", 0,
-				"query", Map.of("terms", Map.of(DOC_ID, documents.stream().map(UUID::toString).toList())),
-				"aggs", Map.of("docs", Map.of("terms", Map.of("field", DOC_ID, "size", documents.size()),
-						"aggs", Map.of("runs", Map.of("terms", Map.of("field", RUN_SEQ, "size", RUNS_PER_DOCUMENT))))));
+				"query", Map.of("bool", Map.of("should", pairs, "minimum_should_match", 1)),
+				"aggs", Map.of("docs", Map.of("terms", Map.of("field", DOC_ID, "size", runs.size()))));
 		try {
 			JsonNode response = json.readTree(client.post().uri("/{alias}/_search", settings.alias())
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(body))).retrieve().body(String.class));
@@ -310,10 +310,9 @@ public class ChunkIndex {
 			if (response.path("timed_out").asBoolean(false) || response.path("_shards").path("failed").asInt(0) > 0
 					|| !response.path("aggregations").path("docs").path("buckets").isArray())
 				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "청크 수 집계가 불완전하다", null);
-			Map<String, Long> counts = new LinkedHashMap<>();
+			Map<UUID, Long> counts = new LinkedHashMap<>();
 			for (JsonNode doc : response.path("aggregations").path("docs").path("buckets"))
-				for (JsonNode run : doc.path("runs").path("buckets"))
-					counts.put(runKey(UUID.fromString(doc.path("key").asString()), run.path("key").asInt()), run.path("doc_count").asLong());
+				counts.put(UUID.fromString(doc.path("key").asString()), doc.path("doc_count").asLong());
 			return counts;
 		} catch (HttpClientErrorException.NotFound aliasMissing) {
 			ensured = false;
@@ -321,11 +320,6 @@ public class ChunkIndex {
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}
-	}
-
-	/** runCounts의 키. */
-	public static String runKey(UUID document, int runSeq) {
-		return document + ":" + runSeq;
 	}
 
 	/** 한 회차의 청크를 지운다. 멱등이다 — 인덱스가 아직 없으면 지울 것도 없다. */

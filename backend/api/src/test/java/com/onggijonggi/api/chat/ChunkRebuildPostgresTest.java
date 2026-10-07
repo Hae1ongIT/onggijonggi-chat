@@ -74,6 +74,48 @@ class ChunkRebuildPostgresTest {
 		assertThat(service.recent()).extracting(ChunkRebuildService.Rebuild::id).containsExactly(next.id(), first.id());
 	}
 
+	/** 두 요청이 동시에 들어와도 하나만 받고 다른 하나는 409다 — 500이 되거나 대기 요청이 둘이 되지 않는다. */
+	@Test
+	void concurrentRequestsQueueExactlyOne() throws Exception {
+		var start = new java.util.concurrent.CyclicBarrier(2);
+		var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+		try {
+			java.util.concurrent.Callable<Object> call = () -> {
+				start.await();
+				try {
+					return service.request(ChunkRebuildService.Scope.ALL, "admin");
+				} catch (ChunkRebuildInProgressException refused) {
+					return refused;
+				}
+			};
+			var results = pool.invokeAll(java.util.List.of(call, call));
+			assertThat(results.stream().map(result -> {
+				try {
+					return result.get().getClass().getSimpleName();
+				} catch (Exception error) {
+					return error.toString();
+				}
+			}).toList()).containsExactlyInAnyOrder("Rebuild", "ChunkRebuildInProgressException");
+		} finally {
+			pool.shutdownNow();
+		}
+		assertThat(jdbc.queryForObject("select count(*) from doc_rbl where status = 'PENDING'", Integer.class)).isEqualTo(1);
+	}
+
+	/** 실패 수는 사유 코드가 남은 회차만 센다 — 성공해 정리된 회차(PURGED, 사유 없음)는 세지 않는다. */
+	@Test
+	void onlyRunsThatEndedWithAnErrorCountAsFailed() {
+		var request = service.request(ChunkRebuildService.Scope.ALL, "admin");
+		jdbc.update("update doc_rbl set status = 'COMPLETED', trg_cnt = 3, completed_at = now() where id = ?", request.id());
+		run(request.id(), "PURGED", null);
+		run(request.id(), "DONE", null);
+		run(request.id(), "FAILED", "SOURCE_MISSING");
+
+		assertThat(service.find(request.id()).orElseThrow())
+				.extracting(ChunkRebuildService.Rebuild::remaining, ChunkRebuildService.Rebuild::failed).containsExactly(0, 1);
+		assertThat(service.find(UUID.randomUUID())).isEmpty();
+	}
+
 	private void assertRefused(UUID running) {
 		assertThatThrownBy(() -> service.request(ChunkRebuildService.Scope.ALL, "admin"))
 				.isInstanceOfSatisfying(ChunkRebuildInProgressException.class, refused -> assertThat(refused.running()).isEqualTo(running));

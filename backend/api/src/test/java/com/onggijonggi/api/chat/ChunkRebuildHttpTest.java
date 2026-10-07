@@ -58,15 +58,20 @@ class ChunkRebuildHttpTest {
 	@Test
 	void onlyPlatformAdminsMayRebuild() {
 		post("Bearer " + TestJwtSupport.signedJwt("rebuild-user", List.of("USER")), "{\"scope\":\"ALL\"}").expectStatus().isForbidden();
-		client.get().uri("/api/platform/rag/rebuilds").header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("rebuild-user", List.of("USER")))
-				.exchange().expectStatus().isForbidden();
+		for (String path : List.of("/api/platform/rag/rebuilds", "/api/platform/rag/rebuilds/" + id))
+			client.get().uri(path).header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("rebuild-user", List.of("USER")))
+					.exchange().expectStatus().isForbidden();
 		verify(service, never()).request(any(), any());
 	}
 
 	@Test
 	void anUnknownScopeIsRejected() {
-		for (String body : List.of("{\"scope\":\"EVERYTHING\"}", "{}"))
+		for (String body : List.of("{\"scope\":\"EVERYTHING\"}", "{}", "{\"scope\":\"all\"}", "{\"scope\":", ""))
 			post(admin(), body).expectStatus().isBadRequest();
+		client.post().uri("/api/platform/rag/rebuilds").header(HttpHeaders.AUTHORIZATION, admin())
+				.contentType(MediaType.TEXT_PLAIN).body("ALL").exchange().expectStatus().isEqualTo(415);
+		client.post().uri("/api/platform/rag/rebuilds").contentType(MediaType.APPLICATION_JSON).body("{\"scope\":\"ALL\"}")
+				.exchange().expectStatus().isUnauthorized();
 		verify(service, never()).request(any(), any());
 	}
 

@@ -1,15 +1,17 @@
 package com.onggijonggi.etl;
 
+import java.time.Duration;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
  * Class Name : RunSweeper.java
- * Description : 회차 없는 등록 문서에 회차를 보충하고(RunStore.requeueOrphans), 더 쓰지 않는 회차의 청크를 Elasticsearch에서 지운다 — 실패·취소된 회차, 삭제된 문서·방의 회차, 재처리로 대체된
- *               회차. 지운 회차는 PURGED로 표시한다. A의 원본 정리 큐(thr_doc_end)와 따로 돌아, ETL을 띄우지 않은 배포에서도
+ * Description : 회차 없는 등록 문서에 회차를 보충하고(RunStore.requeueOrphans), 더 쓰지 않는 회차의 청크를 Elasticsearch에서 지운다 — 실패·취소된 회차, 삭제된 문서·방의 회차, 재처리·다시 만들기로 대체된
+ *               회차(새 회차가 끝나고 app.etl.superseded-grace 뒤, #348). 지운 회차는 PURGED로 표시한다. A의 원본 정리 큐(thr_doc_end)와 따로 돌아, ETL을 띄우지 않은 배포에서도
  *               원본 정리와 재등록이 막히지 않는다. 지우기는 멱등이라 실패해도 다음 주기에 다시 한다.
  */
 @Component
@@ -17,15 +19,19 @@ public class RunSweeper {
 
 	private static final Logger log = LoggerFactory.getLogger(RunSweeper.class);
 
-	/** 한 주기에 다루는 회차·문서 수. 주기(app.etl.sweep-delay, 기본 30초)마다 이만큼씩 줄여 간다. */
-	private static final int BATCH = 20;
+	/** 한 주기에 다루는 회차·문서 수. 주기(app.etl.sweep-delay, 기본 30초)마다 이만큼씩 줄여 간다 — 일괄 다시 만들기로 대체 회차가 수만 건
+	 *  생겨도 몇 시간 안에 따라잡게 둔다. */
+	private static final int BATCH = 100;
 
 	private final RunStore runs;
 	private final ChunkIndex index;
+	/** 대체된 회차를 지우기 전에 기다리는 시간(RunStore.stale). 검색 한 번(다시 쓰기·임베딩·ES)보다 넉넉히 길게 둔다. */
+	private final Duration supersededGrace;
 
-	public RunSweeper(RunStore runs, ChunkIndex index) {
+	public RunSweeper(RunStore runs, ChunkIndex index, @Value("${app.etl.superseded-grace:2m}") Duration supersededGrace) {
 		this.runs = runs;
 		this.index = index;
+		this.supersededGrace = supersededGrace;
 	}
 
 	@Scheduled(fixedDelayString = "${app.etl.sweep-delay:30s}")
@@ -43,7 +49,7 @@ public class RunSweeper {
 		}
 		List<RunStore.Stale> due;
 		try {
-			due = runs.stale(BATCH);
+			due = runs.stale(BATCH, supersededGrace);
 		} catch (RuntimeException error) {
 			log.warn("정리할 회차를 읽지 못했다 — 다음 주기에 다시 본다", error);
 			return;
