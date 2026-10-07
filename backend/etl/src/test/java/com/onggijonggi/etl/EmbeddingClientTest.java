@@ -15,7 +15,7 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Class Name : EmbeddingClientTest.java
  * Description : 임베딩 응답 계약. 개수·순번·차원·모델·값이 하나라도 어긋나면 일부만 적재하지 않고 영구 실패(EMBEDDING_CONTRACT)로
- *               끝나는지, 입력 거절(400)과 해석 불가 응답이 각각 맞게 분류되는지 확인한다(지도 선택 11).
+ *               끝나는지, 입력 거절(400)과 해석 불가 응답이 각각 맞게 분류되는지 확인한다.
  */
 class EmbeddingClientTest {
 

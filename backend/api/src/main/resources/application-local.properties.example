@@ -41,3 +41,6 @@ app.rbac.workspace-setup-path=<저장소 절대경로>/infra/config/workspace-se
 # worker/doc/compose.yaml로 워커를 따로 띄우고(127.0.0.1:8100), 그 .env의 INTERNAL_API_KEY와 같은 값을 넣는다(CONTRIBUTING 5절).
 #app.document.worker-url=http://localhost:8100
 #app.document.internal-api-key=여기에_워커_INTERNAL_API_KEY_입력
+
+# 방 문서 검색(#344): ETL과 같은 임베딩 엔드포인트. 비면 검색 결과는 UNAVAILABLE이다.
+#app.rag.embedding.url=http://임베딩서버:포트

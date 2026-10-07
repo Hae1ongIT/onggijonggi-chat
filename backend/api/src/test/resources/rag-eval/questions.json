@@ -1,0 +1,53 @@
+[
+  {"id": "direct-1", "type": "direct", "question": "연차는 다음 해 언제까지 이월할 수 있어?", "document": "leave.md", "contains": "3월 말"},
+  {"id": "direct-2", "type": "direct", "question": "비밀번호 변경 주기가 어떻게 돼?", "document": "security.md", "contains": "90일"},
+  {"id": "direct-3", "type": "direct", "question": "출장비 정산 기한은?", "document": "travel.md", "contains": "7일"},
+  {"id": "direct-4", "type": "direct", "question": "노트북 교체 주기는 몇 년이야?", "document": "equipment.md", "contains": "4년"},
+  {"id": "direct-5", "type": "direct", "question": "재택근무는 일주일에 몇 번 할 수 있어?", "document": "remote-work.md", "contains": "주 2회"},
+  {"id": "direct-6", "type": "direct", "question": "방문객은 어떻게 출입해?", "document": "security.md", "contains": "출입증"},
+  {"id": "direct-7", "type": "direct", "question": "지방 출장 숙박비 상한이 얼마야?", "document": "travel.md", "contains": "9만 원"},
+  {"id": "direct-8", "type": "direct", "question": "노트북을 잃어버리면 언제까지 신고해야 해?", "document": "equipment.md", "contains": "24시간"},
+  {"id": "direct-9", "type": "direct", "question": "육아 휴직은 몇 번 나눠 쓸 수 있어?", "document": "leave.md", "contains": "두 번"},
+  {"id": "direct-10", "type": "direct", "question": "피싱 메일을 받으면 어떻게 해?", "document": "security.md", "contains": "피싱"},
+  {"id": "direct-11", "type": "direct", "question": "자가용으로 출장 가면 유류비는 얼마 줘?", "document": "travel.md", "contains": "250원"},
+  {"id": "direct-12", "type": "direct", "question": "노트북 수리가 오래 걸리면 어떻게 해?", "document": "equipment.md", "contains": "대체 장비"},
+  {"id": "direct-13", "type": "direct", "question": "재택근무 수당이 있어?", "document": "remote-work.md", "contains": "2만 원"},
+
+  {"id": "paraphrase-1", "type": "paraphrase", "question": "못 쓴 휴가를 내년으로 넘길 수 있나요?", "document": "leave.md", "contains": "이월"},
+  {"id": "paraphrase-2", "type": "paraphrase", "question": "개인 USB를 회사 컴퓨터에 꽂아도 돼?", "document": "security.md", "contains": "외부 저장 매체"},
+  {"id": "paraphrase-3", "type": "paraphrase", "question": "출장 가서 쓴 돈은 어떻게 돌려받아?", "document": "travel.md", "contains": "정산"},
+  {"id": "paraphrase-4", "type": "paraphrase", "question": "집에서 일할 때 꼭 연락돼야 하는 시간이 있어?", "document": "remote-work.md", "contains": "코어타임"},
+  {"id": "paraphrase-5", "type": "paraphrase", "question": "사무실 모니터를 집에 가져가려면 어떻게 해?", "document": "equipment.md", "contains": "반출"},
+  {"id": "paraphrase-6", "type": "paraphrase", "question": "몸이 아파서 며칠 쉬어야 하는데 어떻게 해?", "document": "leave.md", "contains": "병가"},
+
+  {"id": "noun-1", "type": "noun", "question": "옹기마루에서 휴가 신청하는 법", "document": "leave.md", "contains": "옹기마루"},
+  {"id": "noun-2", "type": "noun", "question": "누리카드 한도", "document": "travel.md", "contains": "누리카드"},
+  {"id": "noun-3", "type": "noun", "question": "다리망 접속이 안 돼", "document": "remote-work.md", "contains": "다리망"},
+  {"id": "noun-4", "type": "noun", "question": "종달새로 고객 파일 보내도 돼?", "document": "security.md", "contains": "종달새"},
+  {"id": "noun-5", "type": "noun", "question": "OG 자산 태그는 어디 붙어 있어?", "document": "equipment.md", "contains": "자산 태그"},
+
+  {"id": "polite-1", "type": "polite", "question": "누리카드의 월 사용 한도가 얼마인지 알려주실 수 있나요?", "document": "travel.md", "contains": "300만 원"},
+  {"id": "polite-2", "type": "polite", "question": "다리망에 접속이 되지 않을 때는 어디로 문의하면 되는지 알려주세요", "document": "remote-work.md", "contains": "1450"},
+  {"id": "polite-3", "type": "polite", "question": "종달새로 고객 개인정보 파일을 보낼 때 지켜야 하는 것이 무엇인지 알려줘", "document": "security.md", "contains": "암호"},
+
+  {"id": "unrelated-1", "type": "unrelated", "question": "오늘 서울 날씨 어때?"},
+  {"id": "unrelated-2", "type": "unrelated", "question": "파이썬에서 리스트를 정렬하는 방법"},
+  {"id": "unrelated-3", "type": "unrelated", "question": "점심 메뉴 추천해줘"},
+  {"id": "unrelated-4", "type": "unrelated", "question": "세계에서 가장 높은 산은?"},
+  {"id": "unrelated-5", "type": "unrelated", "question": "주식 투자는 어떻게 시작해?"},
+  {"id": "unrelated-6", "type": "unrelated", "question": "고양이 사료 추천해줘"},
+
+  {"id": "followup-1", "type": "followup", "question": "그럼 그 기한 넘기면 어떻게 돼?", "document": "leave.md", "contains": "소멸",
+   "history": [{"role": "user", "content": "연차 이월 규정 알려줘"}, {"role": "assistant", "content": "쓰지 못한 연차는 다음 해 3월 말까지 이월할 수 있습니다."}]},
+  {"id": "followup-2", "type": "followup", "question": "해외는?", "document": "travel.md", "contains": "해외",
+   "history": [{"role": "user", "content": "출장 숙박비 상한 알려줘"}, {"role": "assistant", "content": "1박에 서울 12만 원, 그 외 지역 9만 원까지입니다."}]},
+  {"id": "followup-3", "type": "followup", "question": "어디에 하면 돼?", "document": "equipment.md", "contains": "정보자산팀",
+   "history": [{"role": "user", "content": "노트북 잃어버리면 어떻게 해?"}, {"role": "assistant", "content": "알게 된 때부터 24시간 안에 신고해야 합니다."}]},
+  {"id": "followup-4", "type": "followup", "question": "신청은 언제까지 해?", "document": "remote-work.md", "contains": "전날",
+   "history": [{"role": "user", "content": "재택근무 며칠 할 수 있어?"}, {"role": "assistant", "content": "입사 3개월이 지나면 주 2회까지 할 수 있습니다."}]},
+  {"id": "followup-5", "type": "followup", "question": "보안 사고가 나면 어디로 연락해?", "document": "security.md", "contains": "1302",
+   "history": [{"role": "user", "content": "연차 이월 규정 알려줘"}, {"role": "assistant", "content": "쓰지 못한 연차는 다음 해 3월 말까지 이월할 수 있습니다."}]},
+
+  {"id": "choice-1", "type": "choice", "question": "보안 지침의 비밀번호 규칙", "document": "security.md", "contains": "12자"},
+  {"id": "choice-2", "type": "choice", "question": "출장비 규정에서 당일 출장 일비", "document": "travel.md", "contains": "2만 원"}
+]

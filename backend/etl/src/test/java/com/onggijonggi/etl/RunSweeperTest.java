@@ -28,7 +28,20 @@ class RunSweeperTest {
 		new RunSweeper(runs, index).sweep();
 
 		verify(runs, never()).purged(stuck);
+		verify(runs).postpone(stuck);
 		verify(index).delete(next.document(), 2);
 		verify(runs).purged(next);
+	}
+
+	@Test
+	void nothingIsDeletedWhileTheIndexIsBeingMigrated() {
+		RunStore runs = mock(RunStore.class);
+		ChunkIndex index = mock(ChunkIndex.class);
+		when(index.migrating()).thenReturn(true);
+
+		new RunSweeper(runs, index).sweep();
+
+		verify(runs, never()).stale(org.mockito.ArgumentMatchers.anyInt());
+		verify(index, never()).delete(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyInt());
 	}
 }

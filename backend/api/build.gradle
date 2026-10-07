@@ -55,6 +55,27 @@ dependencies {
 	testRuntimeOnly 'com.h2database:h2'
 }
 
+// 방 문서 검색 평가 세트(#344)는 실제 임베딩·대화 모델(사내망)이 필요해 기본 test·CI에서 빼고 ragEval로만 돈다.
+tasks.named('test') {
+	useJUnitPlatform {
+		excludeTags 'rag-eval'
+	}
+}
+
+tasks.register('ragEval', Test) {
+	group = 'verification'
+	description = 'Runs the room-document search evaluation set against real embedding and chat models (see RagEvaluationTest).'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'rag-eval'
+	}
+	outputs.upToDateWhen { false }
+	testLogging {
+		showStandardStreams = true
+	}
+}
+
 tasks.register('verifyFlywayMigrations', JavaExec) {
 	group = 'verification'
 	description = 'Applies every Flyway migration to the configured empty PostgreSQL database.'

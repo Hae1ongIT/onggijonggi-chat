@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.onggijonggi.common.document.Chunker;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -31,10 +32,18 @@ class TextExtractorTest {
 		});
 	}
 
+	/** macOS 등에서 온 분해형(NFD) 한글을 조합형(NFC)으로 맞춘다 — 그대로 두면 NFC 질문과 키워드가 맞지 않는다. */
+	@Test
+	void decomposedHangulIsComposed() {
+		String decomposed = java.text.Normalizer.normalize("연차 이월", java.text.Normalizer.Form.NFD);
+		var sections = extractor.extract("notes.txt", decomposed.getBytes(StandardCharsets.UTF_8));
+		assertThat(sections).singleElement().satisfies(section -> assertThat(section.text()).isEqualTo("연차 이월"));
+	}
+
 	@Test
 	void pdfIsReadPageByPage() throws IOException {
 		var sections = extractor.extract("guide.pdf", pdf("first page text", "second page text"));
-		assertThat(sections).extracting(TextExtractor.Section::page).containsExactly(1, 2);
+		assertThat(sections).extracting(Chunker.Section::page).containsExactly(1, 2);
 		assertThat(sections.get(1).text()).contains("second page text");
 	}
 

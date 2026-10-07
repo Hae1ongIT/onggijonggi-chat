@@ -23,6 +23,8 @@ public class IngestionWorkers implements SmartLifecycle {
 	private static final Logger log = LoggerFactory.getLogger(IngestionWorkers.class);
 	/** 종료 시 처리 중인 회차를 기다리는 상한. compose 종료 유예(etl은 20초) 안에 Spring 종료까지 끝나야 한다. */
 	private static final Duration STOP_WAIT = Duration.ofSeconds(8);
+	/** 기동 때 검색 인덱스 준비가 실패하면 다시 시도하는 간격. */
+	private static final Duration INDEX_RETRY = Duration.ofSeconds(30);
 
 	private final RunStore runs;
 	private final IngestionPipeline pipeline;
@@ -35,6 +37,8 @@ public class IngestionWorkers implements SmartLifecycle {
 	/** 스레드마다 지금 처리 중인 회차. 종료 대기 안에 끝나지 못한 회차를 놓아줄 때 쓴다. */
 	private final Map<Thread, RunStore.Job> current = new ConcurrentHashMap<>();
 	private final List<Thread> threads = new ArrayList<>();
+	/** 기동 때 검색 인덱스를 준비하는 스레드. 종료 때 재시도 대기·이전 대기를 끊는다. */
+	private volatile Thread preparer;
 
 	public IngestionWorkers(RunStore runs, IngestionPipeline pipeline, EmbeddingClient embeddings, ChunkIndex index,
 			EtlProperties properties) {
@@ -60,6 +64,11 @@ public class IngestionWorkers implements SmartLifecycle {
 			return;
 		}
 		running.set(true);
+		// 검색 인덱스를 기동하자마자 준비한다(없으면 만들고, 이전 버전이면 옮긴다). 첫 적재 때까지 미루면 등록이 없는 동안 별칭이 이전
+		// 인덱스를 가리킨 채 남아, 운영자가 이전 인덱스를 지우면 청크를 잃는다. 처리 스레드는 이 준비와 같은 잠금(ensure)으로 기다린다.
+		preparer = new Thread(this::prepareIndex, "etl-index-prepare");
+		preparer.setDaemon(true);
+		preparer.start();
 		for (int i = 0; i < Math.max(1, properties.concurrency()); i++) {
 			Thread thread = new Thread(this::loop, "etl-worker-" + i);
 			// 종료 대기(stop)가 끝나도 남은 스레드가 JVM 종료를 막지 않게 한다. 끊긴 회차는 선점 시한 뒤 다시 집힌다.
@@ -97,6 +106,24 @@ public class IngestionWorkers implements SmartLifecycle {
 		}
 	}
 
+	/** 검색 인덱스 준비(ensure). 실패하면 INDEX_RETRY 뒤 다시 한다 — 처리 스레드의 첫 적재도 ensure를 다시 부른다. */
+	private void prepareIndex() {
+		while (running.get()) {
+			try {
+				index.ensure();
+				return;
+			} catch (RuntimeException error) {
+				log.warn("검색 인덱스를 준비하지 못했다 — {}초 뒤 다시 본다: {}", INDEX_RETRY.toSeconds(), error.getMessage());
+			}
+			try {
+				Thread.sleep(INDEX_RETRY.toMillis());
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+		}
+	}
+
 	private void pause() {
 		try {
 			Thread.sleep(properties.pollDelay().toMillis());
@@ -113,6 +140,8 @@ public class IngestionWorkers implements SmartLifecycle {
 	@Override
 	public void stop() {
 		running.set(false);
+		Thread prepare = preparer;
+		if (prepare != null) prepare.interrupt();
 		long deadline = System.nanoTime() + STOP_WAIT.toNanos();
 		for (Thread thread : threads) {
 			try {

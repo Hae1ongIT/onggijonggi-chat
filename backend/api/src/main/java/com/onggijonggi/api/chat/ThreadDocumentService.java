@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.api.auth.CurrentActor;
+import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.authz.WorkspaceAuthorizer;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrKind;
@@ -127,6 +128,28 @@ public class ThreadDocumentService {
 			List<ThreadDocumentView> values = jdbc.query("select * from thr_doc where thr_id = ? and status <> 'DELETED' order by created_at, id",
 					this::document, thread).stream().map(doc -> view(doc, access, registered.contains(doc.id()))).toList();
 			return new ThreadDocumentView.Listing(access.thread().getStatus().name(), access.writable(), values);
+		});
+	}
+
+	/**
+	 * 방 문서 검색(#344) 범위. 목록·원본과 같은 방 접근 확인(활성 참여·DIRECT 소유자·워크스페이스 열람)을 통과해야 하고,
+	 * 실패는 같은 404다. 방 상태(LOCKED·ARCHIVED)와 무관하게 읽을 수 있다. 대상은 고정·READY 문서의 현재 완료 회차다.
+	 */
+	public ThreadDocumentScope searchScope(UUID thread, CurrentActor actor) {
+		return transactions.execute(tx -> {
+			Access access = access(thread, actor, false);
+			// 문서마다 가장 최근 완료 회차 하나. 재처리 직후에는 이전 완료 회차가 정리 전까지 함께 남아 있다.
+			List<ThreadDocumentScope.Target> targets = jdbc.query("""
+					select * from (
+					  select distinct on (d.id) d.id, d.file_name, d.created_at, r.run_seq, r.emb_mdl, r.emb_dim from thr_doc d
+					  join thr_doc_run r on r.doc_id = d.id and r.status = 'DONE'
+					  where d.thr_id = ? and d.pnn = true and d.status = 'READY'
+					  order by d.id, r.run_seq desc) current
+					order by created_at, id""",
+					(rs, row) -> new ThreadDocumentScope.Target(rs.getObject("id", UUID.class), rs.getString("file_name"),
+							rs.getInt("run_seq"), rs.getString("emb_mdl"), rs.getInt("emb_dim")),
+					thread);
+			return new ThreadDocumentScope(access.thread().getTenantId(), ThreadScopeFilter.of(List.of(thread)), targets);
 		});
 	}
 

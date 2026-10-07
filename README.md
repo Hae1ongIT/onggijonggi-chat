@@ -58,7 +58,7 @@ docker compose up -d --build                   # ③ 전체 기동 (첫 빌드 5
 | 디렉터리 | 내용 | 스택 |
 |---|---|---|
 | `frontend/` | 채팅 UI · 로그인 | Next.js(App Router) · React · AI SDK |
-| `backend/api/` | 실행 모듈 — HTTP·WebSocket 엔드포인트, 필터체인 | Spring Boot WebFlux · Spring AI |
+| `backend/api/` | 실행 모듈 — HTTP·WebSocket 엔드포인트, 필터체인, 방 문서 검색 | Spring Boot WebFlux · Spring AI |
 | `backend/common/` | 공유 라이브러리 — 인증·사용자·대화 도메인, 마이그레이션 | JPA · Flyway |
 | `backend/etl/` | 방 문서 처리 워커 — 원본 추출·청킹·임베딩·Elasticsearch 적재 | Spring Boot · Tika · PDFBox |
 | `infra/` | compose 오케스트레이션 · 게이트웨이 설정 | Docker Compose · LiteLLM · Keycloak · PostgreSQL |

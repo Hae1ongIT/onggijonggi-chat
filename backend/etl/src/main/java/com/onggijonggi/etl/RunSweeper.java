@@ -36,6 +36,11 @@ public class RunSweeper {
 		} catch (RuntimeException error) {
 			log.warn("회차 없는 등록 문서를 보충하지 못했다 — 다음 주기에 다시 본다", error);
 		}
+		if (index.migrating()) {
+			// 이전이 끝나면 새 인덱스에서 지운다(ChunkIndex.delete). 기다리는 동안 행마다 실패 로그를 남기지 않는다.
+			log.info("검색 인덱스 이전이 끝나지 않아 지난 회차 청크 정리를 미룬다");
+			return;
+		}
 		List<RunStore.Stale> due;
 		try {
 			due = runs.stale(BATCH);
@@ -50,6 +55,11 @@ public class RunSweeper {
 				runs.purged(stale);
 			} catch (RuntimeException error) {
 				log.warn("지난 회차 청크 정리 실패 — 다음 주기에 다시 한다: doc={} run={}", stale.document(), stale.runSeq(), error);
+				try {
+					runs.postpone(stale);
+				} catch (RuntimeException ignored) {
+					// 미루지 못해도 다음 주기에 같은 행을 다시 본다.
+				}
 			}
 		}
 	}

@@ -1,5 +1,7 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.ChunkIndexContract;
+import com.onggijonggi.common.document.Chunker;
 import java.time.Duration;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -28,8 +30,8 @@ public record EtlProperties(
 
 	public record Worker(String url, @DefaultValue("") String apiKey) { }
 
-	public record Elasticsearch(String url, @DefaultValue("thr_doc_chunk") String alias,
-			@DefaultValue("thr_doc_chunk_v1") String index,
+	public record Elasticsearch(String url, @DefaultValue(ChunkIndexContract.ALIAS) String alias,
+			@DefaultValue("thr_doc_chunk_v2") String index,
 			/** bulk 한 요청에 담는 청크 수. */
 			@DefaultValue("200") int bulkSize) { }
 
@@ -38,9 +40,8 @@ public record EtlProperties(
 
 	/** 문단 우선 분할. 값은 대표 문서·질문으로 C와 함께 조정한다. */
 	public record Chunk(@DefaultValue("800") int target, @DefaultValue("1200") int max, @DefaultValue("100") int overlap) {
-		/** 처리 회차에 남기는 청킹 설정 지문. 설정이 바뀐 문서를 골라 재처리할 때 쓴다. */
-		public String fingerprint() {
-			return "para-v1:" + target + "/" + max + "/" + overlap;
+		public Chunker.Settings settings() {
+			return new Chunker.Settings(target, max, overlap);
 		}
 	}
 }

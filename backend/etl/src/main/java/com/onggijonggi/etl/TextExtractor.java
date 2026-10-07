@@ -1,10 +1,12 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.Chunker;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -17,25 +19,23 @@ import org.springframework.stereotype.Component;
 
 /**
  * Class Name : TextExtractor.java
- * Description : 원본에서 검색용 텍스트를 뽑는다. 첨부와 달리 잘라내지 않는다(지도 선택 9).
+ * Description : 원본에서 검색용 텍스트를 뽑는다. 첨부와 달리 잘라내지 않는다(잘라내면 문서 뒷부분을 검색하지 못한다).
  *               txt·md·csv는 Tika 문자셋 추정 대신 UTF-8 → CP949 순서로 엄격히 읽는다(짧은 한글 파일을 Tika가 잘못 추정할 수 있어서다).
  *               PDF는 페이지 단위로 읽어 출처 위치를 페이지로 남기고, DOCX는 Tika로 읽는다.
  */
 @Component
 public class TextExtractor {
 
-	/** 뽑은 텍스트 한 덩어리. page는 PDF만 있고 그 외는 null이다. */
-	public record Section(Integer page, String text) { }
-
-	public List<Section> extract(String fileName, byte[] bytes) {
+	/** 확장자별로 글자를 뽑아 비어 있지 않은 섹션(PDF는 페이지마다)을 돌려준다. 글자가 없으면 EMPTY_TEXT로 영구 실패한다. */
+	public List<Chunker.Section> extract(String fileName, byte[] bytes) {
 		String extension = extension(fileName);
-		List<Section> sections;
+		List<Chunker.Section> sections;
 		try {
 			sections = switch (extension) {
-				case "txt", "md", "csv" -> List.of(new Section(null, stripBom(decodeText(bytes))));
+				case "txt", "md", "csv" -> List.of(new Chunker.Section(null, stripBom(decodeText(bytes))));
 				case "pdf" -> pdf(bytes);
 				// Tika는 DOCX 문단 사이에 줄바꿈 하나만 넣는다. 빈 줄로 바꿔 청킹이 문단을 알아보게 한다(출처 위치 para=N).
-				case "docx" -> List.of(new Section(null, tika(bytes).replaceAll("\\n+", "\n\n")));
+				case "docx" -> List.of(new Chunker.Section(null, tika(bytes).replaceAll("\\n+", "\n\n")));
 				default -> throw EtlFailure.permanent("UNSUPPORTED_FILE", "지원하지 않는 형식: " + extension);
 			};
 		} catch (EtlFailure failure) {
@@ -43,15 +43,18 @@ public class TextExtractor {
 		} catch (RuntimeException error) {
 			throw EtlFailure.permanent("UNREADABLE", "원본을 읽지 못했다(손상·암호)", error);
 		}
-		List<Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank()).toList();
+		// 한글을 NFC(조합형)로 맞춘다. macOS에서 만든 파일·붙여 넣은 글은 자모가 분해된 NFD일 수 있는데, 그대로 색인하면 NFC 질문과
+		// 키워드가 맞지 않는다(검색 질문도 NFC로 맞춘다). 출처에 보이는 글자는 바뀌지 않는다(NFKC는 ①→1처럼 표시가 바뀌어 쓰지 않는다).
+		List<Chunker.Section> nonBlank = sections.stream().filter(section -> section.text() != null && !section.text().isBlank())
+				.map(section -> new Chunker.Section(section.page(), Normalizer.normalize(section.text(), Normalizer.Form.NFC))).toList();
 		if (nonBlank.isEmpty()) throw EtlFailure.permanent("EMPTY_TEXT", "글자를 찾지 못했다(스캔 PDF 등)");
 		return nonBlank;
 	}
 
-	private static List<Section> pdf(byte[] bytes) {
+	private static List<Chunker.Section> pdf(byte[] bytes) {
 		var config = PdfDocumentReaderConfig.builder().withPagesPerDocument(1).build();
 		List<Document> pages = new PagePdfDocumentReader(new ByteArrayResource(bytes), config).get();
-		return pages.stream().map(page -> new Section(pageNumber(page), tidyLayout(page.getText()))).toList();
+		return pages.stream().map(page -> new Chunker.Section(pageNumber(page), tidyLayout(page.getText()))).toList();
 	}
 
 	/** PDF 페이지 리더는 화면 배치를 공백으로 흉내 낸다. 검색·청크 길이에 의미 없는 공백을 줄인다. */

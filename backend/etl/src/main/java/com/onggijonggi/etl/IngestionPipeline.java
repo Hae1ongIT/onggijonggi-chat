@@ -1,5 +1,6 @@
 package com.onggijonggi.etl;
 
+import com.onggijonggi.common.document.Chunker;
 import java.time.Duration;
 import java.util.List;
 import org.slf4j.Logger;
@@ -53,10 +54,10 @@ public class IngestionPipeline {
 			List<float[]> vectors = embeddings.embed(chunks.stream().map(Chunker.Chunk::content).toList(), () -> alive(job));
 			index.write(job, chunks, vectors, embeddings.model());
 			long stored = index.count(job.document(), job.runSeq());
-			// 적재 결과가 청크 수와 다르면 READY로 숨기지 않는다(지도 선택 11). 다음 시도가 같은 ID로 덮어쓴다.
+			// 적재 결과가 청크 수와 다르면 READY로 숨기지 않는다. 다음 시도가 같은 ID로 덮어쓴다.
 			if (stored != chunks.size())
 				throw EtlFailure.transientFailure("INDEX_COUNT", "적재 " + stored + "건 / 청크 " + chunks.size() + "건", null);
-			if (!runs.complete(job, chunks.size(), embeddings.model(), embeddings.dimensions(), properties.chunk().fingerprint())) {
+			if (!runs.complete(job, chunks.size(), embeddings.model(), embeddings.dimensions(), properties.chunk().settings().fingerprint())) {
 				log.info("처리 중 삭제된 문서라 결과를 버린다: doc={} run={}", job.document(), job.runSeq());
 				return;
 			}
