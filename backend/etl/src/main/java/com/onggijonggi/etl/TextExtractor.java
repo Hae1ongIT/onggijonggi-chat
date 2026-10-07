@@ -19,7 +19,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Class Name : TextExtractor.java
- * Description : 원본에서 검색용 텍스트를 뽑는다. 첨부와 달리 잘라내지 않는다(지도 선택 9).
+ * Description : 원본에서 검색용 텍스트를 뽑는다. 첨부와 달리 잘라내지 않는다(잘라내면 문서 뒷부분을 검색하지 못한다).
  *               txt·md·csv는 Tika 문자셋 추정 대신 UTF-8 → CP949 순서로 엄격히 읽는다(짧은 한글 파일을 Tika가 잘못 추정할 수 있어서다).
  *               PDF는 페이지 단위로 읽어 출처 위치를 페이지로 남기고, DOCX는 Tika로 읽는다.
  */

@@ -25,7 +25,7 @@ import reactor.core.scheduler.Schedulers;
  * Description : 방 문서 검색(#344)의 흐름. ① 방 접근 확인과 검색 범위(ThreadDocumentService.searchScope — 실패는 404, 검색 전에 끝난다)
  *               → ② 대상 문서가 없으면 근거 없음(임베딩·LLM을 부르지 않는다) → ③ 설정·모델 확인 → ④ 후속 질문이면 검색 문장 다시 쓰기
  *               → ⑤ 질문 임베딩 → ⑥ 하이브리드 검색. 장애는 UNAVAILABLE로 돌려주고 근거 없음으로 숨기지 않는다.
- *               권한은 턴 시작 시 한 번 확인한다 — 답변이 닿는 길(협업방 구독·기록 재조회)은 기존 회수·접근 확인이 지킨다(D 협의 5).
+ *               권한은 턴 시작 시 한 번 확인한다 — 답변이 닿는 길(협업방 구독·기록 재조회)은 기존 회수·접근 확인이 지킨다.
  */
 @Service
 public class ThreadDocumentSearch {
@@ -72,7 +72,7 @@ public class ThreadDocumentSearch {
 		try {
 			if (!embedder.configured()) throw new RagUnavailableException(SearchResult.Reason.NOT_CONFIGURED, "임베딩 주소(app.rag.embedding.url)가 비어 있다");
 			for (ThreadDocumentScope.Target target : scope.targets()) {
-				// 다른 모델로 임베딩한 문서 벡터와 질문 벡터를 섞지 않는다(지도 선택 10). 모델을 바꿨으면 문서를 다시 처리해야 한다.
+				// 다른 모델로 임베딩한 문서 벡터와 질문 벡터를 섞지 않는다 — 차원이 같아도 모델이 다르면 유사도가 의미 없다. 모델을 바꿨으면 문서를 다시 처리해야 한다.
 				if (!embedder.model().equals(target.embeddingModel()) || embedder.dimensions() != target.dimensions())
 					throw new RagUnavailableException(SearchResult.Reason.MODEL_MISMATCH, "문서 임베딩 모델(" + target.embeddingModel() + "/" + target.dimensions()
 							+ ")이 검색 설정(" + embedder.model() + "/" + embedder.dimensions() + ")과 다르다 — 재처리가 필요하다: doc=" + target.document());

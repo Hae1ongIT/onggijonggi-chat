@@ -14,7 +14,7 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Class Name : EmbeddingClient.java
  * Description : OpenAI 호환 임베딩 엔드포인트(/v1/embeddings, 사내 bge-m3)를 배치로 부른다. 응답의 벡터 수·차원·모델이
- *               요청과 다르면 일부만 적재하지 않고 영구 실패로 끝낸다(지도 선택 11). 입력이 모델 한도를 넘는 400도 영구 실패다.
+ *               요청과 다르면 일부만 적재하지 않고 영구 실패로 끝낸다. 입력이 모델 한도를 넘는 400도 영구 실패다.
  *               Spring AI 임베딩 자동구성 대신 직접 부르는 것은 이 오류들을 일시 장애와 구분하기 위해서다.
  */
 @Component

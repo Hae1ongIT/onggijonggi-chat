@@ -20,7 +20,7 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Class Name : ChunkSearcher.java
  * Description : 범위 안의 청크를 키워드(nori)와 벡터(kNN)로 따로 찾고, 채널마다 관련성 기준을 건 뒤 순위 기반(RRF)으로 합친다.
- *               두 점수는 척도가 달라 하나의 기준을 걸지 않는다(지도 선택 12). 한쪽 채널만 통과한 청크도 채택한다 — 사내 고유명사는
+ *               두 점수는 척도가 달라 하나의 기준을 걸지 않는다. 한쪽 채널만 통과한 청크도 채택한다 — 사내 고유명사는
  *               키워드에서만 잡히고 벡터 유사도가 낮을 수 있다. 범위(고객사·방·문서별 현재 회차)는 두 채널에 같은 filter로 걸어,
  *               후보를 고른 뒤 거르는 것이 아니라 거른 범위 안에서 찾는다. 블로킹 호출이라 검색 전용 스케줄러(rag-search)에서 실행한다.
  */
@@ -57,7 +57,7 @@ public class ChunkSearcher {
 
 	/** 고객사·방·(문서, 현재 회차) 쌍. 회차까지 거는 이유는 재처리 직후 이전 회차 청크가 정리 전까지 남아 있기 때문이다. */
 	static List<Object> filter(ThreadDocumentScope scope) {
-		// 방 문서 검색은 항상 방 조건을 건다. UNRESTRICTED·NONE이면 검색하지 않는다(D 협의 3·4).
+		// 방 문서 검색은 항상 방 조건을 건다. UNRESTRICTED·NONE이면 검색하지 않는다 — 방 조건이 빠지면 다른 방 문서가 섞인다.
 		if (scope.threads().kind() != ThreadScopeFilter.Kind.THREADS)
 			throw new IllegalArgumentException("방 문서 검색은 방 범위가 필요하다: " + scope.threads().kind());
 		List<Object> documents = scope.targets().stream().<Object>map(target -> Map.of("bool", Map.of("filter", List.of(
@@ -131,7 +131,7 @@ public class ChunkSearcher {
 					.bodyValue(body).retrieve().bodyToMono(String.class).block(settings.timeout());
 		} catch (RuntimeException error) {
 			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화). 다만 ETL이 빈 인덱스를 다시
-			// 만든 뒤에는 404가 아니라 결과 0건(NO_MATCH)이 된다 — READY 문서의 청크 유실은 감지하지 못한다(설계 15절 한계).
+			// 만든 뒤에는 404가 아니라 결과 0건(NO_MATCH)이 된다 — READY 문서의 청크 유실은 감지하지 못한다(INSTALL「방 문서 검색 준비 켜기」에 대처를 적었다).
 			throw new RagUnavailableException("Elasticsearch 검색 실패: " + error.getClass().getSimpleName(), error);
 		}
 		try {

@@ -54,7 +54,7 @@ public class IngestionPipeline {
 			List<float[]> vectors = embeddings.embed(chunks.stream().map(Chunker.Chunk::content).toList(), () -> alive(job));
 			index.write(job, chunks, vectors, embeddings.model());
 			long stored = index.count(job.document(), job.runSeq());
-			// 적재 결과가 청크 수와 다르면 READY로 숨기지 않는다(지도 선택 11). 다음 시도가 같은 ID로 덮어쓴다.
+			// 적재 결과가 청크 수와 다르면 READY로 숨기지 않는다. 다음 시도가 같은 ID로 덮어쓴다.
 			if (stored != chunks.size())
 				throw EtlFailure.transientFailure("INDEX_COUNT", "적재 " + stored + "건 / 청크 " + chunks.size() + "건", null);
 			if (!runs.complete(job, chunks.size(), embeddings.model(), embeddings.dimensions(), properties.chunk().settings().fingerprint())) {
