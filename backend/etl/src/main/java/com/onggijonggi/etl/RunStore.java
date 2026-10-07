@@ -2,10 +2,12 @@ package com.onggijonggi.etl;
 
 import com.onggijonggi.common.document.ThreadDocumentStates;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -235,21 +237,30 @@ public class RunStore {
 	}
 
 	/**
-	 * 청크를 지울 회차: 실패·취소된 회차, 그리고 살아 있는 문서의 최신 완료 회차가 아닌 완료 회차(삭제·방 삭제된 문서, 재처리·다시
-	 * 만들기로 대체된 회차). 회차 행은 FK가 없어 문서가 cascade로 사라져도 남는다.
+	 * 청크를 지울 회차. 먼저 더는 쓰지 않는 문서의 회차 — 실패·취소된 회차와, 삭제·방 삭제·처리 실패 문서의 완료 회차 — 를 오래된 순으로,
+	 * 남은 자리에 재처리·다시 만들기로 대체된 완료 회차를 본다. 일괄 다시 만들기로 대체 회차가 수만 건 쌓여도 사용자가 지운 문서의
+	 * 본문이 그 뒤에 밀려 Elasticsearch에 오래 남지 않게 한다. 처리 실패 문서의 완료 회차는 자동 복구가 영구 실패한 경우다(검색되지
+	 * 않는데 남은 조각이 있다). 회차 행은 FK가 없어 문서가 cascade로 사라져도 남는다.
 	 * 대체된 회차는 새 회차가 끝나고 grace가 지난 뒤에 지운다 — 다시 만들기는 READY 문서의 회차를 검색 중에 바꾸므로, 바뀌기 직전에
 	 * 범위(문서, 이전 회차)를 읽은 검색이 Elasticsearch에 묻기 전에 청크가 지워지면 그 검색이 빈 결과가 된다.
+	 * 앞의 status 조건은 정리 인덱스(ix_thr_doc_run_sweep)를 타게 하려고 둔다 — 뒤의 조건만으로는 PURGED 행까지 훑는다.
 	 */
 	public List<Stale> stale(int limit, Duration grace) {
-		// 앞의 status 조건은 정리 인덱스(ix_thr_doc_run_sweep)를 타게 하려고 둔다 — 뒤의 조건만으로는 PURGED 행까지 훑는다.
-		return jdbc.query("select r.id, r.doc_id, r.run_seq from thr_doc_run r where r.status in ('DONE', 'FAILED', 'CANCELLED')"
+		List<Stale> due = new ArrayList<>(jdbc.query("select r.id, r.doc_id, r.run_seq from thr_doc_run r where r.status in ('DONE', 'FAILED', 'CANCELLED')"
 				+ " and (r.status in ('FAILED', 'CANCELLED')"
-				+ " or (r.status = 'DONE' and (not exists (select 1 from thr_doc d where d.id = r.doc_id and d.status <> 'DELETED')"
-				+ " or exists (select 1 from thr_doc_run n where n.doc_id = r.doc_id and n.status = 'DONE' and n.run_seq > r.run_seq"
-				+ " and n.updated_at <= now() - ? * interval '1 millisecond'))))"
-				+ " order by r.updated_at limit ?",
-				(rs, row) -> new Stale(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getInt(3)), grace.toMillis(), limit);
+				+ " or not exists (select 1 from thr_doc d where d.id = r.doc_id and d.status not in ('DELETED', 'FAILED')))"
+				+ " order by r.updated_at limit ?", STALE, limit));
+		if (due.size() < limit)
+			due.addAll(jdbc.query("select r.id, r.doc_id, r.run_seq from thr_doc_run r where r.status = 'DONE'"
+					+ " and exists (select 1 from thr_doc d where d.id = r.doc_id and d.status not in ('DELETED', 'FAILED'))"
+					+ " and exists (select 1 from thr_doc_run n where n.doc_id = r.doc_id and n.status = 'DONE' and n.run_seq > r.run_seq"
+					+ " and n.updated_at <= now() - ? * interval '1 millisecond')"
+					+ " order by r.updated_at limit ?", STALE, grace.toMillis(), limit - due.size()));
+		return due;
 	}
+
+	private static final RowMapper<Stale> STALE =
+			(rs, row) -> new Stale(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getInt(3));
 
 	/**
 	 * 등록됐는데(REGISTERED 사건) 진행 중 회차가 없는 PENDING 문서에 회차를 보충한다. 회차는 등록 확정과 같은 트랜잭션에서 만들어지지만,

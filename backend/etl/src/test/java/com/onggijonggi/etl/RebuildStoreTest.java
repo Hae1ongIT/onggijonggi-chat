@@ -290,6 +290,23 @@ class RebuildStoreTest {
 		assertThat(newRuns(failedRebuild)).isEqualTo(1);
 	}
 
+	/** 지운 문서의 조각은 대체된 회차보다 먼저 정리한다 — 일괄 다시 만들기 뒤에도 사용자가 지운 본문이 대기열 뒤에 밀려 남지 않게. */
+	@Test
+	void runsOfDeletedOrFailedDocumentsArePurgedBeforeSupersededRuns() throws SQLException {
+		UUID rebuilt = readyDocument("bge-m3", 1024, "800/1200/100");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, chunk_cnt, run_kind, updated_at)"
+				+ " values (?, ?, ?, ?, 2, 'DONE', 3, 'REBUILD', now() - interval '1 hour')", UUID.randomUUID(), rebuilt, UUID.randomUUID(), UUID.randomUUID());
+		jdbc.update("update thr_doc_run set updated_at = now() - interval '2 hours' where doc_id = ? and run_seq = 1", rebuilt);
+		UUID deleted = readyDocument("bge-m3", 1024, "800/1200/100");
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id = ?", deleted);
+		UUID recoveryFailed = readyDocument("bge-m3", 1024, "800/1200/100");
+		jdbc.update("update thr_doc set status = 'FAILED' where id = ?", recoveryFailed);
+
+		assertThat(runs.stale(2, Duration.ZERO)).extracting(RunStore.Stale::document).as("오래된 대체 회차보다 먼저")
+				.containsExactlyInAnyOrder(deleted, recoveryFailed);
+		assertThat(runs.stale(10, Duration.ZERO)).extracting(RunStore.Stale::document).containsExactlyInAnyOrder(deleted, recoveryFailed, rebuilt);
+	}
+
 	private int newRuns(UUID doc) {
 		return jdbc.queryForObject("select count(*) from thr_doc_run where doc_id = ? and run_seq > 1", Integer.class, doc);
 	}

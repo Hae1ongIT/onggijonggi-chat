@@ -291,6 +291,7 @@ docker compose up -d --build
 - **다시 만들기(운영자)**: `PLATFORM_ADMIN` 계정 토큰으로 `POST /api/platform/rag/rebuilds`(본문 `{"scope":"ALL"}` 전체 또는 `{"scope":"OUTDATED"}` 설정이 바뀐 문서만)를 부르면 ETL이 30초 안에 대상을 골라 다시 만든다. ETL의 문서 처리가 꺼져 있거나(임베딩 주소 없음 등) 검색 인덱스 준비·이전이 끝나지 않았으면 요청은 `PENDING`으로 기다리고, 그동안 새 요청은 409다 — GET에서 `status`가 계속 `PENDING`이면 `docker compose logs etl`부터 본다. 진행 상황은 `GET /api/platform/rag/rebuilds`(최근 10건)·`/api/platform/rag/rebuilds/{id}`의 `targets`(대상)·`remaining`(남음)·`failed`(실패)로 본다. 앞 요청이 아직 끝나지 않았으면 409(`REBUILD_IN_PROGRESS`, 문구에 진행 중 요청 ID)다.
 - 문서의 한글이 자모 분해형(macOS에서 만든 파일 등)이면 이번 버전부터 조합형으로 맞춰 색인한다. 그 전에 올린 그런 문서는 키워드 검색이 맞지 않으므로 운영자 다시 만들기(`ALL`)로 한 번 다시 처리한다.
 - 이전 버전 이미지로 되돌려도 `thr_doc_chunk_v2`는 지우지 않는다 — 되돌린 ETL도 별칭이 가리키는 v2에 쓴다. ETL은 한 대로 띄운다(여러 대면 인덱스 이전이 겹친다).
+- 다시 만들기가 생기기 전 버전의 ETL로 되돌리면, 그 ETL은 대기 중인 다시 만들기 회차를 모두 취소한다(운영자 요청은 `COMPLETED`로 남아 성공한 것처럼 보인다). 되돌리기 전에 `GET /api/platform/rag/rebuilds`의 `remaining`이 0인지 보고, 새 버전을 다시 올린 뒤 필요하면 운영자 요청을 다시 한다. DB는 되돌리지 않는다 — 추가된 컬럼·테이블은 이전 코드가 쓰지 않는다. 자동 복구가 "처리 실패"로 바꾼 문서는 이전 화면의 "다시 처리"로 고칠 수 있고, 남은 조각은 새 버전을 다시 올리면 정리된다.
 
 ## Keycloak 관리 클라이언트와 권한 변경 감사
 
