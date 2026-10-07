@@ -17,7 +17,9 @@ public final class ThreadDocumentStates {
 			"PENDING", Set.of("PROCESSING"),
 			"PROCESSING", Set.of("READY", "FAILED"),
 			// 사용자 재처리(#340). 등록 사건이 있는 문서만 호출자가 넘긴다.
-			"FAILED", Set.of("PENDING"));
+			"FAILED", Set.of("PENDING"),
+			// 조각이 없어진 READY 문서의 자동 복구(RECOVER 회차)가 실패했다(#348). 사용자에게 "처리 실패"와 다시 처리 버튼을 보인다.
+			"READY", Set.of("FAILED"));
 
 	private ThreadDocumentStates() {
 	}

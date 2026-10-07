@@ -311,6 +311,14 @@ export function ThreadDocuments({
                     {Math.ceil(doc.size / 1024)}KB
                     {doc.pinned ? ' · 고정됨' : ''}
                   </p>
+                  {doc.status === 'FAILED' && doc.pinned && (
+                    // 검색 준비가 됐던 문서도 원본에서 다시 만들지 못하면 실패가 된다(#348). 고정돼 있어도 답변에서 빠진다는 것을 알린다.
+                    <p className="text-xs text-destructive">
+                      {doc.canReprocess
+                        ? '답변에 쓰이지 않습니다. 다시 처리해 주세요.'
+                        : '답변에 쓰이지 않습니다. 올린 사람이나 방장이 다시 처리할 수 있어요.'}
+                    </p>
+                  )}
                 </div>
                 <Button
                   type="button"

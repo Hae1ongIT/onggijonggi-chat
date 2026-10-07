@@ -138,7 +138,8 @@ public class ThreadDocumentService {
 	public ThreadDocumentScope searchScope(UUID thread, CurrentActor actor) {
 		return transactions.execute(tx -> {
 			Access access = access(thread, actor, false);
-			// 문서마다 가장 최근 완료 회차 하나. 재처리 직후에는 이전 완료 회차가 정리 전까지 함께 남아 있다.
+			// 문서마다 가장 최근 완료 회차 하나. 재처리·다시 만들기 직후에는 이전 완료 회차가 정리 전까지(유예 2분 이상) 함께 남아 있다.
+			// ETL RebuildStore의 "현재 회차"(CANDIDATES)와 같은 정의다 — 한쪽을 바꾸면 다른 쪽도 맞춘다.
 			List<ThreadDocumentScope.Target> targets = jdbc.query("""
 					select * from (
 					  select distinct on (d.id) d.id, d.file_name, d.created_at, r.run_seq, r.emb_mdl, r.emb_dim from thr_doc d
@@ -297,6 +298,8 @@ public class ThreadDocumentService {
 		// 재처리 전이(FAILED→PENDING)는 회차 생성·사건 기록과 한 트랜잭션이어야 해서 change(REPROCESSED)로만 연다.
 		// 여기서 열면 회차 없는 PENDING 문서가 생겨 ETL이 영영 집지 않는다.
 		if (next.equals("PENDING")) throw new IllegalArgumentException("재처리는 change(REPROCESSED)로만 연다");
+		// READY→FAILED는 ETL 자동 복구(#348)만 쓴다 — 공용 전이표에 열려 있어도 BFF가 검색 중인 문서를 실패로 돌리지 않게 막는다.
+		if (expected.equals("READY")) throw new IllegalArgumentException("READY 문서의 처리 상태는 BFF가 바꾸지 않는다");
 		return transactions.execute(tx -> ThreadDocumentStates.transition(jdbc, id, expected, next));
 	}
 

@@ -153,6 +153,40 @@ class ChunkIndexTest {
 		}
 	}
 
+	/** 자동 복구(#348)의 대조: 문서마다 현재 회차만 세고, 일부 샤드만 답한 집계는 쓰지 않으며, 별칭이 없으면 다시 준비하게 한다. */
+	@Test
+	void currentRunCountsAreReadAndAnIncompleteOrMissingIndexIsNotTreatedAsEmpty() {
+		UUID doc = job.document();
+		es.reply("/thr_doc_chunk/_search", 200, "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"docs\":{\"buckets\":["
+				+ "{\"key\":\"" + doc + "\",\"doc_count\":3}]}}}");
+		assertThat(index.runCounts(java.util.Map.of(doc, 2))).containsExactly(java.util.Map.entry(doc, 3L));
+		assertThat(es.requests.get(es.requests.size() - 1).body()).as("그 문서의 현재 회차만 센다").contains("\"run_seq\":2").contains(doc.toString());
+		assertThat(index.runCounts(java.util.Map.of())).isEmpty();
+		UUID other = UUID.randomUUID();
+		index.runCounts(java.util.Map.of(doc, 2, other, 1));
+		tools.jackson.databind.JsonNode sent = JsonMapper.builder().build().readTree(es.requests.get(es.requests.size() - 1).body());
+		assertThat(sent.path("query").path("bool").path("should").size()).as("문서마다 (문서, 현재 회차) 하나씩").isEqualTo(2);
+		assertThat(sent.path("aggs").path("docs").path("terms").path("size").asInt()).isEqualTo(2);
+
+		for (String incomplete : List.of("{\"timed_out\":true,\"_shards\":{\"failed\":0},\"aggregations\":{\"docs\":{\"buckets\":[]}}}",
+				"{\"timed_out\":false,\"_shards\":{\"failed\":0}}")) {
+			es.reply("/thr_doc_chunk/_search", 200, incomplete);
+			assertThatThrownBy(() -> index.runCounts(java.util.Map.of(doc, 2)))
+					.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+		}
+
+		es.reply("/thr_doc_chunk/_search", 200, "{\"timed_out\":false,\"_shards\":{\"failed\":1},\"aggregations\":{\"docs\":{\"buckets\":[]}}}");
+		assertThatThrownBy(() -> index.runCounts(java.util.Map.of(doc, 2)))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+
+		index.ensure();
+		assertThat(index.prepared()).isTrue();
+		es.reply("/thr_doc_chunk/_search", 404, "{}");
+		assertThatThrownBy(() -> index.runCounts(java.util.Map.of(doc, 2)))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+		assertThat(index.prepared()).as("다음 준비 때 인덱스를 다시 만든다").isFalse();
+	}
+
 	@Test
 	void partialOrTimedOutDeletionIsNotTreatedAsDone() {
 		es.reply("/thr_doc_chunk/_delete_by_query", 200, "{\"timed_out\":false,\"failures\":[{\"cause\":\"shard\"}]}");

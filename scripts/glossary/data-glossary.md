@@ -83,6 +83,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `qst` | `question` | 질문 | 알고리즘 | - |
 | `rank` | `rank` | 직급 | 알고리즘 | - |
 | `rsn` | `reason` | 사유 | 알고리즘 | - |
+| `rbl` | `rebuild` | 다시 만들기 | 알고리즘 | - |
 | `ref` | `reference` | 참조 | 예외 | 관용어 — 알고리즘 결과 `rfr`이 의미 불명확 |
 | `rpl` | `reply` | 답글 | 알고리즘 | - |
 | `req` | `requester` | 요청자 | 예외 | 관용어 — 알고리즘은 `rqs` |

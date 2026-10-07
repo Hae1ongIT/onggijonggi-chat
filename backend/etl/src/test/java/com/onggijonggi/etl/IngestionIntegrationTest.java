@@ -72,6 +72,10 @@ class IngestionIntegrationTest {
 		registry.add("app.etl.retry-delays", () -> "200ms,200ms");
 		registry.add("app.etl.poll-delay", () -> "100ms");
 		registry.add("app.etl.sweep-delay", () -> "300ms");
+		// 다시 만들기 주기는 테스트가 직접 부른다 — 저절로 돌면 다른 테스트의 회차 번호·건수가 흔들린다.
+		registry.add("app.etl.rebuild-delay", () -> "1h");
+		// 대체된 회차 정리 유예(운영 2분)를 없애 정리 결과를 바로 본다. 유예 자체는 RebuildStoreTest가 본다.
+		registry.add("app.etl.superseded-grace", () -> "0s");
 		// 운영 기본값과 같은 2개 스레드로 돌려 선점 경합도 함께 지난다.
 		registry.add("app.etl.concurrency", () -> "2");
 		registry.add("app.etl.embedding.batch-size", () -> "4");
@@ -82,6 +86,7 @@ class IngestionIntegrationTest {
 	@Autowired JdbcTemplate jdbc;
 	@Autowired ObjectMapper json;
 	@Autowired RunStore runStore;
+	@Autowired ChunkRebuilder rebuilder;
 
 	@AfterEach
 	void reset() {
@@ -255,6 +260,57 @@ class IngestionIntegrationTest {
 
 		await(() -> "READY".equals(status(doc)));
 		assertThat(run(doc, 1)).containsEntry("status", "DONE").containsEntry("att_cnt", 1);
+	}
+
+	/** #348: 운영자 전체 재처리 — 새 회차를 만드는 동안 문서는 READY로 이전 회차 청크가 검색되고, 끝나면 새 회차로 바뀌고 이전 회차가 정리된다. */
+	@Test
+	void operatorRebuildKeepsTheOldChunksSearchableUntilTheNewRunIsDone() {
+		Fixture doc = register("전체재처리.txt", "다시 만드는 동안에도 검색된다. ".repeat(40));
+		await(() -> "READY".equals(status(doc)));
+		onlyThisDocumentIsLive(doc);
+		long before = count(doc);
+		FAKE.embeddingGate = new CountDownLatch(1);
+		UUID request = UUID.randomUUID();
+		jdbc.update("insert into doc_rbl(id, kind, status, req_subj) values (?, 'ALL', 'PENDING', 'admin')", request);
+
+		rebuilder.tick();
+
+		await("새 회차가 임베딩에서 멈춤", () -> jdbc.queryForObject("select count(*) from thr_doc_run where doc_id=? and run_seq=2 and status='RUNNING'",
+				Integer.class, doc.id) == 1);
+		assertThat(status(doc)).isEqualTo("READY");
+		assertThat(count(doc)).as("이전 회차 청크가 그대로 있다").isEqualTo(before);
+		assertThat(jdbc.queryForMap("select status, trg_cnt from doc_rbl where id=?", request).get("status")).isEqualTo("COMPLETED");
+		FAKE.embeddingGate.countDown();
+		FAKE.embeddingGate = null;
+
+		await(() -> "PURGED".equals(run(doc, 1).get("status")));
+		assertThat(run(doc, 2)).containsEntry("status", "DONE").containsEntry("run_kind", "REBUILD").containsEntry("rbl_id", request);
+		assertThat(status(doc)).isEqualTo("READY");
+		assertThat(count(doc)).isEqualTo(((Integer) run(doc, 2).get("chunk_cnt")).longValue());
+	}
+
+	/** #348: 검색 인덱스가 통째로 지워져도 운영자 조작 없이 빠진 문서를 원본에서 다시 만든다. 그동안 문서는 READY 그대로다. */
+	@Test
+	void documentsWhoseChunksVanishedWithTheIndexAreRecoveredFromTheirSources() {
+		Fixture doc = register("자동복구.txt", "인덱스가 지워져도 다시 만들어진다. ".repeat(40));
+		await(() -> "READY".equals(status(doc)));
+		onlyThisDocumentIsLive(doc);
+		es().delete().uri("/thr_doc_chunk_v2").retrieve().toBodilessEntity();
+
+		rebuilder.verify();
+		rebuilder.tick();
+
+		await("복구 회차 완료", () -> {
+			assertThat(status(doc)).as("복구하는 동안에도 READY").isEqualTo("READY");
+			return "DONE".equals(jdbc.queryForObject("select status from thr_doc_run where doc_id=? and run_seq=2", String.class, doc.id));
+		});
+		assertThat(run(doc, 2)).containsEntry("run_kind", "RECOVER");
+		assertThat(count(doc)).isEqualTo(((Integer) run(doc, 2).get("chunk_cnt")).longValue());
+	}
+
+	/** 앞 테스트들이 남긴 문서를 지운 것으로 둔다 — 전체 재처리·자동 복구가 원본이 이미 없는 그 문서들까지 잡아 결과가 섞이지 않게. */
+	private void onlyThisDocumentIsLive(Fixture doc) {
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id <> ? and status <> 'DELETED'", doc.id);
 	}
 
 	private record Fixture(UUID id, UUID tenant, UUID thread) { }

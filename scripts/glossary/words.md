@@ -97,6 +97,7 @@
 | `question` | 질문 |
 | `rank` | 직급 |
 | `reason` | 사유 |
+| `rebuild` | 다시 만들기 |
 | `reply` | 답글 |
 | `requester` | 요청자 |
 | `risk` | 위험 |

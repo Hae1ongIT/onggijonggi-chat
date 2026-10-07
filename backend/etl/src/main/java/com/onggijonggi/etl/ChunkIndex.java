@@ -103,6 +103,11 @@ public class ChunkIndex {
 		ensured = true;
 	}
 
+	/** 인덱스 준비(생성·이전)가 끝났는가. 자동 복구는 끝나기 전에는 대조하지 않는다 — 이전 중 새 인덱스의 건수는 모자라 보인다. */
+	public boolean prepared() {
+		return ensured;
+	}
+
 	/** 인덱스 이전 작업이 진행 중인가(상태 조회가 끊겨 다음 시도를 기다리는 중 포함). 정리 작업은 이때 지우지 않고 기다린다. */
 	public boolean migrating() {
 		return pendingTask != null;
@@ -281,6 +286,37 @@ public class ChunkIndex {
 			// 적재와 대조 사이에 인덱스가 지워졌다. 다음 시도에서 다시 만들어 처음부터 적재한다.
 			ensured = false;
 			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 별칭이 없다 — 다음 시도에서 다시 만든다", aliasMissing);
+		} catch (RuntimeException error) {
+			throw HttpCalls.classify("INDEX", error);
+		}
+	}
+
+	/**
+	 * 문서마다 지정한 회차(현재 회차)에 적재된 청크 수(자동 복구의 대조용). 정리 전 지난 회차의 청크는 세지 않는다 — 회차별로 묶으면
+	 * 남은 회차가 많을 때 현재 회차가 집계 상위에서 잘려 멀쩡한 문서가 빠진 것으로 보인다. 하나도 없는 문서는 키가 없다(0건).
+	 * 별칭이 없으면(인덱스가 지워짐) 다음 준비 때 다시 만들도록 표시하고 일시 실패로 끝낸다 — 호출자는 그 주기를 건너뛴다.
+	 */
+	public Map<UUID, Long> runCounts(Map<UUID, Integer> runs) {
+		if (runs.isEmpty()) return Map.of();
+		List<Object> pairs = runs.entrySet().stream().<Object>map(run -> Map.of("bool", Map.of("filter", List.of(
+				Map.of("term", Map.of(DOC_ID, run.getKey().toString())), Map.of("term", Map.of(RUN_SEQ, run.getValue())))))).toList();
+		var body = Map.of("size", 0,
+				"query", Map.of("bool", Map.of("should", pairs, "minimum_should_match", 1)),
+				"aggs", Map.of("docs", Map.of("terms", Map.of("field", DOC_ID, "size", runs.size()))));
+		try {
+			JsonNode response = json.readTree(client.post().uri("/{alias}/_search", settings.alias())
+					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(body))).retrieve().body(String.class));
+			// 일부 샤드만 답하면 적은 수가 "조각 없음"으로 보여 멀쩡한 문서를 다시 만든다. 그 주기는 버린다.
+			if (response.path("timed_out").asBoolean(false) || response.path("_shards").path("failed").asInt(0) > 0
+					|| !response.path("aggregations").path("docs").path("buckets").isArray())
+				throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "청크 수 집계가 불완전하다", null);
+			Map<UUID, Long> counts = new LinkedHashMap<>();
+			for (JsonNode doc : response.path("aggregations").path("docs").path("buckets"))
+				counts.put(UUID.fromString(doc.path("key").asString()), doc.path("doc_count").asLong());
+			return counts;
+		} catch (HttpClientErrorException.NotFound aliasMissing) {
+			ensured = false;
+			throw EtlFailure.transientFailure("INDEX_UNAVAILABLE", "검색 인덱스 별칭이 없다 — 다음 준비 때 다시 만든다", aliasMissing);
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("INDEX", error);
 		}

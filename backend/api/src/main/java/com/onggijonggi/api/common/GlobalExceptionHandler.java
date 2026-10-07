@@ -6,6 +6,7 @@ import com.onggijonggi.api.chat.IdempotencyKeyConflictException;
 import com.onggijonggi.api.chat.InviteeOutsideWorkspaceException;
 import com.onggijonggi.api.chat.MsgFileRejectedException;
 import com.onggijonggi.api.chat.ThreadDocumentException;
+import com.onggijonggi.api.rag.ChunkRebuildInProgressException;
 import com.openai.errors.OpenAIServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -128,6 +129,13 @@ public class GlobalExceptionHandler {
 			return handleUnexpected(ex, exchange);
 		return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE)
 				.body(ErrorResponse.of("FILE_TOO_LARGE", "파일이 너무 큽니다.", traceId(exchange)));
+	}
+
+	/** 진행 중인 방 문서 일괄 재처리가 있어 새 요청을 받지 않았다(#348). 운영자 전용 API라 진행 중 요청 ID를 문구에 그대로 담는다. */
+	@ExceptionHandler(ChunkRebuildInProgressException.class)
+	public ResponseEntity<ErrorResponse> handleRebuildInProgress(ChunkRebuildInProgressException ex, ServerWebExchange exchange) {
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+				.body(ErrorResponse.of("REBUILD_IN_PROGRESS", ex.getReason(), traceId(exchange)));
 	}
 
 	/** Workspace·부여·org-unit 관리(#260)가 현재 권한 구성 상태 때문에 거부된 경우(선언 리소스, 마지막 ADMIN, 남은 방 등).
