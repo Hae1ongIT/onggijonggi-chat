@@ -19,9 +19,30 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Component
 public class RunStore {
 
-	/** 선점한 회차와 처리에 필요한 문서 snapshot. digest·attempt는 원본 위치, fileName은 추출 형식을 정한다. */
+	/** 문서 상태를 PENDING → PROCESSING → READY|FAILED로 바꾸는 처리(최초 처리·사용자 재처리). */
+	public static final String INGEST = "INGEST";
+	/** READY 문서의 조각을 상태를 바꾸지 않고 다시 만든다(설정 변경·운영자 요청). 실패해도 이전 조각이 남아 문서는 READY 그대로다. */
+	public static final String REBUILD = "REBUILD";
+	/** 조각이 없어진 READY 문서를 다시 만든다(자동 복구). 실패하면 검색할 조각이 없으므로 문서를 FAILED로 바꾼다. */
+	public static final String RECOVER = "RECOVER";
+
+	/**
+	 * 선점한 회차와 처리에 필요한 문서 snapshot. digest·attempt는 원본 위치, fileName은 추출 형식을 정한다.
+	 * kind는 회차 종류(INGEST·REBUILD·RECOVER) — 처리 중 문서가 어느 상태여야 하는지와 실패 처리를 정한다.
+	 */
 	public record Job(UUID run, UUID document, UUID tenant, UUID thread, int runSeq, int attempts,
-			String fileName, String digest, UUID sourceAttempt) { }
+			String fileName, String digest, UUID sourceAttempt, String kind) {
+
+		public Job(UUID run, UUID document, UUID tenant, UUID thread, int runSeq, int attempts,
+				String fileName, String digest, UUID sourceAttempt) {
+			this(run, document, tenant, thread, runSeq, attempts, fileName, digest, sourceAttempt, INGEST);
+		}
+
+		/** 처리하는 동안 문서가 있어야 하는 상태. INGEST는 처리 중(PROCESSING), 다시 만들기는 READY 그대로다. */
+		String workingStatus() {
+			return INGEST.equals(kind) ? "PROCESSING" : "READY";
+		}
+	}
 
 	/** 정리 대상 회차. */
 	public record Stale(UUID run, UUID document, int runSeq) { }
@@ -59,14 +80,15 @@ public class RunStore {
 	private Claim claimOne(Duration lease, int maxAttempts) {
 		// 후보는 잠그지 않고 고른 뒤 문서 → 회차 순서로 잠근다(A의 등록·재처리와 같은 순서라 교착이 없다).
 		// 다른 워커가 같은 회차를 잡고 있으면 회차 잠금에서 건너뛰고 다음 후보를 본다.
+		// 사용자가 올리거나 다시 처리한 문서(INGEST)를 먼저 집는다 — 일괄 다시 만들기가 수백 건 쌓여도 새 문서가 뒤로 밀리지 않는다.
 		var candidates = jdbc.queryForList("select id, doc_id from thr_doc_run where status in ('PENDING', 'RUNNING')"
-				+ " and next_at <= now() order by next_at, id limit " + CANDIDATES);
+				+ " and next_at <= now() order by case when run_kind = 'INGEST' then 0 else 1 end, next_at, id limit " + CANDIDATES);
 		if (candidates.isEmpty()) return null;
 		for (var candidate : candidates) {
 			UUID run = (UUID) candidate.get("id");
 			UUID document = (UUID) candidate.get("doc_id");
 			var docs = jdbc.queryForList("select status, file_name, src_key, src_att_id from thr_doc where id = ? for update", document);
-			var locked = jdbc.queryForList("select status, att_cnt from thr_doc_run where id = ? and status in ('PENDING', 'RUNNING')"
+			var locked = jdbc.queryForList("select status, att_cnt, run_kind from thr_doc_run where id = ? and status in ('PENDING', 'RUNNING')"
 					+ " and next_at <= now() for update skip locked", run);
 			if (locked.isEmpty()) continue;
 			return lockedClaim(run, document, docs, locked.get(0), lease, maxAttempts);
@@ -84,13 +106,20 @@ public class RunStore {
 		}
 		// 시한이 지난 RUNNING은 처리 중에 워커가 죽은 회차다. 실패 처리(handle)를 거치지 못했으므로 시도 상한을 여기서 본다 —
 		// 프로세스를 죽이는 문서(메모리 초과 등)가 시한마다 다시 집혀 워커를 계속 죽이지 않게 한다.
+		String kind = (String) current.get("run_kind");
 		if ("RUNNING".equals(current.get("status")) && (Integer) current.get("att_cnt") >= maxAttempts) {
-			ThreadDocumentStates.transition(jdbc, document, "PROCESSING", "FAILED");
-			jdbc.update("update thr_doc_run set status = 'FAILED', err = 'RETRY_EXHAUSTED', updated_at = now() where id = ?", run);
+			failLocked(run, document, kind, "RETRY_EXHAUSTED");
 			return new Claim(null);
 		}
+		if (!INGEST.equals(kind)) {
+			// 다시 만들기는 READY 문서에만 한다. 그사이 실패·재처리로 상태가 바뀌었으면 그쪽 처리에 맡긴다.
+			if (!status.equals("READY")) {
+				jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ?", run);
+				return new Claim(null);
+			}
+		}
 		// 처음 집는 회차면 문서를 처리 중으로 바꾼다. 죽은 워커의 회차를 다시 집는 경우 문서는 이미 PROCESSING이다.
-		if (status.equals("PENDING")) ThreadDocumentStates.transition(jdbc, document, "PENDING", "PROCESSING");
+		else if (status.equals("PENDING")) ThreadDocumentStates.transition(jdbc, document, "PENDING", "PROCESSING");
 		else if (!status.equals("PROCESSING")) {
 			// READY·FAILED 문서에 남은 회차(운영 중 수동 조작 등)는 처리하지 않는다.
 			jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ?", run);
@@ -101,14 +130,14 @@ public class RunStore {
 		var row = jdbc.queryForMap("select tnn_id, thr_id, run_seq, att_cnt from thr_doc_run where id = ?", run);
 		var doc = docs.get(0);
 		return new Claim(new Job(run, document, (UUID) row.get("tnn_id"), (UUID) row.get("thr_id"), (Integer) row.get("run_seq"),
-				(Integer) row.get("att_cnt"), (String) doc.get("file_name"), (String) doc.get("src_key"), (UUID) doc.get("src_att_id")));
+				(Integer) row.get("att_cnt"), (String) doc.get("file_name"), (String) doc.get("src_key"), (UUID) doc.get("src_att_id"), kind));
 	}
 
-	/** 단계 사이에 선점 시한을 늘린다. 문서가 아직 처리 중이면 true — false면 그사이 삭제·취소된 것이다. */
+	/** 단계 사이에 선점 시한을 늘린다. 문서가 아직 처리할 상태면 true — false면 그사이 삭제·취소된 것이다. */
 	public boolean extend(Job job, Duration lease) {
 		Boolean alive = transactions.execute(tx -> {
 			var docs = jdbc.queryForList("select status from thr_doc where id = ?", job.document());
-			if (docs.isEmpty() || !"PROCESSING".equals(docs.get(0).get("status"))) return false;
+			if (docs.isEmpty() || !job.workingStatus().equals(docs.get(0).get("status"))) return false;
 			return jdbc.update("update thr_doc_run set next_at = now() + ? * interval '1 millisecond', updated_at = now()"
 					+ " where id = ? and status = 'RUNNING' and att_cnt = ?", lease.toMillis(), job.run(), job.attempts()) == 1;
 		});
@@ -121,9 +150,13 @@ public class RunStore {
 	 */
 	public boolean complete(Job job, int chunks, String model, int dimensions, String chunking) {
 		Boolean done = transactions.execute(tx -> {
-			jdbc.queryForList("select id from thr_doc where id = ? for update", job.document());
+			var docs = jdbc.queryForList("select status from thr_doc where id = ? for update", job.document());
 			if (!owned(job)) return false;
-			if (!ThreadDocumentStates.transition(jdbc, job.document(), "PROCESSING", "READY")) {
+			// 다시 만들기는 문서 상태를 바꾸지 않는다 — 회차가 DONE이 되는 순간 검색(가장 큰 DONE 회차)이 새 조각으로 넘어간다.
+			boolean kept = INGEST.equals(job.kind())
+					? ThreadDocumentStates.transition(jdbc, job.document(), "PROCESSING", "READY")
+					: !docs.isEmpty() && "READY".equals(docs.get(0).get("status"));
+			if (!kept) {
 				jdbc.update("update thr_doc_run set status = 'CANCELLED', updated_at = now() where id = ?", job.run());
 				return false;
 			}
@@ -134,15 +167,27 @@ public class RunStore {
 		return Boolean.TRUE.equals(done);
 	}
 
-	/** 최종 실패. 문서를 FAILED로 두고 회차에 사유 코드를 남긴다. 적재했던 청크는 정리 작업이 지운다. */
+	/** 최종 실패. 회차에 사유 코드를 남기고 회차 종류에 따라 문서를 FAILED로 둔다(failLocked). 적재했던 청크는 정리 작업이 지운다. */
 	public void fail(Job job, String code) {
 		transactions.executeWithoutResult(tx -> {
 			jdbc.queryForList("select id from thr_doc where id = ? for update", job.document());
 			if (!owned(job)) return;
-			// 그사이 삭제된 문서면 실패가 아니라 취소다(complete와 같은 기록). 청크는 어느 쪽이든 정리 작업이 지운다.
-			String status = ThreadDocumentStates.transition(jdbc, job.document(), "PROCESSING", "FAILED") ? "FAILED" : "CANCELLED";
-			jdbc.update("update thr_doc_run set status = ?, err = ?, updated_at = now() where id = ?", status, code, job.run());
+			failLocked(job.run(), job.document(), job.kind(), code);
 		});
+	}
+
+	/**
+	 * 문서 잠금 안에서 회차를 실패로 끝낸다. INGEST·RECOVER는 문서를 FAILED로 바꾼다 — 검색할 조각이 없으므로 사용자에게 "처리 실패"와
+	 * 다시 처리 버튼을 보인다. REBUILD는 이전 회차 조각이 남아 검색이 되므로 문서를 READY로 둔다. 그사이 삭제·상태가 바뀐 문서면
+	 * 실패가 아니라 취소다(complete와 같은 기록). 청크는 어느 쪽이든 정리 작업이 지운다.
+	 */
+	private void failLocked(UUID run, UUID document, String kind, String code) {
+		boolean failed = switch (kind) {
+			case REBUILD -> !jdbc.queryForList("select id from thr_doc where id = ? and status = 'READY'", document).isEmpty();
+			case RECOVER -> ThreadDocumentStates.transition(jdbc, document, "READY", "FAILED");
+			default -> ThreadDocumentStates.transition(jdbc, document, "PROCESSING", "FAILED");
+		};
+		jdbc.update("update thr_doc_run set status = ?, err = ?, updated_at = now() where id = ?", failed ? "FAILED" : "CANCELLED", code, run);
 	}
 
 	/** 일시 오류. 문서는 PROCESSING(처리 중)으로 둔 채 회차만 다음 시도 시각으로 미룬다. */

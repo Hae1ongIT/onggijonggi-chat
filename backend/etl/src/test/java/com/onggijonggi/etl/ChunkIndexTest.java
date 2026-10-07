@@ -153,6 +153,26 @@ class ChunkIndexTest {
 		}
 	}
 
+	/** 자동 복구(#348)의 대조: 회차별 청크 수를 읽고, 일부 샤드만 답한 집계는 쓰지 않으며, 별칭이 없으면 다시 준비하게 한다. */
+	@Test
+	void runCountsAreReadPerRunAndAnIncompleteOrMissingIndexIsNotTreatedAsEmpty() {
+		UUID doc = job.document();
+		es.reply("/thr_doc_chunk/_search", 200, "{\"timed_out\":false,\"_shards\":{\"failed\":0},\"aggregations\":{\"docs\":{\"buckets\":["
+				+ "{\"key\":\"" + doc + "\",\"runs\":{\"buckets\":[{\"key\":1,\"doc_count\":3},{\"key\":2,\"doc_count\":1}]}}]}}}");
+		assertThat(index.runCounts(List.of(doc))).containsEntry(ChunkIndex.runKey(doc, 1), 3L).containsEntry(ChunkIndex.runKey(doc, 2), 1L);
+		assertThat(index.runCounts(List.of())).isEmpty();
+
+		es.reply("/thr_doc_chunk/_search", 200, "{\"timed_out\":false,\"_shards\":{\"failed\":1},\"aggregations\":{\"docs\":{\"buckets\":[]}}}");
+		assertThatThrownBy(() -> index.runCounts(List.of(doc)))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+
+		index.ensure();
+		assertThat(index.prepared()).isTrue();
+		es.reply("/thr_doc_chunk/_search", 404, "{}");
+		assertThatThrownBy(() -> index.runCounts(List.of(doc))).isInstanceOf(EtlFailure.class);
+		assertThat(index.prepared()).as("다음 준비 때 인덱스를 다시 만든다").isFalse();
+	}
+
 	@Test
 	void partialOrTimedOutDeletionIsNotTreatedAsDone() {
 		es.reply("/thr_doc_chunk/_delete_by_query", 200, "{\"timed_out\":false,\"failures\":[{\"cause\":\"shard\"}]}");

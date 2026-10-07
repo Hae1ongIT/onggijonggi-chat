@@ -61,7 +61,7 @@ public class IngestionPipeline {
 				log.info("처리 중 삭제된 문서라 결과를 버린다: doc={} run={}", job.document(), job.runSeq());
 				return;
 			}
-			log.info("문서 처리 완료: doc={} run={} chunks={}", job.document(), job.runSeq(), chunks.size());
+			log.info("문서 처리 완료: doc={} run={} kind={} chunks={}", job.document(), job.runSeq(), job.kind(), chunks.size());
 		} catch (Abandoned abandoned) {
 			runs.cancel(job);
 			log.info("처리 중 삭제된 문서라 멈춘다: doc={} run={}", job.document(), job.runSeq());

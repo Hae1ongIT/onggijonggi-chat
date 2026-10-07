@@ -29,6 +29,7 @@ export type BffErrorCode =
   | 'DOCUMENT_STATE_CONFLICT' // 409 CORE — 방 문서가 잠긴 방·업로드 중·이미 그 상태라 지금은 바꿀 수 없음
   | 'DOCUMENT_STORAGE_UNAVAILABLE' // 503 CORE — 방 문서 원본 저장소(문서 워커)에 저장·조회하지 못함
   | 'SERVICE_UNAVAILABLE' // 503 CORE·WS — 새 대화를 놓을 고객사(Tenant)를 정할 수 없음(서버 설정 문제)
+  | 'REBUILD_IN_PROGRESS' // 409 CORE — 방 문서 일괄 재처리가 이미 진행 중(운영자 전용 API, 화면에서 부르지 않음)
   | 'KEYCLOAK_ADMIN_UNAVAILABLE'; // 503 CORE — BFF의 Keycloak 관리 클라이언트 설정 문제(토큰 발급 거부·역할 누락)
 
 export interface BffErrorEnvelope {
@@ -73,6 +74,9 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   // 재시도로 풀리지 않는다 — 새 대화를 놓을 조직 설정이 서버에 아직 없거나 둘 이상이라 관리자가 고쳐야 한다.
   SERVICE_UNAVAILABLE:
     '지금은 새 대화를 만들 수 없어요. 서버의 조직 설정이 준비되지 않았으니 관리자에게 문의해 주세요.',
+  // 운영자 전용 API(#348)라 화면에서 부르지 않는다. 코드 목록과 맞추려고 둔다.
+  REBUILD_IN_PROGRESS:
+    '이미 진행 중인 재처리가 있어요. 끝난 뒤 다시 시도해 주세요.',
   // 재시도로 풀리지 않는다 — 서버의 Keycloak 관리 클라이언트 id·secret이나 역할이 맞지 않는다(#326). 일반 사용자의
   // 초대 검색에서도 나오므로 client id·secret 같은 설정 항목은 밝히지 않고 관리자에게 넘긴다.
   KEYCLOAK_ADMIN_UNAVAILABLE:
