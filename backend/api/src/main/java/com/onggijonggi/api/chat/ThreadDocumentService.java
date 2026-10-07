@@ -298,6 +298,8 @@ public class ThreadDocumentService {
 		// 재처리 전이(FAILED→PENDING)는 회차 생성·사건 기록과 한 트랜잭션이어야 해서 change(REPROCESSED)로만 연다.
 		// 여기서 열면 회차 없는 PENDING 문서가 생겨 ETL이 영영 집지 않는다.
 		if (next.equals("PENDING")) throw new IllegalArgumentException("재처리는 change(REPROCESSED)로만 연다");
+		// READY→FAILED는 ETL 자동 복구(#348)만 쓴다 — 공용 전이표에 열려 있어도 BFF가 검색 중인 문서를 실패로 돌리지 않게 막는다.
+		if (expected.equals("READY")) throw new IllegalArgumentException("READY 문서의 처리 상태는 BFF가 바꾸지 않는다");
 		return transactions.execute(tx -> ThreadDocumentStates.transition(jdbc, id, expected, next));
 	}
 

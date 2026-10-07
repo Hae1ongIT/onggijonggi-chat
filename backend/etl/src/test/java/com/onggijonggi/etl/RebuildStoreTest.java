@@ -197,7 +197,33 @@ class RebuildStoreTest {
 		assertThat(status(doc)).isEqualTo("READY");
 		assertThat(jdbc.queryForMap("select status, err from thr_doc_run where doc_id = ? and run_seq = 2", doc))
 				.containsEntry("status", "FAILED").containsEntry("err", "RETRY_EXHAUSTED:EMBEDDING_UNAVAILABLE");
-		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).as("다음 대조가 다시 만든다").isTrue();
+		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).as("바로 다시 잡지 않는다 — 한 시간에 한 번").isFalse();
+		jdbc.update("update thr_doc_run set updated_at = now() - interval '2 hours' where doc_id = ? and run_seq = 2", doc);
+		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).as("장애가 풀렸을 때를 위해 나중에 다시 만든다").isTrue();
+	}
+
+	/** 인덱스·임베딩 서버가 거절하는 설정 실수는 영구 오류로 분류돼도 문서 탓이 아니다 — 자동 복구가 문서를 처리 실패로 바꾸지 않는다. */
+	@Test
+	void aRecoveryRejectedByMisconfiguredInfrastructureLeavesTheDocumentReady() throws SQLException {
+		UUID doc = readyDocument("bge-m3", 1024, "800/1200/100");
+		assertThat(rebuilds.queueRecover(new RebuildStore.CurrentRun(doc, 1, 3))).isTrue();
+
+		runs.fail(runs.claim(LEASE, 5), "INDEX_REJECTED");
+
+		assertThat(status(doc)).isEqualTo("READY");
+	}
+
+	/** 조각이 사라진 문서의 복구(RECOVER)는 설정 변경 다시 만들기(REBUILD)보다 먼저 집는다 — REBUILD 대상은 이전 조각으로 검색된다. */
+	@Test
+	void recoveriesAreClaimedBeforeRebuilds() throws SQLException {
+		UUID rebuilt = readyDocument("old-model", 1024, "800/1200/100");
+		rebuilds.queueOutdated("bge-m3", 1024, "800/1200/100", 10);
+		jdbc.update("update thr_doc_run set next_at = now() - interval '1 hour' where run_kind = 'REBUILD'");
+		UUID lost = readyDocument("bge-m3", 1024, "800/1200/100");
+		rebuilds.queueRecover(new RebuildStore.CurrentRun(lost, 1, 3));
+
+		assertThat(runs.claim(LEASE, 5).document()).isEqualTo(lost);
+		assertThat(runs.claim(LEASE, 5).document()).isEqualTo(rebuilt);
 	}
 
 	/** 자동 설정 변경 재처리는 이미 실패한 문서를 다시 잡지 않는다 — 금방 실패하는 문서만 주기마다 돌며 뒤 문서를 막지 않게. */
@@ -272,7 +298,8 @@ class RebuildStoreTest {
 		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status) values (?, ?, ?, ?, 1, 'PENDING')",
 				UUID.randomUUID(), c, UUID.randomUUID(), UUID.randomUUID());
 
-		assertThat(rebuilds.backlog()).isEqualTo(2);
+		assertThat(rebuilds.backlog(RunStore.REBUILD)).isEqualTo(1);
+		assertThat(rebuilds.backlog(RunStore.RECOVER)).isEqualTo(1);
 	}
 
 	/** 자동 설정 변경 재처리가 빼는 것은 실패한 REBUILD뿐이다 — 상태가 FAILED 그대로여도 빼고, 실패한 자동 복구(RECOVER)는 빼지 않는다. */

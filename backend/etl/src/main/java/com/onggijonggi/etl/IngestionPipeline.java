@@ -17,6 +17,8 @@ import org.springframework.stereotype.Component;
 public class IngestionPipeline {
 
 	private static final Logger log = LoggerFactory.getLogger(IngestionPipeline.class);
+	/** 분류하지 못한 예외의 사유 코드. */
+	private static final String UNEXPECTED = "UNEXPECTED";
 
 	/** 처리 도중 문서가 삭제·취소됐다. 실패가 아니다. */
 	private static final class Abandoned extends RuntimeException {
@@ -68,7 +70,7 @@ public class IngestionPipeline {
 		} catch (EtlFailure failure) {
 			handle(job, failure);
 		} catch (RuntimeException unexpected) {
-			handle(job, EtlFailure.transientFailure("UNEXPECTED", String.valueOf(unexpected.getMessage()), unexpected));
+			handle(job, EtlFailure.transientFailure(UNEXPECTED, String.valueOf(unexpected.getMessage()), unexpected));
 		}
 	}
 
@@ -78,8 +80,13 @@ public class IngestionPipeline {
 			Duration delay = delays.get(job.attempts() - 1);
 			runs.retryLater(job, failure.code(), delay);
 			// 스택 없이 한 줄로 남긴다 — 임베딩 서버가 오래 끊기면 다시 만들기 회차 수천 건이 모두 여기를 지난다.
-			log.warn("문서 처리 일시 실패 — {} 뒤 다시 시도({}회째): doc={} run={} kind={} {}{}", delay, job.attempts(), job.document(),
-					job.runSeq(), job.kind(), failure.getMessage(), failure.getCause() == null ? "" : " (" + failure.getCause() + ")");
+			// 예기치 못한 오류(코드 결함)는 위치를 찾아야 하므로 스택을 남긴다.
+			if (UNEXPECTED.equals(failure.code()))
+				log.warn("문서 처리 일시 실패 — {} 뒤 다시 시도({}회째): doc={} run={} kind={} {}", delay, job.attempts(), job.document(),
+						job.runSeq(), job.kind(), failure.getMessage(), failure.getCause());
+			else
+				log.warn("문서 처리 일시 실패 — {} 뒤 다시 시도({}회째): doc={} run={} kind={} {}{}", delay, job.attempts(), job.document(),
+						job.runSeq(), job.kind(), failure.getMessage(), failure.getCause() == null ? "" : " (" + failure.getCause() + ")");
 			return;
 		}
 		// 재시도를 다 쓰면 마지막 일시 오류 코드를 함께 남긴다 — 내부 key 불일치(SOURCE_UNAUTHORIZED) 같은 원인을 DB에서 볼 수 있게 한다.

@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -28,8 +29,8 @@ public class ChunkRebuilder {
 	private static final Logger log = LoggerFactory.getLogger(ChunkRebuilder.class);
 	/** 자동으로 한 주기에 만드는 회차 수 상한(설정 변경·자동 복구 각각). 남은 것은 다음 주기에 이어서 한다. */
 	static final int AUTO_LIMIT = 200;
-	/** 다시 만들기 대기가 이만큼 넘으면 자동 경로(설정 변경·자동 복구)는 새 회차를 만들지 않고 줄기를 기다린다 — 워커(문서 2개씩)보다
-	 *  빨리 쌓으면 대기 회차만 늘어 선점·정리 비용이 커진다. 운영자 요청은 이 상한과 무관하다. */
+	/** 종류별 대기 회차가 이만큼 넘으면 그 종류의 자동 회차(REBUILD는 설정 변경, RECOVER는 자동 복구)를 만들지 않고 줄기를 기다린다 —
+	 *  워커(문서 2개씩)보다 빨리 쌓으면 대기 회차만 늘어 선점·정리 비용이 커진다. 운영자 요청은 이 상한과 무관하다. */
 	static final int BACKLOG_LIMIT = 1000;
 	/** 자동 복구가 ES에 한 번에 묻는 문서 수. */
 	static final int VERIFY_PAGE = 200;
@@ -48,6 +49,8 @@ public class ChunkRebuilder {
 	private boolean indexLost;
 	/** 상한에서 멈춘 대조를 이어서 볼 위치(마지막으로 본 문서). null이면 처음부터. */
 	private UUID resumeAfter;
+	/** 자동 경로를 미루고 있는 이유. 바뀔 때만 로그로 남긴다. null이면 돌고 있다. */
+	private String blockedReason;
 
 	public ChunkRebuilder(RebuildStore rebuilds, ChunkIndex index, EmbeddingClient embeddings, IngestionWorkers workers,
 			EtlProperties properties, @Value("${app.etl.verify-delay:10m}") Duration verifyDelay) {
@@ -61,10 +64,18 @@ public class ChunkRebuilder {
 
 	@Scheduled(fixedDelayString = "${app.etl.rebuild-delay:30s}", initialDelayString = "${app.etl.rebuild-delay:30s}")
 	public void tick() {
-		if (!workers.isRunning() || index.migrating()) return;
+		// 처리가 꺼진 것은 IngestionWorkers가 주기적으로 알린다.
+		if (!workers.isRunning()) return;
+		if (index.migrating()) {
+			blocked("검색 인덱스 이전이 끝나지 않았다");
+			return;
+		}
 		if (!index.prepared()) {
 			// 인덱스가 지워진 것을 대조 중에 봤으면 여기서 다시 만든다(별칭이 없으면 생성만 하므로 빠르다). 그 밖에는 기동 준비를 기다린다.
-			if (!indexLost) return;
+			if (!indexLost) {
+				blocked("검색 인덱스 준비가 끝나지 않았다");
+				return;
+			}
 			try {
 				index.ensure();
 				indexLost = false;
@@ -74,21 +85,37 @@ public class ChunkRebuilder {
 			}
 		}
 		handleRequests();
-		if (backlogFull()) return;
-		queueOutdated();
-		if (lastVerified == 0 || System.nanoTime() - lastVerified >= verifyDelay.toNanos()) {
+		// 상한은 종류별로 본다 — 운영자 전체 재처리로 REBUILD가 수만 건 쌓여도 자동 복구(조각이 사라져 검색이 빈 문서)는 멈추지 않는다.
+		boolean rebuildFull = backlogFull(RunStore.REBUILD);
+		boolean recoverFull = backlogFull(RunStore.RECOVER);
+		if (rebuildFull || recoverFull)
+			blocked("대기 회차가 " + BACKLOG_LIMIT + "건을 넘었다(" + (rebuildFull ? "설정 변경·운영자 다시 만들기" : "자동 복구")
+					+ (rebuildFull && recoverFull ? "·자동 복구" : "") + ") — 줄 때까지 그쪽 자동 회차를 만들지 않는다");
+		else blocked(null);
+		if (!rebuildFull) queueOutdated();
+		if (!recoverFull && (lastVerified == 0 || System.nanoTime() - lastVerified >= verifyDelay.toNanos())) {
 			lastVerified = System.nanoTime();
 			verify();
 		}
 	}
 
-	private boolean backlogFull() {
+	private boolean backlogFull(String kind) {
 		try {
-			return rebuilds.backlog() >= BACKLOG_LIMIT;
+			return rebuilds.backlog(kind) >= BACKLOG_LIMIT;
 		} catch (RuntimeException error) {
 			log.warn("다시 만들기 대기 수를 읽지 못했다 — 다음 주기에 다시 본다", error);
 			return true;
 		}
+	}
+
+	/**
+	 * 자동 경로를 미루는 이유가 바뀔 때만 한 줄 남긴다(null이면 다시 돈다). 미루는 동안 조용하면 "문제없음"과 "멈춤"이 구분되지 않는다.
+	 */
+	private void blocked(String reason) {
+		if (Objects.equals(reason, blockedReason)) return;
+		if (reason != null) log.info("다시 만들기를 미룬다: {}", reason);
+		else if (blockedReason != null) log.info("다시 만들기를 다시 시작한다(미룬 이유: {})", blockedReason);
+		blockedReason = reason;
 	}
 
 	private void handleRequests() {
@@ -111,7 +138,11 @@ public class ChunkRebuilder {
 		try {
 			int queued = rebuilds.queueOutdated(embeddings.model(), embeddings.dimensions(), chunking(), AUTO_LIMIT);
 			if (queued > 0) log.info("처리 설정(임베딩 모델·차원·청킹)이 바뀐 문서 {}건을 다시 만든다", queued);
-			if (queued < AUTO_LIMIT) outdatedQueued = true;
+			// 하나도 만들지 못했을 때만 끝으로 본다 — 같은 순간 사용자 처리와 겹쳐 상한보다 적게 만들어져도 남은 문서가 있을 수 있다.
+			if (queued == 0) {
+				outdatedQueued = true;
+				log.info("처리 설정이 바뀐 문서 찾기를 마쳤다 — 다음 기동 때 다시 본다");
+			}
 		} catch (RuntimeException error) {
 			log.warn("처리 설정이 바뀐 문서를 찾지 못했다 — 다음 주기에 다시 본다", error);
 		}
@@ -149,16 +180,23 @@ public class ChunkRebuilder {
 				lastVerified = 0;
 				resumeAfter = null;
 			}
-			log.warn("검색 조각 대조를 건너뛴다 — 다음 주기에 다시 본다: {}", failure.getMessage());
+			log.warn("검색 조각 대조를 건너뛴다 — {} 다시 본다: {}", indexLost ? "인덱스를 다시 만든 뒤" : readable(verifyDelay) + " 뒤", failure.getMessage());
 			return;
 		} catch (RuntimeException error) {
-			log.warn("검색 조각 대조를 건너뛴다 — 다음 주기에 다시 본다", error);
+			log.warn("검색 조각 대조를 건너뛴다 — {} 뒤 다시 본다", readable(verifyDelay), error);
 			return;
 		}
 		if (queued > 0) log.warn("검색 조각이 빠진 문서 {}건을 다시 만든다(대조 {}건)", queued, checked);
+		if (queued < AUTO_LIMIT) log.info("검색 조각 대조를 마쳤다: 이번 대조 {}건, 빠진 문서 {}건 — {} 뒤 다시 본다", checked, queued, readable(verifyDelay));
 		// 상한에서 멈췄으면 대조 주기를 기다리지 않고 다음 주기에 이어서 본다(ES를 비운 뒤 문서가 많을 때).
 		resumeAfter = queued >= AUTO_LIMIT ? after : null;
 		if (resumeAfter != null) lastVerified = 0;
+	}
+
+	/** 로그용 시간 표기(10분, 30초). Duration.toString(PT10M)은 운영자가 읽기 어렵다. */
+	static String readable(Duration duration) {
+		long seconds = duration.toSeconds();
+		return seconds % 60 == 0 && seconds >= 60 ? seconds / 60 + "분" : seconds + "초";
 	}
 
 	private String chunking() {

@@ -34,14 +34,19 @@ public class RunSweeper {
 		this.supersededGrace = supersededGrace;
 	}
 
+	/** 회차 없는 등록 문서 보충. 청크 정리(sweep)와 따로 돈다 — 정리할 회차가 많거나 ES가 느려 정리가 길어져도 보충이 밀리지 않게. */
 	@Scheduled(fixedDelayString = "${app.etl.sweep-delay:30s}")
-	public void sweep() {
+	public void requeue() {
 		try {
 			int queued = runs.requeueOrphans(BATCH);
 			if (queued > 0) log.warn("처리 회차가 없던 등록 문서 {}건에 회차를 보충했다", queued);
 		} catch (RuntimeException error) {
 			log.warn("회차 없는 등록 문서를 보충하지 못했다 — 다음 주기에 다시 본다", error);
 		}
+	}
+
+	@Scheduled(fixedDelayString = "${app.etl.sweep-delay:30s}")
+	public void sweep() {
 		if (index.migrating()) {
 			// 이전이 끝나면 새 인덱스에서 지운다(ChunkIndex.delete). 기다리는 동안 행마다 실패 로그를 남기지 않는다.
 			log.info("검색 인덱스 이전이 끝나지 않아 지난 회차 청크 정리를 미룬다");

@@ -29,6 +29,9 @@ public class RunStore {
 	public static final String REBUILD = "REBUILD";
 	/** 조각이 없어진 READY 문서를 다시 만든다(자동 복구). 실패하면 검색할 조각이 없으므로 문서를 FAILED로 바꾼다. */
 	public static final String RECOVER = "RECOVER";
+	/** 문서 자체가 원인인 영구 실패 코드 — 원본 없음·손상·미지원 형식·인코딩, 글자 없음, 모델 입력 한도 초과. 다시 해도 같다. */
+	static final java.util.Set<String> DOCUMENT_FAULTS = java.util.Set.of("SOURCE_MISSING", "UNREADABLE", "UNSUPPORTED_FILE",
+			"UNSUPPORTED_ENCODING", "EMPTY_TEXT", "EMBEDDING_INPUT");
 	/** 일시 오류로 재시도를 다 쓴 실패의 사유 코드 접두어(IngestionPipeline). 그 뒤에 마지막 일시 오류 코드가 붙는다. */
 	public static final String RETRY_EXHAUSTED = "RETRY_EXHAUSTED";
 
@@ -86,10 +89,11 @@ public class RunStore {
 	private Claim claimOne(Duration lease, int maxAttempts) {
 		// 후보는 잠그지 않고 고른 뒤 문서 → 회차 순서로 잠근다(A의 등록·재처리와 같은 순서라 교착이 없다).
 		// 다른 워커가 같은 회차를 잡고 있으면 회차 잠금에서 건너뛰고 다음 후보를 본다.
-		// 사용자가 올리거나 다시 처리한 문서(INGEST)를 먼저 집는다 — 일괄 다시 만들기가 수백 건 쌓여도 새 문서가 뒤로 밀리지 않는다.
+		// 사용자 처리(INGEST)와 자동 복구(RECOVER)를 먼저, 설정 변경·운영자 다시 만들기(REBUILD)는 나중에 집는다 — 일괄 다시 만들기가
+		// 수만 건 쌓여도 새 문서와 조각이 사라진 문서(검색이 비어 있다)가 뒤로 밀리지 않는다. REBUILD 대상은 이전 조각으로 검색된다.
 		// 정렬 식은 선점 인덱스(ix_thr_doc_run_claim)의 식과 글자 그대로 같아야 인덱스를 탄다 — 바꾸면 마이그레이션도 함께 바꾼다.
 		var candidates = jdbc.queryForList("select id, doc_id from thr_doc_run where status in ('PENDING', 'RUNNING')"
-				+ " and next_at <= now() order by (run_kind <> 'INGEST'), next_at, id limit " + CANDIDATES);
+				+ " and next_at <= now() order by (run_kind = 'REBUILD'), next_at, id limit " + CANDIDATES);
 		if (candidates.isEmpty()) return null;
 		for (var candidate : candidates) {
 			UUID run = (UUID) candidate.get("id");
@@ -186,16 +190,16 @@ public class RunStore {
 
 	/**
 	 * 문서 잠금 안에서 회차를 실패로 끝낸다. INGEST는 문서를 FAILED로 바꾼다 — 사용자에게 "처리 실패"와 다시 처리 버튼을 보인다.
-	 * REBUILD는 이전 회차 조각이 남아 검색이 되므로 문서를 READY로 둔다. RECOVER는 원본 손상·없음처럼 다시 해도 안 되는 실패만
-	 * 문서를 FAILED로 바꾼다 — 임베딩 서버·Elasticsearch가 오래 끊겨 재시도를 다 쓴 경우는 READY로 두어, 장애가 풀린 뒤 다음 대조가
-	 * 다시 잡게 한다(장애가 문서 상태를 망가뜨려 사용자가 문서마다 다시 처리를 누르게 하지 않는다). 그사이 삭제·상태가 바뀐 문서면
+	 * REBUILD는 이전 회차 조각이 남아 검색이 되므로 문서를 READY로 둔다. RECOVER는 문서 자체가 원인인 실패(DOCUMENT_FAULTS)만
+	 * 문서를 FAILED로 바꾼다 — 임베딩 서버·Elasticsearch가 오래 끊겨 재시도를 다 쓰거나, 운영자 설정 실수로 인덱스·임베딩 서버가
+	 * 거절하는 경우(영구 오류로 분류돼도)는 READY로 두어 원인이 풀린 뒤 다시 잡게 한다. 설정 실수 하나로 모든 방의 문서가 "처리 실패"로
+	 * 바뀌어 사용자가 문서마다 다시 처리를 누르게 하지 않는다. 그사이 삭제·상태가 바뀐 문서면
 	 * 실패가 아니라 취소다(complete와 같은 기록). 청크는 어느 쪽이든 정리 작업이 지운다.
 	 */
 	private void failLocked(UUID run, UUID document, String kind, String code) {
-		boolean exhausted = code != null && code.startsWith(RETRY_EXHAUSTED);
 		boolean failed = switch (kind) {
 			case REBUILD -> stillReady(document);
-			case RECOVER -> exhausted ? stillReady(document) : ThreadDocumentStates.transition(jdbc, document, "READY", "FAILED");
+			case RECOVER -> DOCUMENT_FAULTS.contains(code) ? ThreadDocumentStates.transition(jdbc, document, "READY", "FAILED") : stillReady(document);
 			default -> ThreadDocumentStates.transition(jdbc, document, "PROCESSING", "FAILED");
 		};
 		jdbc.update("update thr_doc_run set status = ?, err = ?, updated_at = now() where id = ?", failed ? "FAILED" : "CANCELLED", code, run);

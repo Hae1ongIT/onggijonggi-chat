@@ -439,6 +439,36 @@ describe('방 문서 실제 UI', () => {
     expect(calls[0][2]).toBe('reprocess');
     expect(calls[1][3]).toBe(calls[0][3]);
   });
+  it.each([
+    [true, '답변에 쓰이지 않습니다. 다시 처리해 주세요.'],
+    [
+      false,
+      '답변에 쓰이지 않습니다. 올린 사람이나 방장이 다시 처리할 수 있어요.',
+    ],
+  ])(
+    '고정된 처리 실패 문서는 답변에서 빠진다고 알린다(다시 처리 가능 %s)',
+    async (canReprocess, notice) => {
+      vi.mocked(api.listThreadDocuments).mockResolvedValue({
+        ...listing,
+        documents: [{ ...doc, status: 'FAILED', pinned: true, canReprocess }],
+      });
+      render(<ThreadDocuments threadId="room" />);
+      open();
+      expect(await screen.findByText(notice)).toBeTruthy();
+    },
+  );
+
+  it('고정하지 않은 처리 실패 문서에는 답변 안내를 붙이지 않는다', async () => {
+    vi.mocked(api.listThreadDocuments).mockResolvedValue({
+      ...listing,
+      documents: [{ ...doc, status: 'FAILED', pinned: false }],
+    });
+    render(<ThreadDocuments threadId="room" />);
+    open();
+    await screen.findByText(/처리 실패/);
+    expect(screen.queryByText(/답변에 쓰이지 않습니다/)).toBeNull();
+  });
+
   it('처리 대기 문서에는 다시 처리 버튼이 없다', async () => {
     render(<ThreadDocuments threadId="room" />);
     open();

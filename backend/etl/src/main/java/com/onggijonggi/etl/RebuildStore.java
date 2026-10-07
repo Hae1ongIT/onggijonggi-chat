@@ -38,6 +38,12 @@ public class RebuildStore {
 	/** 현재 회차 뒤에 실패한 다시 만들기 회차가 없다(정리돼 PURGED가 된 것 포함 — 현재 회차보다 큰 PURGED는 실패·취소뿐이다). */
 	private static final String NOT_FAILED_SINCE = " and not exists (select 1 from thr_doc_run f where f.doc_id = d.id and f.run_seq > c.run_seq"
 			+ " and f.run_kind = 'REBUILD' and f.status in ('FAILED', 'PURGED'))";
+	/**
+	 * 최근(RECOVER_RETRY 안에) 자동 복구가 실패한 문서는 뺀다 — 원본은 멀쩡한데 처리할 때마다 워커를 죽이거나 적재가 모자라는 문서를
+	 * 대조 주기(10분)마다 다시 잡지 않고, 장애가 풀렸을 때를 위해 한 시간에 한 번만 다시 해 본다.
+	 */
+	private static final String NOT_RECOVERED_LATELY = " and not exists (select 1 from thr_doc_run f where f.doc_id = d.id and f.run_seq > c.run_seq"
+			+ " and f.run_kind = 'RECOVER' and f.status in ('FAILED', 'PURGED') and f.updated_at > now() - interval '1 hour')";
 	/** 다시 만들기 회차를 만든다. 동시에 다른 경로가 회차를 만들었으면(유일 인덱스) 그 문서는 건너뛴다. */
 	private static final String INSERT = "insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, run_kind, rbl_id)"
 			+ " select gen_random_uuid(), d.id, d.tnn_id, d.thr_id,"
@@ -61,10 +67,10 @@ public class RebuildStore {
 				RunStore.REBUILD, null, model, dimensions, chunking, limit);
 	}
 
-	/** 처리를 기다리거나 처리 중인 다시 만들기 회차 수. 자동 경로가 워커보다 빨리 쌓지 않게 본다. */
-	public int backlog() {
-		Integer count = jdbc.queryForObject("select count(*) from thr_doc_run where status in ('PENDING', 'RUNNING') and run_kind <> 'INGEST'",
-				Integer.class);
+	/** 처리를 기다리거나 처리 중인 그 종류(REBUILD·RECOVER)의 회차 수. 자동 경로가 워커보다 빨리 쌓지 않게 본다. */
+	public int backlog(String kind) {
+		Integer count = jdbc.queryForObject("select count(*) from thr_doc_run where status in ('PENDING', 'RUNNING') and run_kind = ?",
+				Integer.class, kind);
 		return count == null ? 0 : count;
 	}
 
@@ -81,7 +87,7 @@ public class RebuildStore {
 	 * 대조한 회차는 이미 정리 대상이라 청크가 없어 보였을 수 있다. 만들었으면 true.
 	 */
 	public boolean queueRecover(CurrentRun run) {
-		return jdbc.update(INSERT + CANDIDATES + " and d.id = ? and c.run_seq = ? on conflict do nothing",
+		return jdbc.update(INSERT + CANDIDATES + NOT_RECOVERED_LATELY + " and d.id = ? and c.run_seq = ? on conflict do nothing",
 				RunStore.RECOVER, null, run.document(), run.runSeq()) == 1;
 	}
 

@@ -495,6 +495,8 @@ class ThreadDocumentPostgresTest {
 		assertThat(service.processing(id, "PENDING", "PROCESSING")).isTrue();
 		assertThat(service.processing(id, "PROCESSING", "READY")).isTrue();
 		assertThat(service.list(room, owner).documents().get(0).pinned()).isFalse();
+		// READY→FAILED는 ETL 자동 복구 전용이다(#348). BFF 경로로는 열지 않는다.
+		assertThatThrownBy(() -> service.processing(id, "READY", "FAILED")).isInstanceOf(IllegalArgumentException.class);
 	}
 
 	@Test void participantRemovalSerializesWithInFlightDocumentAuthorization() throws Exception {

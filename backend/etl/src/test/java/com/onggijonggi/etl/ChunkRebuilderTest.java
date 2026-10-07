@@ -118,13 +118,20 @@ class ChunkRebuilderTest {
 	}
 
 	@Test
-	void automaticRebuildsWaitWhileTheBacklogIsFullButOperatorRequestsStillRun() {
-		when(rebuilds.backlog()).thenReturn(ChunkRebuilder.BACKLOG_LIMIT);
-
+	void aFullRebuildBacklogPausesOnlySettingsRebuildsAndAFullRecoveryBacklogPausesOnlyTheCheck() {
+		when(rebuilds.backlog(RunStore.REBUILD)).thenReturn(ChunkRebuilder.BACKLOG_LIMIT);
 		rebuilder.tick();
-
 		verify(rebuilds).handleNextRequest(anyString(), anyInt(), anyString());
 		verify(rebuilds, never()).queueOutdated(anyString(), anyInt(), anyString(), anyInt());
+		verify(rebuilds).currentRuns(null, ChunkRebuilder.VERIFY_PAGE);
+
+		ChunkRebuilder other = new ChunkRebuilder(rebuilds, index, embeddings, workers, new EtlProperties(null, null, null,
+				new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5)), Duration.ofHours(1));
+		org.mockito.Mockito.clearInvocations(rebuilds);
+		when(rebuilds.backlog(RunStore.REBUILD)).thenReturn(0);
+		when(rebuilds.backlog(RunStore.RECOVER)).thenReturn(ChunkRebuilder.BACKLOG_LIMIT);
+		other.tick();
+		verify(rebuilds).queueOutdated(anyString(), anyInt(), anyString(), anyInt());
 		verify(rebuilds, never()).currentRuns(any(), anyInt());
 	}
 
@@ -176,13 +183,17 @@ class ChunkRebuilderTest {
 	}
 
 	@Test
+	void logDurationsAreReadable() {
+		org.assertj.core.api.Assertions.assertThat(ChunkRebuilder.readable(Duration.ofMinutes(10))).isEqualTo("10분");
+		org.assertj.core.api.Assertions.assertThat(ChunkRebuilder.readable(Duration.ofSeconds(90))).isEqualTo("90초");
+	}
+
+	@Test
 	void outdatedDocumentsAreQueuedUntilNoneAreLeft() {
-		when(rebuilds.queueOutdated(anyString(), anyInt(), anyString(), anyInt())).thenReturn(ChunkRebuilder.AUTO_LIMIT, 3);
+		when(rebuilds.queueOutdated(anyString(), anyInt(), anyString(), anyInt())).thenReturn(ChunkRebuilder.AUTO_LIMIT, 3, 0);
 
-		rebuilder.tick();
-		rebuilder.tick();
-		rebuilder.tick();
+		for (int i = 0; i < 4; i++) rebuilder.tick();
 
-		verify(rebuilds, times(2)).queueOutdated("bge-m3", 1024, new EtlProperties.Chunk(800, 1200, 100).settings().fingerprint(), ChunkRebuilder.AUTO_LIMIT);
+		verify(rebuilds, times(3)).queueOutdated("bge-m3", 1024, new EtlProperties.Chunk(800, 1200, 100).settings().fingerprint(), ChunkRebuilder.AUTO_LIMIT);
 	}
 }

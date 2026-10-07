@@ -30,7 +30,8 @@ alter table thr_doc_run add column run_kind varchar(16) not null default 'INGEST
 alter table thr_doc_run add column rbl_id uuid;
 -- 요청별 진행 집계(남은·실패 수)를 회차 행을 읽지 않고 인덱스만으로 센다.
 create index ix_thr_doc_run_rbl on thr_doc_run(rbl_id) include (status, err) where rbl_id is not null;
--- 회차 선점 순서: 사용자 처리(INGEST)를 먼저, 그다음 기한 순. 일괄 다시 만들기로 대기 회차가 수만 건 쌓여도 정렬 없이 앞에서 집는다.
-create index ix_thr_doc_run_claim on thr_doc_run((run_kind <> 'INGEST'), next_at, id) where status in ('PENDING', 'RUNNING');
+-- 회차 선점 순서: 사용자 처리(INGEST)·자동 복구(RECOVER)를 먼저, 다시 만들기(REBUILD)는 나중, 그 안에서는 기한 순.
+-- 일괄 다시 만들기로 대기 회차가 수만 건 쌓여도 정렬 없이 앞에서 집는다. 식은 RunStore 선점 쿼리의 정렬과 글자 그대로 같아야 한다.
+create index ix_thr_doc_run_claim on thr_doc_run((run_kind = 'REBUILD'), next_at, id) where status in ('PENDING', 'RUNNING');
 -- 정리 대상 조회: 정리를 마친 PURGED 행(계속 늘어난다)을 빼고 오래된 순으로 본다.
 create index ix_thr_doc_run_sweep on thr_doc_run(updated_at) where status in ('DONE', 'FAILED', 'CANCELLED');
