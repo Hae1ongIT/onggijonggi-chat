@@ -127,7 +127,7 @@ public class TaggingWorker implements SmartLifecycle {
 	/** DB의 태그를 태그 색인에 다시 쓴다. */
 	private void restoreIndex() {
 		int restored = 0;
-		UUID after = new UUID(Long.MIN_VALUE, Long.MIN_VALUE);
+		UUID after = TagStore.FIRST;
 		for (List<TagStore.Stored> page = store.stored(after, RESTORE_PAGE); !page.isEmpty(); page = store.stored(after, RESTORE_PAGE)) {
 			index.restore(page);
 			restored += page.size();

@@ -148,12 +148,15 @@ class TagStoreTest {
 			else store.saveDone(target, new TagPrompt.Tags("기타", List.of("연차", "이월"), "요약"), CURRENT);
 		}
 		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id = ?", deleted);
+		// id 첫 바이트가 0x00·0xff인 경우를 둔다 — PostgreSQL uuid 순서(바이트, 부호 없음)의 양 끝을 모두 읽는지 본다.
+		jdbc.update("update thr_doc_tag set id = '00000000-0000-4000-8000-000000000001' where doc_id = ?", first);
+		jdbc.update("update thr_doc_tag set id = 'ffffffff-0000-4000-8000-000000000001' where doc_id = ?", second);
 
-		var page = store.stored(new UUID(Long.MIN_VALUE, Long.MIN_VALUE), 1);
+		var page = store.stored(TagStore.FIRST, 1);
 		var rest = store.stored(page.get(0).id(), 10);
 
 		assertThat(page).hasSize(1);
-		assertThat(List.of(page.get(0), rest.get(0))).extracting(TagStore.Stored::document).containsExactlyInAnyOrder(first, second);
+		assertThat(List.of(page.get(0), rest.get(0))).extracting(TagStore.Stored::document).containsExactly(first, second);
 		assertThat(rest).hasSize(1).singleElement().satisfies(tag -> {
 			assertThat(tag.tags()).isEqualTo(new TagPrompt.Tags("기타", List.of("연차", "이월"), "요약"));
 			assertThat(tag.fingerprint()).isEqualTo(CURRENT);
