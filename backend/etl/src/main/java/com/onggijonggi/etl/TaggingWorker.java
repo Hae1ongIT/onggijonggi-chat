@@ -97,6 +97,8 @@ public class TaggingWorker implements SmartLifecycle {
 		index.ensure();
 		String fingerprint = settings.fingerprint();
 		List<TagStore.Target> targets = store.targets(fingerprint, settings.batch());
+		// 할 일이 없으면 쉬는 간격을 처음으로 되돌린다 — 장애 뒤 늘어난 간격 때문에 새 문서를 오래 기다리지 않게.
+		if (targets.isEmpty()) stalls = 0;
 		for (TagStore.Target target : targets) {
 			if (!running.get()) break;
 			// 일시 장애면 묶음의 나머지를 지금 시도하지 않고 쉰다 — 태깅 서버가 잠깐 끊긴 사이 대기 문서가 한꺼번에 실패로 밀리지 않게.
