@@ -6,6 +6,8 @@ import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ChatMessage;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import com.onggijonggi.common.document.Chunker;
+import com.onggijonggi.common.document.TagIndexContract;
+import com.onggijonggi.common.document.TagPrompt;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -34,12 +36,14 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Class Name : RagEvaluationTest.java
  * Description : 방 문서 검색 평가 세트(#344). 가상 회사 규정 문서 5개(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
- *               nori Elasticsearch에 색인하고, 질문 37개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택)를
+ *               nori Elasticsearch에 색인하고, 질문 44개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택·주제)를
  *               검색 기준 조합마다 돌려 적중률·무관 질문 오채택률·다시 쓰기 효과·지연을 표로 낸다(build/rag-eval/report.md).
+ *               대화 모델이 있으면 ETL과 같은 태깅 규칙(공용 TagPrompt)으로 문서를 태깅해 태그 색인을 만들고, 태그 채널(#362) 끔/켬과
+ *               그 기준값을 비교한다. 주제(tag) 질문은 기대 문서가 상위에 오면 적중이다.
  *               실제 사내 모델이 필요해 기본 test·CI에서 빠지고 ragEval로만 돈다:
  *                 RAG_EVAL_EMBEDDING_URL  임베딩 엔드포인트(OpenAI 호환, bge-m3). 없으면 건너뛴다.
- *                 RAG_EVAL_LLM_URL        다시 쓰기용 대화 모델 엔드포인트(OpenAI 호환, /v1 앞까지). 운영과 같은 클라이언트로 부른다.
- *                                         없으면 후속 질문은 다시 쓰지 않는다.
+ *                 RAG_EVAL_LLM_URL        다시 쓰기·태깅용 대화 모델 엔드포인트(OpenAI 호환, /v1 앞까지). 다시 쓰기는 운영과 같은
+ *                                         클라이언트로 부른다. 없으면 후속 질문은 다시 쓰지 않고 태그 채널은 비교하지 않는다.
  *                 RAG_EVAL_LLM_MODEL      대화 모델 이름(기본 gemma).
  *               평가용 모델은 사내망 엔드포인트만 쓴다 — 평가 문서·질문이 외부 공급자로 나가지 않게 한다.
  */
@@ -57,6 +61,12 @@ class RagEvaluationTest {
 	/** 질문별 결과를 보여 줄 기준(설정 기본값과 같게 둔다). */
 	private static final double BASELINE_VECTOR = 0.5;
 	private static final String BASELINE_KEYWORD = "75%";
+	private static final String TAG_INDEX = "thr_doc_tag_v1";
+	/** ETL 기본 태깅 설정(TaggingProperties)과 같게 둔다. */
+	private static final TagPrompt.Settings TAGGING = new TagPrompt.Settings(
+			List.of("인사·총무", "보안·IT", "재무·회계", "영업·고객", "법무·규정", "기술·개발", "기타"), 10, 200);
+	private static final List<String> TAG_MINIMUMS = List.of("30%", "40%", "60%");
+	private static final List<Double> TAG_CHUNK_MINIMUMS = List.of(0.3, 0.35, 0.4, 0.45);
 
 	private final ObjectMapper json = JsonMapper.builder().build();
 
@@ -79,7 +89,9 @@ class RagEvaluationTest {
 			elasticsearch.start();
 			String esUrl = "http://" + elasticsearch.getHost() + ":" + elasticsearch.getMappedPort(9200);
 			var embedder = new QueryEmbedder(properties(esUrl, embeddingUrl, 0.5, "60%"), WebClient.builder(), json);
-			Map<UUID, String> names = index(RestClient.create(esUrl), embedder);
+			Map<UUID, String> texts = new LinkedHashMap<>();
+			Map<UUID, String> names = index(RestClient.create(esUrl), embedder, texts);
+			Map<UUID, TagPrompt.Tags> tags = llmUrl == null || llmUrl.isBlank() ? Map.of() : tag(RestClient.create(esUrl), texts, llmUrl, llmModel);
 			var scope = new ThreadDocumentScope(TENANT, ThreadScopeFilter.of(List.of(ROOM)), names.keySet().stream()
 					.map(id -> new ThreadDocumentScope.Target(id, names.get(id), 1, "bge-m3", DIMENSIONS)).toList());
 			List<Question> questions = questions();
@@ -134,6 +146,18 @@ class RagEvaluationTest {
 							rate(original, outcome -> hit(outcome, names, 5), outcome -> true)));
 				}
 			}
+			if (!tags.isEmpty()) {
+				report.append("\n## 태그 채널(#362, 벡터 " + BASELINE_VECTOR + " · 키워드 " + BASELINE_KEYWORD + ")\n\n")
+						.append("| 태그 일치 | 대표 조각 하한 | 답 있는 질문 적중(상위5) | 상위1 | 정밀도 | 무관 질문 오채택 | 주제 질문 | 다른 표현 |\n|---|---|---|---|---|---|---|---|\n");
+				report.append(tagRow("끔", "-", searcher(esUrl, embeddingUrl, null, 0), questions, queries, vectors, scope, names));
+				for (String tagMinimum : TAG_MINIMUMS)
+					for (double chunkMinimum : TAG_CHUNK_MINIMUMS)
+						report.append(tagRow(tagMinimum, String.format("%.2f", chunkMinimum), searcher(esUrl, embeddingUrl, tagMinimum, chunkMinimum),
+								questions, queries, vectors, scope, names));
+				report.append("\n문서 태그:\n");
+				tags.forEach((id, tag) -> report.append("- ").append(names.get(id)).append(": ").append(tag.category()).append(" · ")
+						.append(String.join(", ", tag.keywords())).append("\n"));
+			}
 			report.append("\n## 질문별 결과(벡터 " + BASELINE_VECTOR + " · 키워드 " + BASELINE_KEYWORD
 					+ ")\n\n| 질문 | 유형 | 검색 문장 | 적중 | 상위 결과(문서·위치·벡터·키워드) |\n|---|---|---|---|---|\n");
 			var baseline = new ChunkSearcher(properties(esUrl, embeddingUrl, BASELINE_VECTOR, BASELINE_KEYWORD), WebClient.builder(), json);
@@ -156,10 +180,71 @@ class RagEvaluationTest {
 		return outcome.question().document() != null;
 	}
 
-	/** 기대 문서의 청크가 상위 top 안에 있고 그 청크에 기대 낱말이 있으면 적중이다. */
+	/** 기대 문서의 청크가 상위 top 안에 있고 그 청크에 기대 낱말이 있으면(주제 질문처럼 기대 낱말이 없으면 문서만 맞아도) 적중이다. */
 	private static boolean hit(Outcome outcome, Map<UUID, String> names, int top) {
+		String contains = outcome.question().contains();
 		return outcome.hits().stream().limit(top).anyMatch(hit -> outcome.question().document().equals(names.get(UUID.fromString(hit.document())))
-				&& hit.content().contains(outcome.question().contains()));
+				&& (contains == null || hit.content().contains(contains)));
+	}
+
+	/** 태그 채널 끔/켬 한 줄. 기본 기준값(벡터·키워드)은 고정한다. */
+	private String tagRow(String tagMinimum, String chunkMinimum, ChunkSearcher searcher, List<Question> questions,
+			Map<String, QueryRewriter.Result> queries, Map<String, float[]> vectors, ThreadDocumentScope scope, Map<UUID, String> names) {
+		List<Outcome> outcomes = new ArrayList<>();
+		for (Question question : questions) {
+			QueryRewriter.Result query = queries.get(question.id());
+			outcomes.add(new Outcome(question, query.query(), query.rewritten(), searcher.search(scope, query.query(), vectors.get(query.query()))));
+		}
+		return String.format("| %s | %s | %s | %s | %s | %s | %s | %s |%n", tagMinimum, chunkMinimum,
+				rate(outcomes, outcome -> answerable(outcome) && hit(outcome, names, 5), RagEvaluationTest::answerable),
+				rate(outcomes, outcome -> answerable(outcome) && hit(outcome, names, 1), RagEvaluationTest::answerable),
+				precision(outcomes, names),
+				rate(outcomes, outcome -> !answerable(outcome) && !outcome.hits().isEmpty(), outcome -> !answerable(outcome)),
+				rate(outcomes, outcome -> type(outcome, "tag") && hit(outcome, names, 5), outcome -> type(outcome, "tag")),
+				rate(outcomes, outcome -> type(outcome, "paraphrase") && hit(outcome, names, 5), outcome -> type(outcome, "paraphrase")));
+	}
+
+	private static boolean type(Outcome outcome, String type) {
+		return outcome.question().type().equals(type);
+	}
+
+	/** 기본 기준값에 태그 채널을 끄거나(tagMinimum null) 켠 검색기. */
+	private ChunkSearcher searcher(String esUrl, String embeddingUrl, String tagMinimum, double chunkMinimum) {
+		var tags = tagMinimum == null ? RagTagProperties.disabled() : new RagTagProperties(true, TagIndexContract.ALIAS, tagMinimum, 10, chunkMinimum);
+		return new ChunkSearcher(properties(esUrl, embeddingUrl, BASELINE_VECTOR, BASELINE_KEYWORD), tags, WebClient.builder(), json);
+	}
+
+	/** ETL과 같은 프롬프트·응답 검사로 문서마다 태그를 뽑아 태그 색인에 넣는다(평가 문서는 짧아 한 번에 보낸다). */
+	private Map<UUID, TagPrompt.Tags> tag(RestClient es, Map<UUID, String> texts, String llmUrl, String llmModel) throws IOException {
+		byte[] mapping;
+		try (InputStream in = new ClassPathResource(TagIndexContract.MAPPING).getInputStream()) {
+			mapping = in.readAllBytes();
+		}
+		es.put().uri("/" + TAG_INDEX).contentType(MediaType.APPLICATION_JSON).body(mapping).retrieve().toBodilessEntity();
+		es.put().uri("/" + TAG_INDEX + "/_alias/" + TagIndexContract.ALIAS).retrieve().toBodilessEntity();
+		RestClient llm = RestClient.create(llmUrl);
+		Map<UUID, TagPrompt.Tags> tags = new LinkedHashMap<>();
+		for (var entry : texts.entrySet()) {
+			Map<String, Object> request = Map.of("model", llmModel, "temperature", 0, "max_tokens", 1024, "messages", List.of(
+					Map.of("role", "system", "content", TagPrompt.system(TAGGING)), Map.of("role", "user", "content", TagPrompt.user(entry.getValue()))));
+			String response = llm.post().uri("/v1/chat/completions").contentType(MediaType.APPLICATION_JSON)
+					.body(json.writeValueAsString(request).getBytes(StandardCharsets.UTF_8)).retrieve().body(String.class);
+			TagPrompt.Tags tag = TagPrompt.parse(json.readTree(response).path("choices").path(0).path("message").path("content").asString(""), TAGGING);
+			tags.put(entry.getKey(), tag);
+			Map<String, Object> source = new LinkedHashMap<>();
+			source.put(TagIndexContract.DOC_ID, entry.getKey().toString());
+			source.put(TagIndexContract.THR_ID, ROOM.toString());
+			source.put(TagIndexContract.TNN_ID, TENANT.toString());
+			source.put(TagIndexContract.RUN_SEQ, 1);
+			source.put(TagIndexContract.CATEGORY, tag.category());
+			source.put(TagIndexContract.KEYWORDS, tag.keywords());
+			source.put(TagIndexContract.SUMMARY, tag.summary());
+			source.put(TagIndexContract.CONFIG, "eval");
+			es.put().uri("/" + TagIndexContract.ALIAS + "/_doc/{id}", TagIndexContract.tagId(entry.getKey(), 1)).contentType(MediaType.APPLICATION_JSON)
+					.body(json.writeValueAsString(source).getBytes(StandardCharsets.UTF_8)).retrieve().toBodilessEntity();
+		}
+		es.post().uri("/" + TagIndexContract.ALIAS + "/_refresh").retrieve().toBodilessEntity();
+		return tags;
 	}
 
 	/** 답 있는 질문의 결과 청크 가운데 기대 문서의 청크 비율. 다른 문서 청크가 답변 문맥에 섞이는 정도다. */
@@ -203,7 +288,7 @@ class RagEvaluationTest {
 	}
 
 	/** ETL과 같은 공용 매핑·청킹(800/1200/100)으로 색인한다. 문서 ID → 파일 이름. */
-	private Map<UUID, String> index(RestClient es, QueryEmbedder embedder) throws IOException {
+	private Map<UUID, String> index(RestClient es, QueryEmbedder embedder, Map<UUID, String> texts) throws IOException {
 		byte[] mapping;
 		try (InputStream in = new ClassPathResource("es-thr-doc-chunk-index.json").getInputStream()) {
 			mapping = in.readAllBytes();
@@ -219,6 +304,7 @@ class RagEvaluationTest {
 			try (InputStream in = new ClassPathResource("rag-eval/documents/" + name).getInputStream()) {
 				text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
 			}
+			texts.put(id, text);
 			for (Chunker.Chunk chunk : chunker.chunk(id, 1, List.of(new Chunker.Section(null, text)))) {
 				Map<String, Object> source = new LinkedHashMap<>();
 				source.put("chunk_id", chunk.id());

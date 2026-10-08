@@ -1,0 +1,75 @@
+package com.onggijonggi.etl;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.time.Duration;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+/**
+ * Class Name : TaggingClientTest.java
+ * Description : 태깅 요청(#362)의 모양(모델·온도 0·출력 상한·system/user)과 응답·실패 분류를 가짜 서버로 확인한다.
+ */
+class TaggingClientTest {
+
+	private StubHttpServer llm;
+	private TaggingClient client;
+
+	@BeforeEach
+	void setUp() throws Exception {
+		llm = new StubHttpServer();
+		client = new TaggingClient(properties(llm.url()), JsonMapper.builder().build());
+	}
+
+	@AfterEach
+	void tearDown() {
+		llm.close();
+	}
+
+	static TaggingProperties properties(String url) {
+		return new TaggingProperties(url, "tag-model", Duration.ofSeconds(5), List.of("인사·총무", "기타"), 10, 200, 512, 100, 40, 3, 20,
+				Duration.ofMinutes(1), Duration.ofMillis(100), "thr_doc_tag_v1", "thr_doc_tag");
+	}
+
+	@Test
+	void theRequestIsDeterministicAndTheAnswerContentIsReturned() {
+		llm.reply("/v1/chat/completions", 200, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"category\\\":\\\"기타\\\"}\"}}]}");
+
+		assertThat(client.complete("지시", "<document>본문</document>")).isEqualTo("{\"category\":\"기타\"}");
+
+		JsonNode sent = JsonMapper.builder().build().readTree(llm.requests.get(0).body());
+		assertThat(sent.path("model").asString()).isEqualTo("tag-model");
+		assertThat(sent.path("temperature").asInt(-1)).isZero();
+		assertThat(sent.path("max_tokens").asInt()).isEqualTo(512);
+		assertThat(sent.path("messages").get(0).path("role").asString()).isEqualTo("system");
+		assertThat(sent.path("messages").get(1).path("content").asString()).isEqualTo("<document>본문</document>");
+	}
+
+	@Test
+	void serverTroubleIsTransientAndARejectedRequestIsPermanent() {
+		llm.reply("/v1/chat/completions", 503, "{}");
+		assertThatThrownBy(() -> client.complete("지시", "본문"))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> {
+					assertThat(failure.code()).isEqualTo("TAGGING_UNAVAILABLE");
+					assertThat(failure.permanent()).isFalse();
+				});
+
+		llm.reply("/v1/chat/completions", 400, "{\"error\":\"too long\"}");
+		assertThatThrownBy(() -> client.complete("지시", "본문"))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> {
+					assertThat(failure.code()).isEqualTo("TAGGING_REJECTED");
+					assertThat(failure.permanent()).isTrue();
+				});
+
+		for (String broken : List.of("not json", "{\"choices\":[]}")) {
+			llm.reply("/v1/chat/completions", 200, broken);
+			assertThatThrownBy(() -> client.complete("지시", "본문")).as(broken)
+					.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+		}
+	}
+}

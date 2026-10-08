@@ -4,6 +4,7 @@ import static com.onggijonggi.common.document.ChunkIndexContract.*;
 
 import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
+import com.onggijonggi.common.document.TagIndexContract;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -11,6 +12,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -20,6 +24,8 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Class Name : ChunkSearcher.java
  * Description : 범위 안의 청크를 키워드(nori)와 벡터(kNN)로 따로 찾고, 채널마다 관련성 기준을 건 뒤 순위 기반(RRF)으로 합친다.
+ *               태그 채널(#362, app.rag.tag.enabled)을 켜면 문서 태그(키워드·요약)로 관련 문서를 찾아 그 문서의 대표 조각을 세 번째 채널로 더한다 —
+ *               질문 표현이 본문과 달라도 찾게 한다. 태그 채널이 실패하면(색인 없음·장애) 검색 실패로 만들지 않고 두 채널로 계속한다.
  *               두 점수는 척도가 달라 하나의 기준을 걸지 않는다. 한쪽 채널만 통과한 청크도 채택한다 — 사내 고유명사는
  *               키워드에서만 잡히고 벡터 유사도가 낮을 수 있다. 범위(고객사·방·문서별 현재 회차)는 두 채널에 같은 filter로 걸어,
  *               후보를 고른 뒤 거르는 것이 아니라 거른 범위 안에서 찾는다. 블로킹 호출이라 검색 전용 스케줄러(rag-search)에서 실행한다.
@@ -30,18 +36,28 @@ public class ChunkSearcher {
 	/** 검색 결과 청크 하나. 점수는 그 채널에서 기준을 통과했을 때만 있다(벡터는 코사인 유사도, 키워드는 BM25 — 순위에만 쓴다). */
 	public record Hit(String chunkId, String document, int runSeq, int seq, String loc, String content, Double vectorScore, Double keywordScore) { }
 
+	private static final Logger log = LoggerFactory.getLogger(ChunkSearcher.class);
+
 	/** ES 응답 버퍼. 후보 수 × 청크 최대 길이(약 1300자, UTF-8 약 4KB)에 넉넉한 여유를 둔다. */
 	private static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 	private static final List<String> SOURCE = List.of(CHUNK_ID, DOC_ID, RUN_SEQ, SEQ, LOC, CONTENT);
 
 	private final RagProperties.Elasticsearch settings;
 	private final RagProperties.Search search;
+	private final RagTagProperties tags;
 	private final WebClient client;
 	private final ObjectMapper json;
 
+	/** 태그 채널 없이 검색한다(테스트·평가용). */
 	public ChunkSearcher(RagProperties properties, WebClient.Builder builder, ObjectMapper json) {
+		this(properties, RagTagProperties.disabled(), builder, json);
+	}
+
+	@Autowired
+	public ChunkSearcher(RagProperties properties, RagTagProperties tags, WebClient.Builder builder, ObjectMapper json) {
 		this.settings = properties.elasticsearch();
 		this.search = properties.search();
+		this.tags = tags;
 		// 기본 응답 버퍼(256KB)는 candidates를 늘리면 넘는다(청크 본문 최대 약 1300자 × 후보 수). 넘으면 정상 검색이 장애가 된다.
 		this.client = builder.clone().baseUrl(settings.url()).codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(MAX_RESPONSE_BYTES)).build();
 		this.json = json;
@@ -52,7 +68,55 @@ public class ChunkSearcher {
 		List<Object> filter = filter(scope);
 		List<Hit> keyword = keyword(filter, query);
 		List<Hit> semantic = vector(filter, vector);
-		return fuse(keyword, semantic);
+		if (!tags.enabled()) return fuse(keyword, semantic);
+		return fuse(List.of(semantic, keyword, tagged(scope, filter, query, vector, semantic)));
+	}
+
+	/**
+	 * 태그 채널: 태그 색인을 같은 범위로 찾아 관련 문서 순위를 내고, 문서마다 대표 조각을 세운다. 대표는 벡터 채널에 그 문서 조각이 있으면
+	 * 그중 1위, 없으면 그 문서(현재 회차)로 좁힌 벡터 검색 1건이다. 대표가 최소 유사도에 못 미치면 그 문서는 뺀다. 실패하면 빈 채널이다.
+	 */
+	private List<Hit> tagged(ThreadDocumentScope scope, List<Object> filter, String query, float[] vector, List<Hit> semantic) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("size", tags.candidates());
+		body.put("_source", List.of(TagIndexContract.DOC_ID, TagIndexContract.RUN_SEQ));
+		body.put("query", Map.of("bool", Map.of("must", List.of(Map.of("multi_match", Map.of("query", query,
+				"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", tags.minimumShouldMatch()))),
+				"filter", filter)));
+		List<Hit> representatives = new ArrayList<>();
+		try {
+			for (JsonNode tag : call(tags.alias(), body)) {
+				String document = tag.path("_source").path(TagIndexContract.DOC_ID).asString("");
+				int runSeq = tag.path("_source").path(TagIndexContract.RUN_SEQ).asInt();
+				Hit representative = semantic.stream().filter(hit -> hit.document().equals(document) && hit.runSeq() == runSeq).findFirst()
+						.orElseGet(() -> bestChunk(scope, document, runSeq, vector));
+				if (representative != null) representatives.add(representative);
+			}
+		} catch (RuntimeException error) {
+			// 태그가 아직 없거나(태깅 꺼짐·첫 배포 직후) 태그 색인이 잠시 안 될 때. 본문 검색은 그대로 돌려준다.
+			log.warn("태그 채널을 건너뛴다 — 본문 키워드·벡터 결과만 쓴다: {}", error.getMessage());
+			return List.of();
+		}
+		return representatives;
+	}
+
+	/** 한 문서(현재 회차) 안에서 질문과 의미가 가장 가까운 조각. 최소 유사도에 못 미치면 null. */
+	private Hit bestChunk(ThreadDocumentScope scope, String document, int runSeq, float[] vector) {
+		Map<String, Object> knn = new LinkedHashMap<>();
+		knn.put("field", EMB);
+		knn.put("query_vector", vector);
+		knn.put("k", 1);
+		knn.put("num_candidates", search.numCandidates());
+		knn.put("similarity", tags.chunkMinSimilarity());
+		knn.put("filter", List.of(Map.of("term", Map.of(TNN_ID, scope.tenant().toString())),
+				Map.of("terms", Map.of(THR_ID, scope.threads().threadIds().stream().map(Object::toString).toList())),
+				Map.of("term", Map.of(DOC_ID, document)), Map.of("term", Map.of(RUN_SEQ, runSeq))));
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("size", 1);
+		body.put("_source", SOURCE);
+		body.put("knn", knn);
+		for (JsonNode hit : call(settings.alias(), body)) return hit(hit, cosine(hit), null);
+		return null;
 	}
 
 	/** 고객사·방·(문서, 현재 회차) 쌍. 회차까지 거는 이유는 재처리 직후 이전 회차 청크가 정리 전까지 남아 있기 때문이다. */
@@ -93,16 +157,25 @@ public class ChunkSearcher {
 		body.put("_source", SOURCE);
 		body.put("knn", knn);
 		List<Hit> hits = new ArrayList<>();
-		// 부동소수점 오차로 1을 살짝 넘을 수 있어 [-1, 1]로 자른다.
-		for (JsonNode hit : call(body)) hits.add(hit(hit, Math.max(-1, Math.min(1, 2 * hit.path("_score").asDouble() - 1)), null));
+		for (JsonNode hit : call(body)) hits.add(hit(hit, cosine(hit), null));
 		return hits;
+	}
+
+	/** kNN _score(=(1+cos)/2)를 코사인 유사도로 되돌린다. 부동소수점 오차로 1을 살짝 넘을 수 있어 [-1, 1]로 자른다. */
+	private static double cosine(JsonNode hit) {
+		return Math.max(-1, Math.min(1, 2 * hit.path("_score").asDouble() - 1));
 	}
 
 	/** 두 채널의 순위를 RRF로 합친다. 같은 청크는 점수를 모으고, 문서당 상한을 지키며 topK개를 고른다. */
 	List<Hit> fuse(List<Hit> keyword, List<Hit> semantic) {
+		return fuse(List.of(semantic, keyword));
+	}
+
+	/** 채널들(앞쪽이 동점에서 앞선다)의 순위를 RRF로 합친다. */
+	List<Hit> fuse(List<List<Hit>> channels) {
 		Map<String, Hit> merged = new LinkedHashMap<>();
 		Map<String, Double> scores = new HashMap<>();
-		for (List<Hit> channel : List.of(semantic, keyword)) {
+		for (List<Hit> channel : channels) {
 			for (int rank = 0; rank < channel.size(); rank++) {
 				Hit hit = channel.get(rank);
 				String key = hit.chunkId();
@@ -125,9 +198,13 @@ public class ChunkSearcher {
 	}
 
 	private Iterable<JsonNode> call(Map<String, Object> body) {
+		return call(settings.alias(), body);
+	}
+
+	private Iterable<JsonNode> call(String alias, Map<String, Object> body) {
 		String response;
 		try {
-			response = client.post().uri("/{alias}/_search", settings.alias()).contentType(MediaType.APPLICATION_JSON)
+			response = client.post().uri("/{alias}/_search", alias).contentType(MediaType.APPLICATION_JSON)
 					.bodyValue(body).retrieve().bodyToMono(String.class).block(settings.timeout());
 		} catch (RuntimeException error) {
 			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화). 다만 ETL이 빈 인덱스를 다시

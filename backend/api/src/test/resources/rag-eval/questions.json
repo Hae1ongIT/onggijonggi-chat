@@ -49,5 +49,13 @@
    "history": [{"role": "user", "content": "연차 이월 규정 알려줘"}, {"role": "assistant", "content": "쓰지 못한 연차는 다음 해 3월 말까지 이월할 수 있습니다."}]},
 
   {"id": "choice-1", "type": "choice", "question": "보안 지침의 비밀번호 규칙", "document": "security.md", "contains": "12자"},
-  {"id": "choice-2", "type": "choice", "question": "출장비 규정에서 당일 출장 일비", "document": "travel.md", "contains": "2만 원"}
+  {"id": "choice-2", "type": "choice", "question": "출장비 규정에서 당일 출장 일비", "document": "travel.md", "contains": "2만 원"},
+
+  {"id": "tag-1", "type": "tag", "question": "회사 IT 자산은 어떻게 관리돼?", "document": "equipment.md"},
+  {"id": "tag-2", "type": "tag", "question": "사내 정보 보호 수칙 정리해줘", "document": "security.md"},
+  {"id": "tag-3", "type": "tag", "question": "쉬는 날 관련 제도에는 뭐가 있어?", "document": "leave.md"},
+  {"id": "tag-4", "type": "tag", "question": "외근 경비 처리 방법", "document": "travel.md"},
+  {"id": "tag-5", "type": "tag", "question": "원격 근무 제도 개요", "document": "remote-work.md"},
+  {"id": "tag-6", "type": "tag", "question": "직원 복리후생 중 휴무 관련 내용", "document": "leave.md"},
+  {"id": "tag-7", "type": "tag", "question": "업무용 기기 지급 기준", "document": "equipment.md"}
 ]

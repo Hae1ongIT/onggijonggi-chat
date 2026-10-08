@@ -7,6 +7,7 @@ import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Function;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -17,6 +18,7 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Class Name : ChunkSearcherTest.java
  * Description : 범위 조건의 모양(방 범위 없이는 검색하지 않음)과 두 채널의 순위 결합(RRF)·문서당 상한·점수 보존을 확인한다.
+ *               태그 채널(#362)은 대표 조각 선택(벡터 결과 재사용 → 문서 안 kNN → 최소 유사도 미달 제외), 장애 시 두 채널 유지, 꺼짐이면 요청 없음을 본다.
  *               실제 Elasticsearch에서의 범위 격리는 ThreadDocumentSearchIntegrationTest가 본다.
  */
 class ChunkSearcherTest {
@@ -102,5 +104,70 @@ class ChunkSearcherTest {
 				assertThat(es.requests).anySatisfy(request -> assertThat(request.body()).contains("\"similarity\":0.5"));
 			}
 		}
+	}
+
+	@Test
+	void aTagChannelHitAddsItsRankAndATagOnlyRepresentativeIsKept() {
+		var semantic = List.of(hit("a", 1, 0.9, null), hit("b", 1, 0.8, null));
+		var keyword = List.of(hit("a", 1, null, 7.0));
+		var tag = List.of(hit("b", 1, 0.8, null), hit("c", 4, 0.4, null));
+
+		var fused = searcher.fuse(List.of(semantic, keyword, tag));
+
+		assertThat(fused).extracting(ChunkSearcher.Hit::document).containsExactly("a", "b", "c");
+	}
+
+	/** a는 벡터 결과의 조각을 대표로 재사용하고, b는 문서 안 kNN 1건을, c는 최소 유사도 미달(빈 결과)이라 뺀다. */
+	@Test
+	void representativesReuseVectorHitsThenSearchInsideTheDocumentAndDropWeakOnes() throws Exception {
+		UUID a = UUID.randomUUID(), b = UUID.randomUUID(), c = UUID.randomUUID();
+		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"%s:1:%d\",\"doc_id\":\"%s\",\"run_seq\":1,\"seq\":%d,\"loc\":\"para=1\",\"content\":\"본문\"}}";
+		Function<String, StubHttpServer.Reply> chunks = body -> {
+			if (body.contains("\"match\"")) return hits();
+			if (body.contains("\"k\":1,")) return body.contains(b.toString()) ? hits(String.format(chunk, b, 7, b, 7)) : hits();
+			return hits(String.format(chunk, a, 2, a, 2));
+		};
+		String tags = "{\"_source\":{\"doc_id\":\"%s\",\"run_seq\":1}}";
+		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", chunks)
+				.reply("/thr_doc_tag/_search", 200, "{\"hits\":{\"hits\":[" + String.format(tags, c) + "," + String.format(tags, b) + ","
+						+ String.format(tags, a) + "]}}")) {
+			var result = tagged(es, true).search(scope(a, b, c), "연차", new float[] {1, 0, 0});
+
+			assertThat(result).extracting(ChunkSearcher.Hit::chunkId).containsExactly(a + ":1:2", b + ":1:7");
+			assertThat(es.requests).filteredOn(request -> request.body().contains("\"k\":1,")).as("a는 벡터 결과를 재사용한다").hasSize(2)
+					.allSatisfy(request -> assertThat(request.body()).contains("\"similarity\":0.35").doesNotContain(a.toString()));
+			assertThat(es.requests).filteredOn(request -> request.path().startsWith("/thr_doc_tag")).singleElement()
+					.satisfies(request -> assertThat(request.body()).contains("kyw^2").contains("\"minimum_should_match\":\"40%\""));
+		}
+	}
+
+	@Test
+	void aTagChannelOutageKeepsTheOtherChannelsAndADisabledChannelSendsNothing() throws Exception {
+		UUID a = UUID.randomUUID();
+		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
+		for (boolean enabled : List.of(true, false)) {
+			try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
+					.reply("/thr_doc_tag/_search", 404, "{\"error\":{\"type\":\"index_not_found_exception\"}}")) {
+				var result = tagged(es, enabled).search(scope(a), "연차", new float[] {1, 0, 0});
+
+				assertThat(result).as("enabled=" + enabled).singleElement().satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
+				assertThat(es.requests.stream().anyMatch(request -> request.path().startsWith("/thr_doc_tag"))).isEqualTo(enabled);
+			}
+		}
+	}
+
+	private static StubHttpServer.Reply hits(String... hits) {
+		return new StubHttpServer.Reply(200, "{\"hits\":{\"hits\":[" + String.join(",", hits) + "]}}");
+	}
+
+	private static ThreadDocumentScope scope(UUID... documents) {
+		return new ThreadDocumentScope(UUID.randomUUID(), ThreadScopeFilter.of(List.of(UUID.randomUUID())),
+				List.of(documents).stream().map(document -> new ThreadDocumentScope.Target(document, "a.txt", 1, "bge-m3", 3)).toList());
+	}
+
+	private static ChunkSearcher tagged(StubHttpServer es, boolean enabled) {
+		return new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)), null, null,
+				new RagProperties.Search(5, 2, 20, 100, 0.5, "75%", 60, 2, 10), true),
+				new RagTagProperties(enabled, "thr_doc_tag", "40%", 10, 0.35), WebClient.builder(), JsonMapper.builder().build());
 	}
 }

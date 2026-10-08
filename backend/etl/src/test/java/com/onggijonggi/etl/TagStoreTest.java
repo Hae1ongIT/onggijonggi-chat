@@ -1,0 +1,141 @@
+package com.onggijonggi.etl;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.onggijonggi.common.document.TagPrompt;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+/**
+ * Class Name : TagStoreTest.java
+ * Description : 처리 회차별 태그(#362)의 대상 조회와 저장을 실제 최신 스키마(PostgreSQL)에서 확인한다 — 현재 회차만, READY만, 태그 없음 →
+ *               설정이 바뀐 태그 → 실패 재시도 순서, 미분류·같은 설정은 다시 하지 않음, 재태깅 실패가 기존 태그를 지우지 않음, 정리된
+ *               회차에는 태그를 남기지 않음.
+ */
+@Testcontainers(disabledWithoutDocker = true)
+class TagStoreTest {
+
+	@Container static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
+			.withDatabaseName("tags").withUsername("test").withPassword("test");
+	static JdbcTemplate jdbc;
+	static TagStore store;
+	static final String CURRENT = "tag-v1:m:now";
+
+	@BeforeAll
+	static void setUp() {
+		Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+				.locations("classpath:db/migration").load().migrate();
+		var dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+		jdbc = new JdbcTemplate(dataSource);
+		store = new TagStore(jdbc, new DataSourceTransactionManager(dataSource));
+	}
+
+	@BeforeEach
+	void clear() {
+		jdbc.execute("truncate thr_doc_tag, thr_doc_run, thr_doc cascade");
+	}
+
+	@Test
+	void targetsAreTheCurrentRunsOfReadyDocumentsThatNeedTagsInPriorityOrder() throws SQLException {
+		UUID untagged = readyDocument();
+		UUID upToDate = readyDocument();
+		tag(upToDate, 1, "DONE", CURRENT, "now() - interval '1 hour'");
+		UUID unclassified = readyDocument();
+		jdbc.update("insert into thr_doc_tag(id, doc_id, tnn_id, thr_id, run_seq, status, ctg, tag_cnf) values (?, ?, ?, ?, 1, 'DONE', ?, ?)",
+				UUID.randomUUID(), unclassified, UUID.randomUUID(), UUID.randomUUID(), TagPrompt.UNCLASSIFIED, CURRENT);
+		UUID outdated = readyDocument();
+		tag(outdated, 1, "DONE", "tag-v1:m:old", "now() - interval '1 hour'");
+		UUID retryDue = readyDocument();
+		tag(retryDue, 1, "FAILED", CURRENT, "now() - interval '1 second'");
+		UUID retryLater = readyDocument();
+		tag(retryLater, 1, "FAILED", CURRENT, "now() + interval '1 hour'");
+		UUID failedDoc = readyDocument();
+		jdbc.update("update thr_doc set status = 'FAILED' where id = ?", failedDoc);
+		UUID rebuilt = readyDocument();
+		tag(rebuilt, 1, "DONE", CURRENT, "now() - interval '1 hour'");
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status) values (?, ?, ?, ?, 2, 'DONE')",
+				UUID.randomUUID(), rebuilt, UUID.randomUUID(), UUID.randomUUID());
+
+		var targets = store.targets(CURRENT, 20);
+
+		assertThat(targets).extracting(TagStore.Target::document).containsExactlyInAnyOrder(untagged, outdated, retryDue, rebuilt);
+		assertThat(targets.get(targets.size() - 2).document()).as("설정이 바뀐 태그는 태그 없음 뒤").isEqualTo(outdated);
+		assertThat(targets.get(targets.size() - 1).document()).as("실패 재시도가 마지막").isEqualTo(retryDue);
+		assertThat(targets).filteredOn(target -> target.document().equals(rebuilt)).singleElement()
+				.satisfies(target -> assertThat(target.runSeq()).as("현재(가장 큰 DONE) 회차").isEqualTo(2));
+		assertThat(store.targets(CURRENT, 1)).hasSize(1);
+	}
+
+	@Test
+	void tagsAreSavedOnlyWhileTheRunIsStillCurrentAndAFailedRetagKeepsTheOldTags() throws SQLException {
+		UUID document = readyDocument();
+		TagStore.Target target = store.targets(CURRENT, 10).get(0);
+
+		assertThat(store.saveDone(target, new TagPrompt.Tags("기타", List.of("연차", "이월"), "요약"), CURRENT)).isTrue();
+		Map<String, Object> row = jdbc.queryForMap("select status, ctg, array_to_string(kyw, ',') as kyw, smm, tag_cnf from thr_doc_tag where doc_id = ?", document);
+		assertThat(row).containsEntry("status", "DONE").containsEntry("ctg", "기타").containsEntry("kyw", "연차,이월").containsEntry("smm", "요약");
+
+		store.saveFailed(target, "TAGGING_UNAVAILABLE", "tag-v1:m:newer", Duration.ofHours(1));
+		assertThat(jdbc.queryForMap("select status, ctg, tag_cnf, err from thr_doc_tag where doc_id = ?", document))
+				.as("이전 태그는 남기고 간격만 둔다").containsEntry("status", "DONE").containsEntry("ctg", "기타").containsEntry("tag_cnf", CURRENT)
+				.containsEntry("err", "TAGGING_UNAVAILABLE");
+		assertThat(store.targets("tag-v1:m:newer", 10)).as("간격이 지나기 전에는 다시 잡지 않는다").isEmpty();
+
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id = ?", document);
+		assertThat(store.saveDone(target, TagPrompt.Tags.unclassified(), CURRENT)).as("지워진 문서에는 남기지 않는다").isFalse();
+		store.delete(document, 1);
+		assertThat(jdbc.queryForObject("select count(*) from thr_doc_tag", Integer.class)).isZero();
+	}
+
+	@Test
+	void aFirstFailureIsRecordedForALaterRetry() throws SQLException {
+		UUID document = readyDocument();
+		TagStore.Target target = store.targets(CURRENT, 10).get(0);
+
+		store.saveFailed(target, "SOURCE_MISSING", CURRENT, Duration.ofHours(1));
+
+		assertThat(jdbc.queryForMap("select status, ctg, tag_cnf, att_cnt from thr_doc_tag where doc_id = ?", document))
+				.containsEntry("status", "FAILED").containsEntry("ctg", null).containsEntry("tag_cnf", CURRENT).containsEntry("att_cnt", 1);
+		assertThat(store.targets(CURRENT, 10)).isEmpty();
+		jdbc.update("update thr_doc_tag set next_at = now() - interval '1 second'");
+		assertThat(store.targets(CURRENT, 10)).hasSize(1);
+	}
+
+	private static void tag(UUID document, int runSeq, String status, String fingerprint, String nextAt) {
+		jdbc.update("insert into thr_doc_tag(id, doc_id, tnn_id, thr_id, run_seq, status, ctg, tag_cnf, next_at) values (?, ?, ?, ?, ?, ?, ?, ?, "
+				+ nextAt + ")", UUID.randomUUID(), document, UUID.randomUUID(), UUID.randomUUID(), runSeq, status, "DONE".equals(status) ? "기타" : null,
+				fingerprint);
+	}
+
+	/** READY 문서와 그 1회차(DONE). 방·사용자 FK는 이 저장소와 무관해 픽스처 연결에서만 건너뛴다. */
+	private static UUID readyDocument() throws SQLException {
+		UUID id = UUID.randomUUID();
+		try (var connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+				var statement = connection.createStatement()) {
+			statement.execute("set session_replication_role = replica");
+			try (var doc = connection.prepareStatement("insert into thr_doc(id, tnn_id, thr_id, user_id, file_name, file_size, src_key, status)"
+					+ " values (?, ?, ?, ?, 'a.txt', 1, ?, 'READY')")) {
+				doc.setObject(1, id); doc.setObject(2, UUID.randomUUID()); doc.setObject(3, UUID.randomUUID()); doc.setObject(4, UUID.randomUUID());
+				doc.setString(5, "a".repeat(64));
+				doc.executeUpdate();
+			}
+		}
+		jdbc.update("insert into thr_doc_run(id, doc_id, tnn_id, thr_id, run_seq, status, chunk_cnt) values (?, ?, ?, ?, 1, 'DONE', 3)",
+				UUID.randomUUID(), id, UUID.randomUUID(), UUID.randomUUID());
+		return id;
+	}
+}
