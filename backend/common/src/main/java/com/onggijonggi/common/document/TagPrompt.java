@@ -3,12 +3,15 @@ package com.onggijonggi.common.document;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
-import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
+import tools.jackson.core.json.JsonReadFeature;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectReader;
@@ -32,9 +35,14 @@ public final class TagPrompt {
 	/** 키워드 하나의 최대 길이. 넘으면 버린다(문장을 키워드로 돌려준 경우). */
 	static final int KEYWORD_MAX_CHARS = 40;
 
-	private static final JsonMapper JSON = JsonMapper.builder().build();
+	/** 응답 JSON은 너그럽게 읽는다 — 문자열 안의 실제 줄바꿈·탭(이스케이프 안 됨) 하나로 응답 전체를 미분류로 버리지 않게. */
+	private static final JsonMapper JSON = JsonMapper.builder().enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS).build();
 	private static final ObjectReader FIRST_VALUE = JSON.readerFor(JsonNode.class).without(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+	/** JSON 객체를 찾으려고 시도하는 여는 중괄호 수 상한(앞에 설명 문장 속 중괄호가 있을 때). */
+	private static final int OBJECT_TRIES = 20;
 	private static final Pattern CONTROL = Pattern.compile("\\p{Cntrl}");
+	/** 값 앞뒤의 공백류: 일반 공백 외에 NBSP 등 유니코드 공백과 보이지 않는 문자. */
+	private static final Pattern EDGE_BLANKS = Pattern.compile("^[\\s\\p{Z}\\u200B-\\u200D\\u2060\\uFEFF]+|[\\s\\p{Z}\\u200B-\\u200D\\u2060\\uFEFF]+$");
 	/** 여는 꺾쇠(＜·&lt; 포함) 뒤 공백·/·보이지 않는 문자를 건너 document가 오는 곳. */
 	private static final Pattern DOCUMENT_TAG = Pattern.compile("(?:<|＜|&lt;|&#0*60;|&#x0*3c;)[\\s/\\u200B-\\u200D\\u2060\\uFEFF]*document",
 			Pattern.CASE_INSENSITIVE);
@@ -112,36 +120,56 @@ public final class TagPrompt {
 	public static Tags parse(String content, Settings settings) {
 		JsonNode node = object(content);
 		if (node == null) return Tags.unclassified();
-		String category = text(node.path("category"));
-		if (!settings.categories().contains(category)) category = UNCLASSIFIED;
-		Set<String> keywords = new LinkedHashSet<>();
-		for (JsonNode keyword : node.path("keywords")) {
+		String category = category(text(node.path("category")), settings.categories());
+		Set<String> seen = new HashSet<>();
+		List<String> keywords = new ArrayList<>();
+		// 키워드는 문자열 배열만 받는다(숫자·객체·중첩 배열은 버린다). 대소문자만 다른 것은 한 번만 남긴다.
+		JsonNode values = node.path("keywords");
+		for (JsonNode keyword : values.isArray() ? values : JSON.createArrayNode()) {
+			if (!keyword.isString()) continue;
 			String value = text(keyword);
-			if (!value.isEmpty() && value.length() <= KEYWORD_MAX_CHARS) keywords.add(value);
+			if (!value.isEmpty() && value.length() <= KEYWORD_MAX_CHARS && seen.add(normalize(value))) keywords.add(value);
 			if (keywords.size() >= settings.maxKeywords()) break;
 		}
 		String summary = text(node.path("summary"));
 		if (summary.length() > settings.summaryMaxChars()) summary = cut(summary, settings.summaryMaxChars()).strip();
-		return new Tags(category, new ArrayList<>(keywords), summary);
+		return new Tags(category, keywords, summary);
 	}
 
 	/** 응답에서 첫 JSON 객체를 꺼낸다(코드 블록 표시나 앞뒤 문장이 붙어도 — 뒤 문장에 중괄호가 있어도). 없으면 null. */
 	private static JsonNode object(String content) {
 		if (content == null) return null;
+		// 앞에 설명 문장 속 중괄호(예: "{category} 형식")가 있어도 찾게, 여는 중괄호마다 읽어 category가 있는 첫 객체를 고른다.
+		// 그런 객체가 없으면 처음 읽힌 객체를 쓴다. 각 시도는 첫 값만 읽고 뒤에 남은 글은 보지 않는다.
+		JsonNode first = null;
 		int start = content.indexOf('{');
-		if (start < 0) return null;
-		try {
-			// 첫 값만 읽고 뒤에 남은 글은 보지 않는다.
-			JsonNode node = FIRST_VALUE.readValue(content.substring(start));
-			return node != null && node.isObject() ? node : null;
-		} catch (RuntimeException malformed) {
-			return null;
+		for (int tries = 0; start >= 0 && tries < OBJECT_TRIES; tries++, start = content.indexOf('{', start + 1)) {
+			try {
+				JsonNode node = FIRST_VALUE.readValue(content.substring(start));
+				if (node == null || !node.isObject()) continue;
+				if (node.has("category")) return node;
+				if (first == null) first = node;
+			} catch (RuntimeException malformed) {
+				// 다음 중괄호에서 다시 본다.
+			}
 		}
+		return first;
+	}
+
+	/** 설정 목록에서 같은 카테고리를 찾는다(대소문자·전각 차이는 같게 본다). 돌려주는 값은 설정에 적힌 이름이다. 없으면 미분류. */
+	private static String category(String answer, List<String> categories) {
+		String wanted = normalize(answer);
+		return categories.stream().filter(name -> normalize(name).equals(wanted)).findFirst().orElse(UNCLASSIFIED);
+	}
+
+	/** 비교용: 호환 정규화(전각→반각 등)와 소문자. */
+	private static String normalize(String value) {
+		return Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
 	}
 
 	/** 응답 값을 글자로 꺼낸다. 제어 문자(NUL 등)는 공백으로 바꾼다 — PostgreSQL text는 NUL을 받지 않아 저장이 계속 실패한다. */
 	private static String text(JsonNode value) {
-		return CONTROL.matcher(value.asString("")).replaceAll(" ").strip();
+		return EDGE_BLANKS.matcher(CONTROL.matcher(value.asString("")).replaceAll(" ")).replaceAll("");
 	}
 
 	/** 앞에서 max자까지 자른다. 이모지 같은 보충 문자의 반쪽을 남기지 않는다. */

@@ -108,8 +108,14 @@ public class TaggingWorker implements SmartLifecycle {
 		// 기동 뒤 처음, 또는 태그 색인만 사라졌으면(색인 삭제·스냅샷 복원) DB가 정본이므로 DB 태그로 다시 채운다 — LLM은 다시 부르지 않는다.
 		if (index.check()) restorePending = true;
 		if (restorePending) {
-			restoreIndex();
-			restorePending = false;
+			try {
+				restoreIndex();
+				restorePending = false;
+			} catch (RuntimeException error) {
+				// 다음 주기에 다시 한다. 태깅은 막지 않는다 — 복원이 계속 실패해도 새 태그는 붙는다(단건 쓰기는 별칭을 다시 확인한다).
+				log.warn("태그 검색 인덱스를 DB 태그로 맞추지 못했다({}) — 다음 주기에 다시 한다", error instanceof EtlFailure failure
+						? reason(failure.code(), failure) : error.getClass().getSimpleName());
+			}
 		}
 		String fingerprint = settings.fingerprint();
 		List<TagStore.Target> targets = store.targets(fingerprint, settings.batch());

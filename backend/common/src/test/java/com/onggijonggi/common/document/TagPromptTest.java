@@ -82,6 +82,24 @@ class TagPromptTest {
 		}
 	}
 
+	/** 모델이 형식을 조금 어겨도 영구 미분류로 굳지 않게 너그럽게 읽는다. */
+	@Test
+	void slightlyMalformedAnswersAreStillRead() {
+		// 앞에 설명 문장 속 중괄호가 있어도 category가 있는 객체를 찾는다.
+		assertThat(TagPrompt.parse("형식은 {category} 입니다.\n{\"category\":\"보안·IT\",\"keywords\":[\"a\"],\"summary\":\"x\"}", settings).category())
+				.isEqualTo("보안·IT");
+		// 문자열 안의 실제 줄바꿈·탭은 공백이 된다.
+		assertThat(TagPrompt.parse("{\"category\":\"기타\",\"keywords\":[\"a\tb\"],\"summary\":\"첫 줄\n둘째 줄\"}", settings))
+				.isEqualTo(new TagPrompt.Tags("기타", List.of("a b"), "첫 줄 둘째 줄"));
+		// 카테고리는 대소문자·전각 차이를 같게 보고 설정의 이름으로 돌려준다.
+		for (String variant : List.of("보안·it", "보안·ＩＴ", " 보안·IT "))
+			assertThat(TagPrompt.parse("{\"category\":\"" + variant + "\"}", settings).category()).as(variant).isEqualTo("보안·IT");
+		// 키워드는 문자열만, 보이지 않는 공백류는 버리고, 대소문자만 다른 것은 한 번만.
+		assertThat(TagPrompt.parse("{\"category\":\"기타\",\"keywords\":[\"\u00a0\",\"\u200b\",1,true,{\"a\":1},[\"n\"],\"VPN\",\"vpn\",\"망\"]}", settings)
+				.keywords()).containsExactly("VPN", "망");
+		assertThat(TagPrompt.parse("{\"category\":\"기타\",\"keywords\":{\"k\":\"v\"}}", settings).keywords()).isEmpty();
+	}
+
 	@Test
 	void onlyTheFirstObjectIsReadAndASummaryIsNotCutInsideACharacter() {
 		var tags = TagPrompt.parse("{\"category\":\"기타\",\"keywords\":[\"연차\"],\"summary\":\"요약\"} (참고: 위 결과는 {1} 기준)", settings);
