@@ -52,21 +52,25 @@ public class Tagger {
 	 * 포함해 고르게 max개를 고른다.
 	 */
 	static List<String> parts(String text, int size, int max) {
-		List<String> all = new ArrayList<>();
+		// 경계만 먼저 정하고 고른 덩어리만 자른다 — 큰 문서에서 쓰지 않을 덩어리 수백 개를 복사하지 않게.
+		List<Integer> starts = new ArrayList<>();
 		int from = 0;
 		while (from < text.length()) {
+			starts.add(from);
 			int end = Math.min(text.length(), from + size);
 			if (end < text.length()) {
 				int newline = text.lastIndexOf('\n', end);
 				if (newline > from + size / 2) end = newline;
 			}
-			all.add(text.substring(from, end));
 			from = end;
 		}
-		if (all.size() <= max) return all;
-		if (max <= 1) return List.of(all.get(0));
-		List<String> picked = new ArrayList<>(max);
-		for (int i = 0; i < max; i++) picked.add(all.get((int) ((long) i * (all.size() - 1) / (max - 1))));
-		return picked;
+		int count = starts.size();
+		List<Integer> picked = new ArrayList<>();
+		if (count <= max) for (int i = 0; i < count; i++) picked.add(i);
+		else if (max <= 1) picked.add(0);
+		else for (int i = 0; i < max; i++) picked.add((int) ((long) i * (count - 1) / (max - 1)));
+		List<String> parts = new ArrayList<>(picked.size());
+		for (int i : picked) parts.add(text.substring(starts.get(i), i + 1 < count ? starts.get(i + 1) : text.length()));
+		return parts;
 	}
 }

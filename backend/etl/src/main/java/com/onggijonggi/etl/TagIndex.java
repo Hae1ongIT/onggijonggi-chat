@@ -80,12 +80,15 @@ public class TagIndex {
 		}
 	}
 
-	/** 한 회차의 태그를 쓴다(같은 회차면 덮어쓴다). 검색에 바로 보이게 refresh를 기다린다. */
+	/**
+	 * 한 회차의 태그를 쓴다(같은 회차면 덮어쓴다). refresh는 기다리지 않는다 — Elasticsearch가 1초 안에 검색에 반영하고, 기다리면
+	 * 태깅이 문서마다 약 1초씩 늘었다(한 번에 문서 하나씩 하므로 첫 배포 대량 태깅이 그만큼 길어진다).
+	 */
 	public void write(TagStore.Target target, TagPrompt.Tags tags, String fingerprint) {
 		ensure();
 		Map<String, Object> document = document(target.document(), target.thread(), target.tenant(), target.runSeq(), tags, fingerprint);
 		try {
-			client.put().uri("/{alias}/_doc/{id}?refresh=wait_for&require_alias=true", settings.alias(), tagId(target.document(), target.runSeq()))
+			client.put().uri("/{alias}/_doc/{id}?require_alias=true", settings.alias(), tagId(target.document(), target.runSeq()))
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(document))).retrieve().toBodilessEntity();
 		} catch (HttpClientErrorException.NotFound aliasMissing) {
 			ensured = false;
