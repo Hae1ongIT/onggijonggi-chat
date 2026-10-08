@@ -116,6 +116,26 @@ class TagStoreTest {
 		assertThat(store.targets(CURRENT, 10)).hasSize(1);
 	}
 
+	/** ETL 기동 때 지난 실패의 간격·횟수를 풀어 바로 다시 대상이 되게 한다 — 태그가 있는 회차의 재태깅 실패도(설정·주소를 고쳐 재기동한 경우). */
+	@Test
+	void failuresAreReleasedOnStartupIncludingAFailedRetag() throws SQLException {
+		UUID failed = readyDocument();
+		UUID retagged = readyDocument();
+		for (TagStore.Target target : store.targets(CURRENT, 10)) {
+			if (target.document().equals(retagged)) store.saveDone(target, new TagPrompt.Tags("기타", List.of(), "요약"), "tag-v1:m:old");
+			store.saveFailed(target, "TAGGING_REJECTED", CURRENT, Duration.ofDays(7), Duration.ofDays(7));
+		}
+		assertThat(store.targets(CURRENT, 10)).isEmpty();
+
+		assertThat(store.releaseFailures()).isEqualTo(2);
+
+		assertThat(store.targets(CURRENT, 10)).extracting(TagStore.Target::document).containsExactlyInAnyOrder(failed, retagged);
+		assertThat(jdbc.queryForObject("select sum(att_cnt) from thr_doc_tag", Integer.class)).isZero();
+		assertThat(jdbc.queryForMap("select status, ctg from thr_doc_tag where doc_id = ?", retagged)).as("태그는 그대로").containsEntry("status", "DONE")
+				.containsEntry("ctg", "기타");
+		assertThat(store.releaseFailures()).as("이미 풀린 행은 다시 세지 않는다").isZero();
+	}
+
 	/** 일시 장애가 잇따르면 간격을 두 배씩 늘려 상한까지 간다. 성공하면 횟수·사유가 지워진다. */
 	@Test
 	void repeatedFailuresBackOffUpToTheLimitAndASuccessClearsThem() throws SQLException {

@@ -81,6 +81,10 @@ class TagPromptTest {
 		var tags = TagPrompt.parse("{\"category\":\"기타\",\"keywords\":[\"연차\"],\"summary\":\"요약\"} (참고: 위 결과는 {1} 기준)", settings);
 		assertThat(tags).isEqualTo(new TagPrompt.Tags("기타", List.of("연차"), "요약"));
 
+		// PostgreSQL text가 받지 않는 NUL 같은 제어 문자는 공백이 된다.
+		assertThat(TagPrompt.parse("{\"category\":\"기타\",\"keywords\":[\"연\\u0000차\"],\"summary\":\"요\\u0000약\"}", settings))
+				.isEqualTo(new TagPrompt.Tags("기타", List.of("연 차"), "요 약"));
+
 		String emoji = "가".repeat(19) + "😀끝";
 		assertThat(TagPrompt.parse("{\"category\":\"기타\",\"summary\":\"" + emoji + "\"}", settings).summary()).isEqualTo("가".repeat(19));
 	}

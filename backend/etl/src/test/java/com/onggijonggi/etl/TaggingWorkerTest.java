@@ -61,6 +61,18 @@ class TaggingWorkerTest {
 	}
 
 	@Test
+	void aPermanentFailureThatCannotBeRecordedPausesInsteadOfSpinning() {
+		when(store.targets(anyString(), anyInt())).thenReturn(targets);
+		when(tagger.tag(any(RunStore.Job.class))).thenThrow(EtlFailure.permanent("SOURCE_MISSING", "원본 없음"));
+		org.mockito.Mockito.doThrow(new IllegalStateException("DB 끊김")).when(store)
+				.saveFailed(any(), anyString(), anyString(), any(Duration.class), any(Duration.class));
+		worker.start();
+
+		assertThat(worker.cycle()).as("같은 문서가 곧바로 다시 잡히니 쉰다").isZero();
+		verify(tagger, times(1)).tag(any(RunStore.Job.class));
+	}
+
+	@Test
 	void aTaggingCutOffByShutdownIsNotRecordedAsAFailure() {
 		when(tagger.tag(any(RunStore.Job.class))).thenThrow(EtlFailure.transientFailure("TAGGING_UNAVAILABLE", "인터럽트", null));
 

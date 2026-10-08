@@ -91,8 +91,9 @@ public class TagStore {
 	 */
 	public void saveFailed(Target target, String code, String fingerprint, Duration firstDelay, Duration maxDelay) {
 		transactions.executeWithoutResult(tx -> {
-			if (jdbc.queryForList("select id from thr_doc_run where doc_id = ? and run_seq = ? and status = 'DONE'", target.document(), target.runSeq())
-					.isEmpty())
+			// saveDone과 같이 회차 행을 잠가 정리(purged)와 순서를 지킨다 — 정리가 끝난 회차에 실패 행을 남기지 않게.
+			if (jdbc.queryForList("select id from thr_doc_run where doc_id = ? and run_seq = ? and status = 'DONE' for share", target.document(),
+					target.runSeq()).isEmpty())
 				return;
 			jdbc.update("insert into thr_doc_tag(id, doc_id, tnn_id, thr_id, run_seq, status, tag_cnf, att_cnt, err, next_at)"
 					+ " values (?, ?, ?, ?, ?, 'FAILED', ?, 1, ?, now() + ? * interval '1 millisecond')"
@@ -103,6 +104,15 @@ public class TagStore {
 					UUID.randomUUID(), target.document(), target.tenant(), target.thread(), target.runSeq(), fingerprint, code, firstDelay.toMillis(),
 				maxDelay.toMillis(), firstDelay.toMillis());
 		});
+	}
+
+	/**
+	 * 태깅 실패의 대기 간격과 재시도 횟수를 풀어 바로 다시 대상이 되게 한다(ETL 기동 때). 태깅 설정·서버 주소는 재기동으로만 바뀌므로,
+	 * 고친 뒤 영구 실패의 긴 간격이나 늘어난 일시 장애 간격을 기다리지 않게 한다. 이미 태그가 있는 회차의 재태깅 실패도 포함한다.
+	 * 풀어 준 행 수를 돌려준다.
+	 */
+	public int releaseFailures() {
+		return jdbc.update("update thr_doc_tag set next_at = now(), att_cnt = 0, updated_at = now() where err is not null and next_at > now()");
 	}
 
 	/** 회차 정리(RunSweeper) 때 그 회차의 태그를 지운다. 멱등이다. */

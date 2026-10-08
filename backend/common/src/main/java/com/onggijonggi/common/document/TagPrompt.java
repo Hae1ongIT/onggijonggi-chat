@@ -34,6 +34,7 @@ public final class TagPrompt {
 
 	private static final JsonMapper JSON = JsonMapper.builder().build();
 	private static final ObjectReader FIRST_VALUE = JSON.readerFor(JsonNode.class).without(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+	private static final Pattern CONTROL = Pattern.compile("\\p{Cntrl}");
 	private static final Pattern DOCUMENT_TAG = Pattern.compile("<(/?)document", Pattern.CASE_INSENSITIVE);
 
 	/** 뽑은 태그. 미분류면 category가 UNCLASSIFIED이고, 키워드·요약은 검사를 통과한 만큼 남는다. */
@@ -106,15 +107,15 @@ public final class TagPrompt {
 	public static Tags parse(String content, Settings settings) {
 		JsonNode node = object(content);
 		if (node == null) return Tags.unclassified();
-		String category = node.path("category").asString("").strip();
+		String category = text(node.path("category"));
 		if (!settings.categories().contains(category)) category = UNCLASSIFIED;
 		Set<String> keywords = new LinkedHashSet<>();
 		for (JsonNode keyword : node.path("keywords")) {
-			String value = keyword.asString("").strip();
+			String value = text(keyword);
 			if (!value.isEmpty() && value.length() <= KEYWORD_MAX_CHARS) keywords.add(value);
 			if (keywords.size() >= settings.maxKeywords()) break;
 		}
-		String summary = node.path("summary").asString("").strip();
+		String summary = text(node.path("summary"));
 		if (summary.length() > settings.summaryMaxChars()) summary = cut(summary, settings.summaryMaxChars()).strip();
 		return new Tags(category, new ArrayList<>(keywords), summary);
 	}
@@ -131,6 +132,11 @@ public final class TagPrompt {
 		} catch (RuntimeException malformed) {
 			return null;
 		}
+	}
+
+	/** 응답 값을 글자로 꺼낸다. 제어 문자(NUL 등)는 공백으로 바꾼다 — PostgreSQL text는 NUL을 받지 않아 저장이 계속 실패한다. */
+	private static String text(JsonNode value) {
+		return CONTROL.matcher(value.asString("")).replaceAll(" ").strip();
 	}
 
 	/** 앞에서 max자까지 자른다. 이모지 같은 보충 문자의 반쪽을 남기지 않는다. */
