@@ -241,6 +241,15 @@ services:
       SPRING_AI_OPENAI_API_KEY:             ${LITELLM_MASTER_KEY}
       SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL:  ${LLM_MODEL:-gemini-3.6-flash}
       APP_LLM_GATEWAY_URL:                  http://litellm:4000
+      APP_DOCUMENT_WORKER_URL: http://document-worker:8100
+      APP_DOCUMENT_INTERNAL_API_KEY: ${DOCUMENT_WORKER_INTERNAL_API_KEY}
+      # 방 문서 검색(#344). elasticsearch 프로필을 켜지 않으면 ES가 없어 검색 결과가 UNAVAILABLE일 뿐 BFF는 정상 기동한다(depends_on 없음).
+      # 질문 임베딩은 ETL과 같은 엔드포인트·모델이어야 한다. RAG_REWRITE_MODEL을 비우면 그 대화의 모델로 후속 질문을 다시 쓴다.
+      APP_RAG_ELASTICSEARCH_URL: http://elasticsearch:9200
+      APP_RAG_EMBEDDING_URL: ${EMBEDDING_URL:-}
+      APP_RAG_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      APP_RAG_REWRITE_MODEL: ${RAG_REWRITE_MODEL:-}
+      APP_RAG_SEARCH_API_ENABLED: ${RAG_SEARCH_API_ENABLED:-true}
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_FRONTEND_URL:-http://localhost:3010}
     volumes:
       # 조직 구조 설정. 두 파일을 모두 마운트하고 프로필이 고른다(application-prod / application-casbin.properties).
@@ -340,6 +349,39 @@ services:
     networks:
       - app-net
       - document-worker-net
+
+  # 06·DOCUMENT — 방 문서 인제스천 ETL 워커(#340). 등록된 방 문서를 추출·청킹·임베딩해 Elasticsearch에 적재한다.
+  # Elasticsearch 없이는 할 일이 없어 같은 프로필로 켠다(COMPOSE_PROFILES=elasticsearch). 포트를 열지 않는다.
+  # 스키마는 bff의 Flyway가 만들므로 bff가 뜬 뒤에 시작한다. EMBEDDING_URL이 비면 작업을 가져가지 않는다.
+  etl:
+    build:
+      context: ../backend
+      dockerfile: etl/Dockerfile
+    image: ${ETL_IMAGE:-ogjg-chat/etl:local}
+    container_name: backend-etl
+    profiles:
+      - elasticsearch
+    restart: unless-stopped
+    # 처리 중 회차를 최대 8초 기다린 뒤 놓아주고 Spring을 닫는다. 기본 10초면 그 전에 강제 종료될 수 있다.
+    stop_grace_period: 20s
+    environment:
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-appdb}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-appuser}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_ETL_WORKER_URL: http://document-worker:8100
+      APP_ETL_WORKER_API_KEY: ${DOCUMENT_WORKER_INTERNAL_API_KEY}
+      APP_ETL_ELASTICSEARCH_URL: http://elasticsearch:9200
+      APP_ETL_EMBEDDING_URL: ${EMBEDDING_URL:-}
+      APP_ETL_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+    depends_on:
+      bff:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      document-worker:
+        condition: service_healthy
+    networks:
+      - app-net
 
   seaweedfs-master:
     image: chrislusf/seaweedfs:3.80

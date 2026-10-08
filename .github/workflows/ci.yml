@@ -57,8 +57,9 @@ jobs:
   # 테스트 전체가 컴파일되지 않는 상태를 뒤늦게 고쳐야 했다(#43).
   backend:
     runs-on: ubuntu-latest
-    # 평소 3분 안팎이다. 멈추면 6시간을 기다리지 않고 실패시켜 스레드 덤프와 로그를 남긴다.
-    timeout-minutes: 20
+    # etl·api 통합 테스트가 nori Elasticsearch 이미지를 빌드·기동한다(같은 이미지 이름으로 만들어 도커 캐시로 재사용한다). 멈추면 6시간을 기다리지 않고 실패시켜
+    # 스레드 덤프와 로그를 남긴다.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -197,3 +198,18 @@ jobs:
       - name: 린트
         working-directory: frontend
         run: bun run lint:check
+
+  # worker — 문서 워커(06·DOCUMENT)의 단위 테스트. 내부 API key·원본 크기 상한·예약 만료·저장 시도 경로 격리처럼
+  # BFF가 기대는 원본 저장 계약을 검증한다. 가짜 저장소로 돌아 SeaweedFS·LibreOffice가 필요 없다.
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # requires-python(3.12)에 맞는 Python을 uv가 받아 쓴다. uv.lock 그대로 설치한다.
+      - uses: astral-sh/setup-uv@v6
+
+      - name: 테스트
+        working-directory: worker/doc
+        run: uv run --frozen pytest -q

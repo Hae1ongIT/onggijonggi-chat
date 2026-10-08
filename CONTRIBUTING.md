@@ -323,6 +323,21 @@ PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다
 주지 않으면 새 대화 생성이 503이다. 대화가 이미 있는 옛 로컬 DB는 `--spring.flyway.target=20260929055051721`으로
 한 번 띄워 고객사를 만든 뒤 target 없이 다시 띄운다(INSTALL.md「v0.2에서 올릴 때」).
 
+방 문서 등록·원본 열람은 문서 워커를 쓴다. 루트 compose의 워커는 호스트에 포트를 열지 않으므로, 호스트 `bootRun`에서는
+`worker/doc`에 `INTERNAL_API_KEY=<임의 값>` 한 줄짜리 `.env`를 만들고 `docker compose up -d --build`로 워커를 따로 띄운
+뒤(`127.0.0.1:8100`), 같은 값을 `application-local.properties`의 `app.document.internal-api-key`에 넣는다. 비우면 문서
+요청이 503이다(채팅은 영향 없음). 이 compose는 루트 스택과 컨테이너 이름이 같아 루트 스택의 워커와 동시에 띄울 수 없다.
+
+방 문서 ETL 워커(`backend/etl`)는 BFF와 따로 띄운다. 스키마는 BFF의 Flyway가 만드므로 BFF를 한 번 띄운 DB를 쓴다. Elasticsearch(`infra/`에서 `docker compose --profile elasticsearch up -d elasticsearch`)와 위 문서 워커, 임베딩 서버가 필요하다.
+
+```powershell
+.\gradlew.bat :etl:bootRun --args="--spring.datasource.password=<DB 비밀번호> --app.etl.worker.api-key=<문서 워커 key> --app.etl.embedding.url=http://<임베딩 서버>"
+```
+
+`app.etl.embedding.url`을 비우면 문서를 처리하지 않고 경고만 남긴다. 테스트(`.\gradlew.bat :etl:test`)는 Docker로 PostgreSQL과 nori를 넣은 Elasticsearch를 띄우고 문서 워커·임베딩 서버는 가짜로 대신한다(처음엔 Elasticsearch 이미지 빌드로 몇 분 걸린다).
+
+방 문서 검색(BFF, #344)을 로컬에서 확인하려면 `application-local.properties`에 ETL과 같은 `app.rag.embedding.url`을 넣는다. 비우면 검색 결과가 `UNAVAILABLE`이다. Elasticsearch는 기본 `localhost:9200`을 본다. 검색 기준 수치를 바꿀 때는 평가 세트를 실제 임베딩으로 돌려 비교한다(`.\gradlew.bat :api:ragEval` — 필요한 환경변수는 테스트 클래스 `RagEvaluationTest` 주석에 있다).
+
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 
 `http://localhost:8090/actuator/health`가 `{"status":"UP"}`이면 정상이다.

@@ -205,7 +205,7 @@ docker volume rm ogjg-chat_postgres-data
 docker compose up -d --build
 ```
 
-> ⚠️ **로그인 계정과 대화 내용이 함께 지워진다.** `.env`의 `APP_USER`로 만들어지는 기본 계정은 자동으로 다시 생긴다.
+> ⚠️ **로그인 계정과 대화 내용이 함께 지워진다.** 대화방에 등록한 문서 원본은 문서 워커의 SeaweedFS 볼륨(`ogjg-chat_document-worker-seaweed-volume`·`ogjg-chat_document-worker-seaweed-filer`)에 따로 남으므로, 함께 지우려면 이 두 볼륨도 지운다. `.env`의 `APP_USER`로 만들어지는 기본 계정은 자동으로 다시 생긴다.
 
 ---
 
@@ -246,6 +246,54 @@ docker compose -f infra/docker-compose.yml restart casbin
 끄려면 두 줄을 지우고 `docker compose --profile casbin down` 뒤 다시 띄운다. 단, 기존 대화 절체를 마치고 완료 표지가 기록된 DB에서는 끌 수 없다(아래「v0.2에서 올릴 때」).
 
 ---
+
+## 방 문서 검색 준비 켜기 (ETL)
+
+대화방에 등록한 문서를 검색에 쓰려면 원본에서 글자를 뽑아 잘게 나누고(청크) 임베딩해 Elasticsearch에 넣어야 한다. 이 일은 BFF와 따로 도는 ETL 워커(`etl` 서비스)가 한다. **기본으로 꺼져 있다** — 꺼져 있어도 문서 등록·고정·원본 열람은 되고, 문서는 "처리 대기"에 머문다.
+
+**1. `infra/.env`에 세 줄을 넣고 다시 띄운다.**
+
+```bash
+COMPOSE_PROFILES=elasticsearch
+EMBEDDING_URL=http://<임베딩 서버 주소>:<포트>
+EMBEDDING_MODEL=bge-m3
+```
+
+다른 프로필과 함께 쓰면 쉼표로 잇는다(예: `COMPOSE_PROFILES=casbin,elasticsearch`). `EMBEDDING_URL`은 OpenAI 호환 `/v1/embeddings`를 제공하는 사내 임베딩 서버 주소이고, 모델은 1024차원 벡터를 내야 한다(bge-m3). 비워 두면 ETL 워커가 떠도 문서를 처리하지 않고 경고만 남긴다.
+
+```bash
+docker compose up -d --build
+```
+
+**✅ 성공**: `docker compose ps`에 `elasticsearch`와 `etl`이 보이고, `docker compose logs etl`에 `문서 처리 스레드 2개 시작`이 찍힌다. 대화방에 문서를 등록하면 상태가 "처리 대기" → "처리 중" → "검색 준비 완료"로 바뀐다. 이미 등록돼 있던 "처리 대기" 문서도 이어서 처리한다.
+
+시작 로그 대신 `문서 처리를 시작하지 않는다`나 `문서 처리가 꺼져 있다`(5분마다)가 찍히면 `EMBEDDING_URL`이 비었거나 임베딩 모델의 벡터 차원이 1024가 아닌 것이다. 이때 컨테이너는 떠 있어 `docker compose ps`만으로는 알 수 없다.
+
+처리에 실패하면 "처리 실패"로 남고, 올린 사람이나 방장이 "다시 처리"로 보관된 원본을 다시 처리할 수 있다. 원인은 `docker compose logs etl`의 `문서 처리 실패(사유 코드)`에 있다. 임베딩 서버·Elasticsearch가 잠시 끊기거나 내부 key가 어긋나면 간격을 두고(30초·2분·10분·30분) 다시 시도한다. 약 40분 넘게 끊기면 "처리 실패"로 남으니, 복구된 뒤 "다시 처리"를 누른다.
+
+**알아둘 것**
+- 메모리: Elasticsearch가 `ES_HEAP`(기본 1g)에 더해 여유를 쓰고, ETL은 컨테이너 메모리의 절반까지 힙을 쓴다. 두 서비스를 켜면 2~3GB 정도를 더 잡는다.
+- 리눅스 호스트에서 Elasticsearch가 `max virtual memory areas vm.max_map_count [65530] is too low`로 뜨지 않으면 `sudo sysctl -w vm.max_map_count=262144`를 한다(재부팅 뒤에도 유지하려면 `/etc/sysctl.conf`에 적는다).
+- 배포(재기동) 때 처리 중이던 문서는 다음 기동에서 이어서 처리한다.
+- 검색: BFF가 같은 `EMBEDDING_URL`로 질문을 임베딩해 현재 방의 고정·검색 준비 완료 문서 안에서 찾는다. 채팅 답변에는 아직 붙지 않았고(후속), `POST /api/threads/{방 ID}/documents/search`(본문 `{"question": "..."}`)로 무엇이 찾아지는지 확인할 수 있다. 다른 API처럼 로그인 토큰(`Authorization: Bearer ...`)이 필요하고, 그 방 참여자만 부를 수 있다(아니면 401·404). 응답 `status`는 `FOUND`(근거 있음)·`NO_EVIDENCE`(고정·검색 준비 완료 문서가 없거나 질문에 맞는 내용이 없음)·`UNAVAILABLE`(검색을 끝내지 못함 — 장애도 200으로 돌려준다)이고, `reason`이 그 사유다(`MODEL_MISMATCH`는 임베딩 모델을 바꾼 뒤 이전 모델로 처리된 문서가 방에 하나라도 있으면 그 방 검색 전체에 나온다. 바꾼 설정으로 ETL을 다시 띄우면 이전 모델 문서를 자동으로 다시 처리하고(아래 "다시 만들기"), 끝나면 풀린다). 이 확인 API를 끄려면 `.env`에 `RAG_SEARCH_API_ENABLED=false`를 넣는다(404가 된다). 값은 `true`·`false`만 쓴다 — 다른 값이면 BFF가 뜨지 않는다.
+- 후속 질문("그럼 그거는?")은 검색 전에 대화 모델로 검색 문장을 다시 쓴다. 기본은 그 대화에 쓰는 모델이라 새로 외부로 나가는 경로는 없다. **운영에서는 사내 모델로 고정하기를 권한다** — `.env`에 `RAG_REWRITE_MODEL=<LiteLLM 모델 이름>`. 비워 두면 사용자가 고른 모델(외부 공급자일 수 있다)로 다시 쓰므로 비용과 외부 전송이 그 모델을 따른다. 추론(thinking)을 하는 모델은 출력 한도(512토큰)를 추론에 써서 결과가 잘리면 다시 쓰기를 버리고 질문 그대로 검색한다(BFF 로그 `출력 한도에서 잘림`) — 추론하지 않는 모델을 고른다.
+- 검색 인덱스는 버전 이름(`thr_doc_chunk_v2`)과 별칭(`thr_doc_chunk`)으로 나뉜다. 이전 버전(`thr_doc_chunk_v1`)이 있는 서버에 새 버전을 배포하면 ETL이 기동하자마자 청크를 새 인덱스로 옮기고 별칭을 넘긴다(재처리·재임베딩 없음, 청크가 많으면 몇 분 걸린다). 끝나면 `docker compose logs etl`에 `검색 인덱스를 옮겼다`가 찍힌다. 이전 인덱스는 남겨 두므로 **아래 두 가지를 확인한 뒤에만**, 그리고 확인되면 미루지 말고 지운다 — v1에는 이전 뒤에 지운 문서도 본문째 남는다(검색에는 나오지 않지만 ES 볼륨·스냅샷에 남는다) — 별칭이 아직 v1을 가리킬 때 지우면 청크가 모두 사라져, 원본에서 다시 만들(아래 자동 복구) 때까지 검색이 안 된다.
+
+  ```bash
+  curl -s http://127.0.0.1:9200/_alias/thr_doc_chunk        # 결과에 thr_doc_chunk_v2만 있어야 한다
+  curl -s http://127.0.0.1:9200/thr_doc_chunk_v1/_count     # 두 count가 같아야 한다
+  curl -s http://127.0.0.1:9200/thr_doc_chunk_v2/_count
+  curl -X DELETE http://127.0.0.1:9200/thr_doc_chunk_v1     # 위가 모두 맞을 때만
+  ```
+- **다시 만들기(자동)**: ETL은 "검색 준비 완료" 문서의 검색 조각을 스스로 다시 만든다. 그동안 문서는 "검색 준비 완료" 그대로이고 이전 조각으로 계속 검색되며, 새 조각이 다 만들어지는 순간 바뀐다. 사용자가 새로 올린 문서와 조각이 사라진 문서를 먼저 처리하고(설정 변경·운영자 다시 만들기는 그 뒤), 처리량은 평소 동시 처리 수(2) 그대로다.
+  - **조각이 사라졌을 때**: Elasticsearch 볼륨 삭제·서버 이전 등으로 조각이 없어지면 10분마다 하는 대조에서 찾아 원본에서 다시 만든다(`docker compose logs etl`의 `검색 조각이 빠진 문서 N건을 다시 만든다`). 복구가 끝나기 전에는 검색이 "근거 없음"(`NO_EVIDENCE`)으로 나온다. 원본까지 없거나 손상돼 다시 만들 수 없는 문서는 "처리 실패"가 된다(고정돼 있으면 화면에 "답변에 쓰이지 않습니다"가 함께 보인다). 임베딩 서버·Elasticsearch가 오래 끊기거나 설정 실수로 거절해 실패하면 "처리 실패"로 바꾸지 않고, 같은 문서는 한 시간에 한 번씩 다시 해 본다. Elasticsearch가 응답하지 않는 동안에는 대조하지 않는다.
+  - **설정을 바꿨을 때**: 임베딩 모델·차원(`EMBEDDING_MODEL` 등)이나 청킹 설정을 바꿔 ETL을 다시 띄우면, 이전 설정으로 처리된 문서를 기동 30초 뒤부터 다시 만든다(`처리 설정이 바뀐 문서 N건을 다시 만든다`). 다시 만들기에 실패한 문서는 이전 설정 조각으로 계속 검색되고(임베딩 모델을 바꾼 경우 그 방은 `MODEL_MISMATCH`), ETL 재기동이나 운영자 요청(`OUTDATED`) 때 다시 시도한다.
+- **다시 만들기(운영자)**: `PLATFORM_ADMIN` 계정 토큰으로 `POST /api/platform/rag/rebuilds`(본문 `{"scope":"ALL"}` 전체 또는 `{"scope":"OUTDATED"}` 설정이 바뀐 문서만)를 부르면 ETL이 30초 안에 대상을 골라 다시 만든다. ETL의 문서 처리가 꺼져 있거나(임베딩 주소 없음 등) 검색 인덱스 준비·이전이 끝나지 않았으면 요청은 `PENDING`으로 기다리고, 그동안 새 요청은 409다 — GET에서 `status`가 계속 `PENDING`(그리고 `targets`가 비어 있음)이면 ETL이 아직 요청을 집지 않은 것이다. `docker compose ps etl`로 ETL이 떠 있는지 보고, `docker compose logs etl`에서 `다시 만들기를 미룬다`(인덱스 준비·이전 중, 대기 회차 1000건 초과)나 `문서 처리가 꺼져 있다`를 찾는다. `OUTDATED`는 설정이 바뀐 문서가 없으면 `targets`가 0으로 끝나며 정상이다.
+  - **진행 확인**: 자동 복구는 `검색 조각이 빠진 문서 N건을 다시 만든다`로 시작해 문서마다 `문서 처리 완료 … kind=RECOVER`가 찍히고, 실패는 `문서 처리 실패 … kind=RECOVER`다. 대조가 끝날 때마다 `검색 조각 대조를 마쳤다`가 남는다(기본 10분 간격). `docker compose logs etl | grep -E "kind=(RECOVER|REBUILD)|대조를|다시 만들기를"`. 지금 기다리는 다시 만들기 수는 `docker compose exec postgres psql -U appuser -d appdb -c "select run_kind, status, count(*) from thr_doc_run where status in ('PENDING', 'RUNNING') group by 1, 2"`로 본다(`appuser`·`appdb`는 기본값 — `.env`의 `POSTGRES_USER`·`POSTGRES_DB`를 바꿨으면 그 값). 진행 상황은 `GET /api/platform/rag/rebuilds`(최근 10건)·`/api/platform/rag/rebuilds/{id}`의 `targets`(대상)·`remaining`(남음)·`failed`(실패)로 본다. 앞 요청이 아직 끝나지 않았으면 409(`REBUILD_IN_PROGRESS`, 문구에 진행 중 요청 ID)다.
+- Elasticsearch를 예전 스냅샷으로 되돌리면 그 뒤에 지운 문서·정리된 회차의 조각이 다시 생긴다. 검색에는 나오지 않지만(검색은 살아 있는 문서의 현재 회차만 본다) 저장소에 남으므로, 되돌린 뒤 `curl -X DELETE http://127.0.0.1:9200/thr_doc_chunk_v2`로 인덱스를 비우고 자동 복구로 다시 만드는 편이 깨끗하다(문서가 많으면 그만큼 다시 임베딩한다).
+- 문서의 한글이 자모 분해형(macOS에서 만든 파일 등)이면 이번 버전부터 조합형으로 맞춰 색인한다. 그 전에 올린 그런 문서는 키워드 검색이 맞지 않으므로 운영자 다시 만들기(`ALL`)로 한 번 다시 처리한다.
+- 이전 버전 이미지로 되돌려도 `thr_doc_chunk_v2`는 지우지 않는다 — 되돌린 ETL도 별칭이 가리키는 v2에 쓴다. ETL은 한 대로 띄운다(여러 대면 인덱스 이전이 겹친다).
+- 다시 만들기가 생기기 전 버전의 ETL로 되돌리면, 그 ETL은 대기 중인 다시 만들기 회차를 모두 취소한다(운영자 요청은 `COMPLETED`로 남아 성공한 것처럼 보인다). 되돌리기 전에 `GET /api/platform/rag/rebuilds`의 `remaining`이 0인지 보고, 새 버전을 다시 올린 뒤 필요하면 운영자 요청을 다시 한다. DB는 되돌리지 않는다 — 추가된 컬럼·테이블은 이전 코드가 쓰지 않는다. 자동 복구가 "처리 실패"로 바꾼 문서는 이전 화면의 "다시 처리"로 고칠 수 있고, 남은 조각은 새 버전을 다시 올리면 정리된다.
 
 ## Keycloak 관리 클라이언트와 권한 변경 감사
 

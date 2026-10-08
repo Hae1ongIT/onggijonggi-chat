@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "korean": {
+          "type": "custom",
+          "tokenizer": "nori_tokenizer",
+          "filter": ["lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "chunk_id": { "type": "keyword" },
+      "doc_id": { "type": "keyword" },
+      "thr_id": { "type": "keyword" },
+      "tnn_id": { "type": "keyword" },
+      "run_seq": { "type": "integer" },
+      "seq": { "type": "integer" },
+      "content": { "type": "text", "analyzer": "korean" },
+      "loc": { "type": "keyword" },
+      "emb": { "type": "dense_vector", "dims": 1024, "index": true, "similarity": "cosine" },
+      "emb_mdl": { "type": "keyword" }
+    }
+  }
+}

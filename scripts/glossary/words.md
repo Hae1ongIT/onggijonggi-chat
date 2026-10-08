@@ -92,9 +92,12 @@
 | `path` | 경로 |
 | `payload` | 적재 데이터 |
 | `pending` | 대기 중 |
+| `pinned` | 고정됨 |
+| `size` | 크기 |
 | `question` | 질문 |
 | `rank` | 직급 |
 | `reason` | 사유 |
+| `rebuild` | 다시 만들기 |
 | `reply` | 답글 |
 | `requester` | 요청자 |
 | `risk` | 위험 |
