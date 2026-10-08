@@ -147,12 +147,18 @@ class RagEvaluationTest {
 			}
 			if (!tags.isEmpty()) {
 				report.append("\n## 태그 채널(#362, 벡터 " + BASELINE_VECTOR + " · 키워드 " + BASELINE_KEYWORD + ")\n\n")
-						.append("| 태그 일치 | 대표 조각 하한 | 답 있는 질문 적중(상위5) | 상위1 | 정밀도 | 무관 질문 오채택 | 주제 질문 | 다른 표현 |\n|---|---|---|---|---|---|---|---|\n");
-				report.append(tagRow("끔", "-", searcher(esUrl, embeddingUrl, null, 0), questions, queries, vectors, scope, names));
-				for (String tagMinimum : TAG_MINIMUMS)
+						.append("태그 일치 질문은 태그 색인에 같은 질의를 직접 보내 한 문서라도 맞은 질문 수다(태그 채널이 실제로 돌았는지 확인용).\n")
+						.append("끔과 다른 질문은 상위 결과(조각 순서)가 끔과 달라진 질문 수다.\n\n")
+						.append("| 태그 일치 | 대표 조각 하한 | 태그 일치 질문(무관) | 끔과 다른 질문 | 답 있는 질문 적중(상위5) | 상위1 | 정밀도 | 무관 질문 오채택 | 주제 질문 | 다른 표현 |\n|---|---|---|---|---|---|---|---|---|---|\n");
+				List<Outcome> off = outcomes(searcher(esUrl, embeddingUrl, null, 0), questions, queries, vectors, scope);
+				report.append(tagRow("끔", "-", "-", off, off, names));
+				RestClient es = RestClient.create(esUrl);
+				for (String tagMinimum : TAG_MINIMUMS) {
+					String matched = tagMatches(es, tagMinimum, questions, queries, scope);
 					for (double chunkMinimum : TAG_CHUNK_MINIMUMS)
-						report.append(tagRow(tagMinimum, String.format("%.2f", chunkMinimum), searcher(esUrl, embeddingUrl, tagMinimum, chunkMinimum),
-								questions, queries, vectors, scope, names));
+						report.append(tagRow(tagMinimum, String.format("%.2f", chunkMinimum), matched,
+								outcomes(searcher(esUrl, embeddingUrl, tagMinimum, chunkMinimum), questions, queries, vectors, scope), off, names));
+				}
 				report.append("\n문서 태그:\n");
 				tags.forEach((id, tag) -> report.append("- ").append(names.get(id)).append(": ").append(tag.category()).append(" · ")
 						.append(String.join(", ", tag.keywords())).append("\n"));
@@ -186,21 +192,48 @@ class RagEvaluationTest {
 				&& (contains == null || hit.content().contains(contains)));
 	}
 
-	/** 태그 채널 끔/켬 한 줄. 기본 기준값(벡터·키워드)은 고정한다. */
-	private String tagRow(String tagMinimum, String chunkMinimum, ChunkSearcher searcher, List<Question> questions,
-			Map<String, QueryRewriter.Result> queries, Map<String, float[]> vectors, ThreadDocumentScope scope, Map<UUID, String> names) {
+	private List<Outcome> outcomes(ChunkSearcher searcher, List<Question> questions, Map<String, QueryRewriter.Result> queries,
+			Map<String, float[]> vectors, ThreadDocumentScope scope) {
 		List<Outcome> outcomes = new ArrayList<>();
 		for (Question question : questions) {
 			QueryRewriter.Result query = queries.get(question.id());
 			outcomes.add(new Outcome(question, query.query(), query.rewritten(), searcher.search(scope, query.query(), vectors.get(query.query()))));
 		}
-		return String.format("| %s | %s | %s | %s | %s | %s | %s | %s |%n", tagMinimum, chunkMinimum,
+		return outcomes;
+	}
+
+	/** 태그 채널 끔/켬 한 줄. 기본 기준값(벡터·키워드)은 고정한다. */
+	private String tagRow(String tagMinimum, String chunkMinimum, String matched, List<Outcome> outcomes, List<Outcome> off, Map<UUID, String> names) {
+		long changed = 0;
+		for (int i = 0; i < outcomes.size(); i++)
+			if (!outcomes.get(i).hits().stream().map(ChunkSearcher.Hit::chunkId).toList()
+					.equals(off.get(i).hits().stream().map(ChunkSearcher.Hit::chunkId).toList())) changed++;
+		return String.format("| %s | %s | %s | %d | %s | %s | %s | %s | %s | %s |%n", tagMinimum, chunkMinimum, matched, changed,
 				rate(outcomes, outcome -> answerable(outcome) && hit(outcome, names, 5), RagEvaluationTest::answerable),
 				rate(outcomes, outcome -> answerable(outcome) && hit(outcome, names, 1), RagEvaluationTest::answerable),
 				precision(outcomes, names),
 				rate(outcomes, outcome -> !answerable(outcome) && !outcome.hits().isEmpty(), outcome -> !answerable(outcome)),
 				rate(outcomes, outcome -> type(outcome, "tag") && hit(outcome, names, 5), outcome -> type(outcome, "tag")),
 				rate(outcomes, outcome -> type(outcome, "paraphrase") && hit(outcome, names, 5), outcome -> type(outcome, "paraphrase")));
+	}
+
+	/** 태그 색인에 검색과 같은 질의(같은 범위 필터)를 직접 보내, 한 문서라도 맞은 질문 수(무관 질문 수)를 센다. */
+	private String tagMatches(RestClient es, String tagMinimum, List<Question> questions, Map<String, QueryRewriter.Result> queries,
+			ThreadDocumentScope scope) {
+		int matched = 0, unrelated = 0;
+		for (Question question : questions) {
+			Map<String, Object> body = Map.of("size", 0, "track_total_hits", true, "query", Map.of("bool", Map.of(
+					"must", List.of(Map.of("multi_match", Map.of("query", queries.get(question.id()).query(),
+							"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", tagMinimum))),
+					"filter", ChunkSearcher.filter(scope))));
+			String response = es.post().uri("/" + TagIndexContract.ALIAS + "/_search").contentType(MediaType.APPLICATION_JSON)
+					.body(json.writeValueAsString(body).getBytes(StandardCharsets.UTF_8)).retrieve().body(String.class);
+			if (json.readTree(response).path("hits").path("total").path("value").asLong() > 0) {
+				matched++;
+				if (question.document() == null) unrelated++;
+			}
+		}
+		return matched + "/" + questions.size() + " (" + unrelated + ")";
 	}
 
 	private static boolean type(Outcome outcome, String type) {

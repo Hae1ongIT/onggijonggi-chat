@@ -217,7 +217,10 @@ public class ChunkSearcher {
 		return call(settings.alias(), body);
 	}
 
-	/** 여러 검색을 한 요청(_msearch)으로 보낸다. 검색마다 결과 목록을 같은 순서로 돌려준다. 하나라도 실패하면 장애다. */
+	/**
+	 * 여러 검색을 한 요청(_msearch)으로 보낸다. 검색마다 결과 목록을 같은 순서로 돌려준다. 일부 검색만 실패하면 그 검색은 결과 없음으로
+	 * 두고(그 문서만 대표 조각이 빠진다) 경고를 남긴다 — 한 문서 탓에 태그 채널 전체를 끄지 않게. 모두 실패하면 장애다.
+	 */
 	private List<List<JsonNode>> multiCall(String alias, List<Map<String, Object>> bodies) {
 		if (bodies.isEmpty()) return List.of();
 		StringBuilder lines = new StringBuilder();
@@ -227,12 +230,19 @@ public class ChunkSearcher {
 		if (!responses.isArray() || responses.size() != bodies.size())
 			throw new RagUnavailableException("Elasticsearch 묶음 검색 응답의 결과 수가 요청과 다르다");
 		List<List<JsonNode>> results = new ArrayList<>();
+		List<String> failures = new ArrayList<>();
 		for (JsonNode response : responses) {
-			if (response.has("error")) throw new RagUnavailableException("Elasticsearch 묶음 검색 일부 실패: " + response.path("status").asInt());
 			List<JsonNode> hits = new ArrayList<>();
-			hits(response).forEach(hits::add);
+			try {
+				if (response.has("error")) throw new RagUnavailableException("HTTP " + response.path("status").asInt());
+				hits(response).forEach(hits::add);
+			} catch (RagUnavailableException failed) {
+				failures.add(failed.getMessage());
+			}
 			results.add(hits);
 		}
+		if (failures.size() == bodies.size()) throw new RagUnavailableException("Elasticsearch 묶음 검색이 모두 실패했다: " + failures.get(0));
+		if (!failures.isEmpty()) log.warn("태그 채널 대표 조각 검색 {}건 중 {}건이 실패해 그 문서는 뺀다: {}", bodies.size(), failures.size(), failures.get(0));
 		return results;
 	}
 

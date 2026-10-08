@@ -196,4 +196,23 @@ class ChunkSearcherTest {
 			assertThat(result).extracting(ChunkSearcher.Hit::chunkId).containsExactly("c");
 		}
 	}
+
+	/** 묶음 검색의 일부만 실패하면 그 문서만 빼고 나머지 대표 조각은 쓴다 — 한 문서 탓에 태그 채널 전체를 끄지 않는다. */
+	@Test
+	void aPartlyFailedBatchDropsOnlyTheFailedDocument() throws Exception {
+		UUID a = UUID.randomUUID(), b = UUID.randomUUID(), d = UUID.randomUUID();
+		String vector = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
+		String found = "{\"hits\":{\"hits\":[{\"_score\":0.75,\"_source\":{\"chunk_id\":\"d\",\"doc_id\":\"" + d
+				+ "\",\"run_seq\":1,\"seq\":4,\"loc\":\"para=4\",\"content\":\"본문\"}}]}}";
+		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + vector + "]}}")
+				.reply("/thr_doc_tag/_search", 200, "{\"hits\":{\"hits\":[{\"_source\":{\"doc_id\":\"" + b + "\",\"run_seq\":1}},{\"_source\":{\"doc_id\":\""
+						+ d + "\",\"run_seq\":1}}]}}")
+				.reply("/_msearch", 200, "{\"responses\":[{\"error\":{\"type\":\"illegal_argument_exception\"},\"status\":400}," + found + "]}")) {
+			var searcher = tagged(es, true);
+
+			assertThat(searcher.search(scope(a, b, d), "연차", new float[] {1, 0, 0})).extracting(ChunkSearcher.Hit::chunkId).containsExactlyInAnyOrder("c", "d");
+			searcher.search(scope(a, b, d), "연차", new float[] {1, 0, 0});
+			assertThat(es.requests).as("태그 채널을 끄지 않았다").filteredOn(request -> request.path().startsWith("/thr_doc_tag")).hasSize(2);
+		}
+	}
 }
