@@ -4,13 +4,16 @@ import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import java.util.List;
+import java.time.Instant;
 import java.util.UUID;
 import jakarta.persistence.LockModeType;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Class Name : ThrRepository.java
@@ -23,6 +26,11 @@ public interface ThrRepository extends JpaRepository<Thr, UUID> {
 
 	/** 협업방 전용 API가 DIRECT 방을 존재 비노출 404로 막을 때 쓰는 종류 확인이다. */
 	boolean existsByIdAndKind(UUID id, ThrKind kind);
+
+	/** Workspace 노드가 Thread에 쓰이는지 — 쓰이는 노드는 reparent할 수 없다(0001 6.4). */
+	boolean existsByWorkspaceNodeId(UUID workspaceNodeId);
+
+	List<Thr> findByWorkspaceNodeIdAndKind(UUID workspaceNodeId, ThrKind kind);
 
 	/** 기존 1:1 목록 호환 경로는 DIRECT 소유 Thread만 생성 시각 역순으로 읽는다. */
 	List<Thr> findByKindAndDrcOwnUserIdOrderByCreatedAtDesc(ThrKind kind, UUID drcOwnUserId);
@@ -52,5 +60,15 @@ public interface ThrRepository extends JpaRepository<Thr, UUID> {
 	@Lock(LockModeType.PESSIMISTIC_WRITE)
 	@Query("select t from Thr t where t.id = :id")
 	Optional<Thr> findByIdForSeqUpdate(@Param("id") UUID id);
+
+	/**
+	* 잠금·보관 같은 상태 전이만 저장한다. 읽어 둔 Thr 전체를 save(merge)하면 그사이 메시지 채번이 올린 next_seq를 옛 값으로
+	* 되돌려 seq가 중복되므로, 바뀌는 열만 갱신한다.
+	*/
+	@Transactional
+	@Modifying(clearAutomatically = true)
+	@Query("update Thr t set t.status = :status, t.lockedAt = :lockedAt, t.archivedAt = :archivedAt, t.updatedAt = :updatedAt where t.id = :id")
+	int updateLifecycle(@Param("id") UUID id, @Param("status") ThrStatus status, @Param("lockedAt") Instant lockedAt,
+			@Param("archivedAt") Instant archivedAt, @Param("updatedAt") Instant updatedAt);
 
 }

@@ -46,18 +46,18 @@ git remote add upstream https://github.com/SUNJOOSOFT/onggijonggi-chat.git
 
 ## 브랜치
 
-`main`에서 따고 `<이슈번호>-<짧은-설명>`으로 이름 짓는다.
+`dev`에서 따고 `<이슈번호>-<짧은-설명>`으로 이름 짓는다.
 
 ```
 42-session-rename
 57-token-audience-npe
 ```
 
-포크에서 작업한다면 원본의 최신 `main`에서 딴다.
+포크에서 작업한다면 원본의 최신 `dev`에서 딴다.
 
 ```bash
 git fetch upstream
-git checkout -b 42-session-rename upstream/main
+git checkout -b 42-session-rename upstream/dev
 ```
 
 ## 코드 스타일
@@ -106,8 +106,10 @@ docs: 빠른 시작 누락 단계 보완
 
 ## PR
 
-`main`으로 보낸다. **PR 제목도 커밋과 같은 `타입(scope): 요약` 규칙으로 쓴다** — squash 머지라
-제목이 그대로 `main`의 커밋 메시지가 된다.
+`dev`로 보낸다. 저장소 기본 브랜치가 `dev`라 PR을 열면 대상이 자동으로 잡힌다 — `main`으로
+바뀌어 있으면 되돌린다. **PR 제목도 커밋과 같은 `타입(scope): 요약` 규칙으로 쓴다** — squash
+머지라 제목이 그대로 `dev`의 커밋 메시지가 된다. 그 제목이 릴리스 버전을 정하므로(아래
+"릴리스") 타입을 정확히 쓴다.
 
 본문의 `Closes #`에 이슈 번호를 적으면 머지될 때 이슈가 함께 닫힌다. 이슈를 닫는 PR이 아니면
 `Refs #`로 바꾼다.
@@ -120,8 +122,38 @@ docs: 빠른 시작 누락 단계 보완
 PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불변식·Flyway 버전과 Java 클래스 헤더를 자동 검사한다. 나머지 항목은 직접 확인한다.
 `flyway-postgres`는 빈 PostgreSQL 16에 전체 migration을 실제 적용한다. Hibernate 매핑과 SQL 제약의 의미는 별도 절차로 확인한다.
 
-승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `main`에 커밋 하나로 남는다.
+승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `dev`에 커밋 하나로 남는다.
 리뷰가 오래 조용하면 PR에 댓글로 깨워주면 된다.
+
+## 릴리스
+
+`main`은 릴리스 브랜치다. 기여자가 직접 PR을 보내지 않고, 메인테이너가 `dev`를 `main`으로
+머지해 릴리스한다.
+
+태깅은 자동이다. `main`에 푸시되면 `release-tag.yml`이 `scripts/compute-next-version.mjs`로
+다음 버전을 계산해 태그와 GitHub Release를 만든다 — 계산 근거가 커밋 제목의 conventional
+commit 타입이라 규칙을 지키지 않으면 버전이 틀어진다. `dev`에 푸시되면
+`dev-prerelease-tag.yml`이 `vX.Y.Z-dev.N` 형태의 prerelease 태그를 붙인다.
+
+### 긴급 수정(hotfix)
+
+이미 릴리스된 `main`을 당장 고쳐야 할 때만 쓴다. `dev`에 쌓인 다른 변경을 함께 내보내지 않으려는
+것이 목적이므로, 급하지 않으면 평소대로 `dev`로 보낸다.
+
+```bash
+git fetch upstream
+git checkout -b 57-token-audience-npe upstream/main   # dev가 아니라 main에서 딴다
+```
+
+PR을 열 때 **대상 브랜치를 `main`으로 직접 바꾼다.** 기본 브랜치가 `dev`라 그대로 두면 `dev`로
+올라가고, 그러면 긴급 수정이 아니라 평범한 PR이 된다.
+
+머지되면 `release-tag.yml`이 patch 버전을 자동 태깅한다(`fix:`는 patch bump).
+
+**머지 뒤 메인테이너가 `main`을 `dev`로 역머지한다.** 이걸 빼먹으면 `dev`에서는 그 태그가
+도달 불가라, `compute-next-version.mjs`가 이미 나간 버전을 다음 버전으로 다시 계산한다 —
+`v0.2.1`이 릴리스된 뒤에도 `dev`가 `v0.2.1-dev.N`을 계속 붙이게 되고, 다음 릴리스의 버전이
+어긋난다. 수정 자체도 `dev`에 없으니 후속 작업이 그 위에서 이뤄지지 않는다.
 
 ## 라이선스
 
@@ -166,7 +198,7 @@ git config core.hooksPath .githooks
 - **설계 불변식** — 설계 계약을 깨는 변경이다. 등재로는 풀리지 않으니 설계를 바꿔야 한다. 무엇을
   왜 막는지는 `scripts/validate-invariants.mjs` 상단 주석에 적혀 있다.
 - **Flyway 버전** — 전체 트리의 버전이 중복됐거나, 새·이름 변경 migration이 UTC 타임스탬프 형식이 아니다.
-  새 파일은 `node scripts/flyway-migration.mjs create <lowercase_snake_case_설명>`으로 만든다. 최신 `main`을
+  새 파일은 `node scripts/flyway-migration.mjs create <lowercase_snake_case_설명>`으로 만든다. 최신 `dev`를
   반영한 뒤 충돌한 아직 영구 적용 전 파일만 `node scripts/flyway-migration.mjs renumber <파일> --confirm-not-permanently-applied`로 재번호화한다.
   `outOfOrder`는 서로 다른 낮은 버전의 나중 적용만 허용할 뿐 중복 버전을 해결하지 못하므로 켜지 않는다.
   이관 적용 순서가 환경마다 달라질 수 있어, 충돌은 재번호화로 해소한다.
@@ -189,6 +221,7 @@ docker run -d --name dev-keycloak -p 8081:8080 \
   -e KEYCLOAK_REALM=app-realm \
   -e KEYCLOAK_CLIENT_ID=ogjg-client \
   -e KEYCLOAK_CLIENT_SECRET=devsecret \
+  -e KEYCLOAK_BFF_CLIENT_ID=ogjg-bff -e KEYCLOAK_BFF_CLIENT_SECRET=devbffsecret \
   -e PUBLIC_FRONTEND_URL=http://localhost:3000 \
   -e APP_USER=devuser -e APP_USER_PASSWORD=devpass123 \
   -v "$(pwd)/infra/config/realm-app.json:/opt/keycloak/data/import/realm-app.json:ro" \
@@ -203,6 +236,7 @@ docker run -d --name dev-keycloak -p 8081:8080 `
   -e KEYCLOAK_REALM=app-realm `
   -e KEYCLOAK_CLIENT_ID=ogjg-client `
   -e KEYCLOAK_CLIENT_SECRET=devsecret `
+  -e KEYCLOAK_BFF_CLIENT_ID=ogjg-bff -e KEYCLOAK_BFF_CLIENT_SECRET=devbffsecret `
   -e PUBLIC_FRONTEND_URL=http://localhost:3000 `
   -e APP_USER=devuser -e APP_USER_PASSWORD=devpass123 `
   -v "${PWD}/infra/config/realm-app.json:/opt/keycloak/data/import/realm-app.json:ro" `
@@ -210,6 +244,8 @@ docker run -d --name dev-keycloak -p 8081:8080 `
 ```
 
 `http://localhost:8081/realms/app-realm/.well-known/openid-configuration`이 응답하면 준비된 것이다.
+
+`ogjg-bff`는 BFF만 쓰는 Keycloak 관리 조회 클라이언트다(로그인 클라이언트 `ogjg-client`의 secret은 프론트에도 있어 관리 권한을 붙이지 않는다). 그 secret(`devbffsecret`)은 BFF의 `application-local.properties`에만 넣는다. realm 파일은 realm을 처음 만들 때만 적용되므로, 이 변경 전에 만든 `dev-keycloak`이 있다면 `docker rm -f dev-keycloak` 뒤 위 명령으로 다시 만든다(개발용이라 계정이 지워져도 된다. 지우기 싫으면 INSTALL.md「Keycloak 관리 클라이언트와 권한 변경 감사」의 전환 절차를 따른다).
 
 `PUBLIC_FRONTEND_URL`이 리다이렉트 주소가 되므로 프론트를 다른 포트로 띄운다면 여기서 맞춘다.
 realm은 최초 기동 때만 만들어진다 — 값을 바꾸려면 `docker rm -f dev-keycloak` 후 다시 띄운다.
@@ -281,6 +317,11 @@ cd backend
 빈 로컬 DB에 **최초 1회** 스키마를 만들 때만 Flyway를 켜서 띄운다 — `bootRun` 뒤에
 `--args="--spring.flyway.enabled=true"`를 붙인다. 기본 프로파일에서는 꺼져 있다. 이는 개발 DB 초기화용이며,
 PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다.
+
+권한 기능을 쓰지 않는 로컬에서도 새 대화가 놓일 고객사(Tenant)가 하나 있어야 한다. `application-local.properties`에
+`app.rbac.workspace-setup-path`를 `infra/config/workspace-setup.default.yml`의 절대경로로 주면 BFF가 뜰 때 만든다.
+주지 않으면 새 대화 생성이 503이다. 대화가 이미 있는 옛 로컬 DB는 `--spring.flyway.target=20260929055051721`으로
+한 번 띄워 고객사를 만든 뒤 target 없이 다시 띄운다(INSTALL.md「v0.2에서 올릴 때」).
 
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 

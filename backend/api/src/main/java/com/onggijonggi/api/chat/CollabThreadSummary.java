@@ -11,15 +11,21 @@ import java.util.UUID;
  *
  *               participants는 방을 제목만으로 가려내기 어려워 화면이 함께 보여주는 표시 이름이다.
  *               app_user에 이름 컬럼을 두지 않고 Keycloak을 정본으로 삼아 요청 시점에 채운다(이슈 #128).
+ *
+ *               workspaceId·workspaceName은 방이 놓인 워크스페이스다. 화면이 목록을 워크스페이스별로 묶는 데 쓴다.
+ *               모든 방은 워크스페이스에 놓이지만, 놓인 노드를 찾지 못하면 둘 다 null일 수 있다.
  */
 public record CollabThreadSummary(
 		UUID id,
 		String title,
-		List<String> participants
+		List<String> participants,
+		UUID workspaceId,
+		String workspaceName
 ) {
 
-	static CollabThreadSummary from(Thr thr, List<String> participants) {
-		return new CollabThreadSummary(thr.getId(), thr.getTitle(), participants);
+	static CollabThreadSummary from(Thr thr, List<String> participants, String workspaceName) {
+		return new CollabThreadSummary(thr.getId(), thr.getTitle(), participants, thr.getWorkspaceNodeId(),
+				workspaceName);
 	}
 
 }

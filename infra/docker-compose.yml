@@ -83,9 +83,29 @@ services:
       KEYCLOAK_REALM:         ${KEYCLOAK_REALM:-app-realm}
       KEYCLOAK_CLIENT_ID:     ${KEYCLOAK_CLIENT_ID:-ogjg-client}
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_BFF_CLIENT_ID:     ${KEYCLOAK_BFF_CLIENT_ID:-ogjg-bff}
+      KEYCLOAK_BFF_CLIENT_SECRET: ${KEYCLOAK_BFF_CLIENT_SECRET}
       PUBLIC_FRONTEND_URL:    ${PUBLIC_FRONTEND_URL:-https://app.localhost}
       APP_USER:               ${APP_USER:-appuser}
       APP_USER_PASSWORD:      ${APP_USER_PASSWORD}
+    # client secret이 빈 값이면 Keycloak은 빈 secret을 그대로 받아들여, 누구나 client_secret=(빈 값)으로 토큰을 받는다(#326, 실측).
+    # 그래서 예전 .env처럼 값이 비어 있으면 아무도 모르는 무작위 값으로 채운 뒤 기동한다. realm을 처음 만들 때만 쓰이는 값이라
+    # 이미 있는 realm에는 영향이 없다. 무작위로 채워졌다면 관리 콘솔에서 secret을 재발급해 .env에 넣어야 로그인·관리 조회가 된다.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        fill() {
+          if [ -z "$${!1}" ]; then
+            read -r a < /proc/sys/kernel/random/uuid; read -r b < /proc/sys/kernel/random/uuid
+            export "$$1=$${a//-/}$${b//-/}"
+            echo "[경고] $$1 이(가) 비어 있어 무작위 값으로 채웠다 — infra/.env에 값을 넣는다(INSTALL.md)"
+          fi
+        }
+        fill KEYCLOAK_CLIENT_SECRET
+        fill KEYCLOAK_BFF_CLIENT_SECRET
+        exec /opt/keycloak/bin/kc.sh "$$@"
+      - kc
     # 이미 있는 realm은 건너뛰므로(IGNORE_EXISTING) 재시작해도 계정이 지워지지 않는다.
     command: ["start-dev", "--import-realm"]
     healthcheck:
@@ -144,6 +164,51 @@ services:
       postgres:
         condition: service_healthy
 
+  casbin:
+    image: casbin/casbin-server:v1.19.0
+    container_name: infra-casbin
+    # 권한 판정 서버. .env에 COMPOSE_PROFILES=casbin(과 SPRING_PROFILE=prod,casbin)을 넣어야 켜진다.
+    profiles:
+      - casbin
+    restart: unless-stopped
+    # gRPC API에 인증이 없어 포트를 밖으로 열지 않는다. bff만 app-net 안에서 casbin:50051로 부른다.
+    # 메모리만 쓰고 저장소가 없다 — 재시작하면 bff가 DB에서 규칙을 다시 넣는다.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app-net
+
+  elasticsearch:
+    build:
+      context: ./elasticsearch
+    image: ogjg-chat/elasticsearch-nori:local
+    container_name: infra-elasticsearch
+    # RAG 검색용. 메모리를 많이 써서 .env에 COMPOSE_PROFILES=elasticsearch 를 넣어야 켜진다.
+    profiles:
+      - elasticsearch
+    restart: unless-stopped
+    # 보안(인증·TLS)을 끈 채라 호스트의 127.0.0.1에만 연다 — 로컬 개발에서 bff가 localhost:9200으로 붙는다.
+    ports:
+      - "127.0.0.1:9200:9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms${ES_HEAP:-1g} -Xmx${ES_HEAP:-1g}
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - app-net
+
   bff:
     build:
       context: ../backend
@@ -156,6 +221,8 @@ services:
       - "8090:8090"
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILE:-prod}
+      # v0.2에서 올릴 때 한 번만 절체 migration 앞 버전으로 정한다(INSTALL.md「v0.2에서 올릴 때」). 평소에는 latest(끝까지 적용)다.
+      SPRING_FLYWAY_TARGET: ${SPRING_FLYWAY_TARGET:-latest}
       SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-appdb}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-appuser}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
@@ -163,16 +230,27 @@ services:
       # iss 클레임은 APP_SECURITY_PUBLIC_ISSUER(브라우저가 보는 공개 주소)와 별도로 비교한다.
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/${KEYCLOAK_REALM:-app-realm}/protocol/openid-connect/certs
       APP_SECURITY_PUBLIC_ISSUER: ${PUBLIC_KEYCLOAK_URL:-http://localhost:8081}/realms/${KEYCLOAK_REALM:-app-realm}
-      # 협업 스레드의 다른 참가자 표시 이름을 Keycloak Admin API로 조회하는 데 쓴다(이슈 #128) — 로그인에
-      # 쓰는 것과 같은 ogjg-client 서비스 계정이고, realm-app.json이 view-users 권한을 부여해둔다.
+      # 표시 이름·사람 목록·초대 검색·권한 변경 감사를 Keycloak Admin API로 읽는 BFF 전용 클라이언트(#326).
+      # realm-app.json이 view-users·view-events·view-realm만 준다. 이 secret은 nextjs에 넘기지 않는다 —
+      # 로그인 클라이언트(KEYCLOAK_CLIENT_SECRET)는 프론트에도 있어 관리 권한을 붙이지 않는다.
       APP_KEYCLOAK_INTERNAL_URL: http://keycloak:8080
       APP_KEYCLOAK_REALM: ${KEYCLOAK_REALM:-app-realm}
-      APP_KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      APP_KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_BFF_CLIENT_ID:-ogjg-bff}
+      APP_KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_BFF_CLIENT_SECRET}
       SPRING_AI_OPENAI_BASE_URL:            http://litellm:4000
       SPRING_AI_OPENAI_API_KEY:             ${LITELLM_MASTER_KEY}
       SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL:  ${LLM_MODEL:-gemini-3.6-flash}
       APP_LLM_GATEWAY_URL:                  http://litellm:4000
       APP_CORS_ALLOWED_ORIGINS: ${PUBLIC_FRONTEND_URL:-http://localhost:3010}
+    volumes:
+      # 조직 구조 설정. 두 파일을 모두 마운트하고 프로필이 고른다(application-prod / application-casbin.properties).
+      # 기본(prod)은 Tenant 하나만 만드는 default 파일 — 모든 대화가 놓일 곳이 있어야 대화를 만들 수 있다.
+      # casbin 프로필을 함께 켜면(SPRING_PROFILE=prod,casbin) 팀·규칙이 있는 workspace-setup.yml을 읽는다.
+      - ./config/workspace-setup.yml:/config/workspace-setup.yml:ro
+      - ./config/workspace-setup.default.yml:/config/workspace-setup.default.yml:ro
+      # 사람의 팀·직급(username,team,rank). casbin 프로필에서만 읽는다. 폴더째 마운트한다 — 파일 하나만 마운트하면 편집기가
+      # 파일을 바꿔치기해 저장할 때 컨테이너가 옛 내용을 본다. 고친 뒤 casbin을 재시작하면 다음 판정 때 다시 적재된다.
+      - ./config/members:/config/members:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8090/actuator/health"]
       interval: 20s
@@ -322,6 +400,7 @@ networks:
 volumes:
   postgres-data:
     driver: local
+  elasticsearch-data:
   caddy_data:
   caddy_config:
   document-worker-seaweed-volume:

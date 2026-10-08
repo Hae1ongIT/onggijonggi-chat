@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Import({FakeChatModelConfig.class, FakeJwtDecoderConfig.class})
+@Import({FakeChatModelConfig.class, FakeJwtDecoderConfig.class, DefaultWorkspaceFixture.class})
 class ChatControllerTest {
 
 	@LocalServerPort
@@ -370,7 +370,7 @@ class ChatControllerTest {
 	private void sendChatMessage(String sessionId, String subject, String content) {
 		UUID userId = userIdentityService.resolveOrProvision(subject).block();
 		directChatTurnService.prepareOrCreateWithPendingAgentBlocking(UUID.fromString(sessionId), userId, content,
-				content, UUID.randomUUID().toString());
+				List.of(), content, UUID.randomUUID().toString());
 	}
 
 }

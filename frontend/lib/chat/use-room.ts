@@ -99,11 +99,14 @@ export interface Room {
    * 잃은 재시도가 서버 idempotency(DirectChatTurnService, DIRECT 전용)에 걸리려면 clientMsgId가
    * 원래 시도와 같아야 한다. turnId는 재시도여도 항상 새로 만든다 — 재접속 응답은 이 새
    * turnId로 이 화면에만 유니캐스트된다.
+   *
+   * attachmentIds는 미리 올려 둔 첨부다(lib/api/attachments.ts). 비었으면 싣지 않는다.
    */
   send: (
     content: string,
     model?: string,
     reuseClientMsgId?: string,
+    attachmentIds?: string[],
   ) => { clientMsgId: string; turnId: string } | null;
   /** 이 화면(이 커넥션)에서 보낸 발화가 부른 @AI 턴을 멈춘다(이슈 #160). 실제로 멈췄는지는
    * chat.answer(done)나 chat.queued(cancelled)로 온다 — 이미 끝난 턴이면 아무것도 오지 않는다.
@@ -130,6 +133,8 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
   const { fetchHistory, startPromoted = true, onHistoryError } = options;
   const [state, setState] = useState<RoomState>(initialRoomState);
   const [connection, setConnection] = useState<RoomConnection>('connecting');
+  // 이 마운트의 구독이 승격됐는지(내 발화를 서버가 받았는지). 승격 전 1:1 초안의 거부는 구독을 닫지 않는다.
+  const promotedRef = useRef(startPromoted);
   const subscriptionRef = useRef<
     RoomSubscription | RoomListenSubscription | null
   >(null);
@@ -255,6 +260,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
     // bootstrap 중이면 아직 서버가 모르는 방이라 구독을 걸지 않는다(이슈 #162, §2.1) — 듣기만
     // 하다가 자기 발화의 에코를 보고 승격한다. 이 마운트에서만 의미가 있어 지역 변수로 둔다.
     let promoted = startPromoted;
+    promotedRef.current = promoted;
 
     const listener: RoomListener = {
       onFrame: (frame) => {
@@ -263,6 +269,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
         if (frame.type === 'chat.message' && frame.clientMsgId !== null) {
           if (pendingEchoesRef.current.delete(frame.clientMsgId) && !promoted) {
             promoted = true;
+            promotedRef.current = true;
             const current = subscriptionRef.current;
             if (current !== null && 'promote' in current) current.promote();
           }
@@ -326,8 +333,12 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
 
   // 거부를 통보받았으면 이 방 구독을 푼다 — 커넥션은 다른 방과 함께 쓰므로 닫지 않는다(이슈 #161).
   // 구독을 남겨 두면 재연결할 때마다 권한 없는 방을 다시 두드린다.
+  // 아직 승격 전인 1:1 초안(내 발화를 서버가 받기 전)은 예외다 — 첫 발화의 bootstrap이 거부돼도(팀 배정 없음 등)
+  // 그 방은 내 것이라 구독을 닫으면 이후 보내기가 전부 실패한다. 거부 안내만 보이고 다시 보낼 수 있어야 한다.
   useEffect(() => {
-    if (isForbidden(state.error)) subscriptionRef.current?.close();
+    if (isForbidden(state.error) && promotedRef.current) {
+      subscriptionRef.current?.close();
+    }
   }, [state.error]);
 
   useEffect(() => {
@@ -347,7 +358,12 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
   const myTurnIdsRef = useRef<Set<string>>(new Set());
 
   const send = useCallback(
-    (content: string, model?: string, reuseClientMsgId?: string) => {
+    (
+      content: string,
+      model?: string,
+      reuseClientMsgId?: string,
+      attachmentIds?: string[],
+    ) => {
       const ids = {
         clientMsgId: reuseClientMsgId ?? generateUUID(),
         turnId: generateUUID(),
@@ -358,6 +374,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
         content,
         model,
         ...ids,
+        ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
       });
       if (!sent) return null;
       myTurnIdsRef.current.add(ids.turnId);

@@ -1,11 +1,20 @@
 {
   "realm": "${KEYCLOAK_REALM}",
   "enabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "attributes": {
+    "adminEventsExpiration": "31536000"
+  },
   "roles": {
     "realm": [
       {
         "name": "USER",
         "description": "채팅 이용 권한. BFF가 이 역할을 요구한다."
+      },
+      {
+        "name": "PLATFORM_ADMIN",
+        "description": "control plane 운영 권한. 권한 관리 화면(팀·직급 조회), bootstrap 재시도, 절체 사전 검증(/api/platform/**)을 부른다. 채팅·워크스페이스 데이터 접근권은 주지 않는다."
       }
     ]
   },
@@ -24,14 +33,14 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["USER"]
+      "realmRoles": ["USER", "PLATFORM_ADMIN"]
     },
     {
-      "username": "service-account-${KEYCLOAK_CLIENT_ID}",
+      "username": "service-account-${KEYCLOAK_BFF_CLIENT_ID}",
       "enabled": true,
-      "serviceAccountClientId": "${KEYCLOAK_CLIENT_ID}",
+      "serviceAccountClientId": "${KEYCLOAK_BFF_CLIENT_ID}",
       "clientRoles": {
-        "realm-management": ["view-users"]
+        "realm-management": ["view-users", "view-events", "view-realm"]
       }
     }
   ],
@@ -41,7 +50,7 @@
       "enabled": true,
       "publicClient": false,
       "standardFlowEnabled": true,
-      "serviceAccountsEnabled": true,
+      "serviceAccountsEnabled": false,
       "secret": "${KEYCLOAK_CLIENT_SECRET}",
       "redirectUris": ["${PUBLIC_FRONTEND_URL}/api/auth/callback/keycloak"],
       "webOrigins": ["${PUBLIC_FRONTEND_URL}"],
@@ -59,6 +68,17 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "${KEYCLOAK_BFF_CLIENT_ID}",
+      "description": "BFF 전용 Keycloak 관리 조회(서비스 계정만). secret은 BFF에만 둔다 — 로그인 클라이언트의 secret은 프론트에도 있다.",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "${KEYCLOAK_BFF_CLIENT_SECRET}"
     }
   ]
 }

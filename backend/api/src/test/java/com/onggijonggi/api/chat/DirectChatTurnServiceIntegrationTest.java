@@ -4,8 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.onggijonggi.common.chat.domain.MsgIdmKey;
 import com.onggijonggi.common.chat.persistence.MsgIdmKeyRepository;
+import com.onggijonggi.common.user.AppUser;
+import com.onggijonggi.common.user.AppUserRepository;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,7 +27,7 @@ import org.springframework.test.context.ActiveProfiles;
  */
 @SpringBootTest
 @ActiveProfiles("test")
-@Import({FakeChatModelConfig.class, FakeJwtDecoderConfig.class, FakeKeycloakAdminConfig.class})
+@Import({FakeChatModelConfig.class, FakeJwtDecoderConfig.class, FakeKeycloakAdminConfig.class, DefaultWorkspaceFixture.class})
 class DirectChatTurnServiceIntegrationTest {
 
 	@Autowired
@@ -32,6 +35,9 @@ class DirectChatTurnServiceIntegrationTest {
 
 	@Autowired
 	private MsgIdmKeyRepository msgIdmKeyRepository;
+
+	@Autowired
+	private AppUserRepository appUserRepository;
 
 	/**
 	* TTL(5분)을 넘긴 키로 재시도하면 옛 행을 즉시 지우고 새 요청으로 진행해야 한다.
@@ -42,11 +48,11 @@ class DirectChatTurnServiceIntegrationTest {
 	@Test
 	void retryingAfterTheKeyExpiresSucceedsWithoutAUniqueConstraintViolation() throws Exception {
 		UUID threadId = UUID.randomUUID();
-		UUID userId = UUID.randomUUID();
+		UUID userId = appUserRepository.save(new AppUser("idempotency-" + UUID.randomUUID())).getId();
 		String key = UUID.randomUUID().toString();
 
 		DirectChatTurnService.StoredTurn first = directChatTurnService
-				.prepareOrCreateWithPendingAgentBlocking(threadId, userId, "안녕", "안녕", key);
+				.prepareOrCreateWithPendingAgentBlocking(threadId, userId, "안녕", List.of(), "안녕", key);
 
 		MsgIdmKey saved = msgIdmKeyRepository.findByUserIdAndKey(userId, key).orElseThrow();
 		var createdAt = MsgIdmKey.class.getDeclaredField("createdAt");
@@ -57,7 +63,7 @@ class DirectChatTurnServiceIntegrationTest {
 		// 여기까지 예외 없이 도달하는 것 자체가 증거다 — 고쳐지기 전엔
 		// DataIntegrityViolationException으로 이 호출에서 테스트가 실패했다.
 		DirectChatTurnService.StoredTurn retried = directChatTurnService
-				.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", key);
+				.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", List.of(), key);
 
 		assertThat(retried.replay()).isFalse();
 		assertThat(retried.humanMessageId()).isNotEqualTo(first.humanMessageId());

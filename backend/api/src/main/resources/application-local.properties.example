@@ -13,7 +13,8 @@ spring.datasource.password=여기에_실제_비밀번호_입력
 # frontend/.env.local과 동일 값 재사용 가능
 spring.ai.openai.api-key=여기에_실제_LiteLLM_키_입력
 
-# infra/.env의 KEYCLOAK_CLIENT_SECRET과 동일 — 참여자 표시 이름을 Keycloak Admin API로 조회할 때 쓴다
+# infra/.env의 KEYCLOAK_BFF_CLIENT_SECRET과 동일(BFF 전용 관리 클라이언트 ogjg-bff) — 표시 이름·사람 목록·권한 변경 감사를
+# Keycloak Admin API로 읽을 때 쓴다. 로그인 secret(KEYCLOAK_CLIENT_SECRET)이 아니다.
 app.keycloak.admin.client-secret=여기에_실제_시크릿_입력
 
 # --- 공용 호스트 오버라이드: DB·LLM (주소값 — 비밀 아님) ---
@@ -29,3 +30,8 @@ spring.ai.openai.base-url=http://<공용호스트주소>:4000/v1
 #    그 증상이 "401 에러"가 아니라 로그인 화면 무한 반복이라 원인을 알아보기 어렵다.
 #spring.security.oauth2.resourceserver.jwt.jwk-set-uri=http://<공용호스트주소>:8081/realms/app-realm/protocol/openid-connect/certs
 #app.security.public-issuer=http://<공용호스트주소>:8081/realms/app-realm
+
+# --- 새 대화가 놓일 고객사(Tenant) ---
+# 권한 기능을 쓰지 않아도 새 대화가 놓일 고객사가 하나 있어야 한다. 이 값이 없으면 새 대화 생성이 503이다.
+# bootRun의 작업 디렉터리 기준으로 상대경로가 어긋나므로 절대경로를 쓴다.
+app.rbac.workspace-setup-path=<저장소 절대경로>/infra/config/workspace-setup.default.yml
