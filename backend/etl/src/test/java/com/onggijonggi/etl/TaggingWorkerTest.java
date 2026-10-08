@@ -119,6 +119,15 @@ class TaggingWorkerTest {
 				.isEmpty();
 	}
 
+	@Test
+	void theLoggedReasonAndRetryDelayAreReadable() {
+		assertThat(TaggingWorker.reason("TAGGING_REJECTED", EtlFailure.permanent("TAGGING_REJECTED", "HTTP 404 {}"))).isEqualTo("TAGGING_REJECTED HTTP 404");
+		assertThat(TaggingWorker.reason("TAGGING_UNAVAILABLE", EtlFailure.transientFailure("TAGGING_UNAVAILABLE", "연결 거부", null))).isEqualTo("TAGGING_UNAVAILABLE");
+		assertThat(TaggingWorker.reason("UNEXPECTED", null)).isEqualTo("UNEXPECTED");
+		assertThat(List.of(Duration.ofDays(7), Duration.ofHours(1), Duration.ofMinutes(1), Duration.ofSeconds(90)).stream().map(TaggingWorker::readable))
+				.containsExactly("7일", "1시간", "1분", "90초");
+	}
+
 	private static TagStore.Target target() {
 		return new TagStore.Target(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, "a.txt", "d", null);
 	}

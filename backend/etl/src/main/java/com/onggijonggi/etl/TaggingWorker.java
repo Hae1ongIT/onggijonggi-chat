@@ -81,7 +81,7 @@ public class TaggingWorker implements SmartLifecycle {
 				if (waitingReason == null) done = cycle();
 			} catch (EtlFailure failure) {
 				// 태그 검색 인덱스 준비(index.ensure) 실패. 대상 조회 실패와 구분하고, 반복되므로 스택 없이 남긴다.
-				log.warn("태그 검색 인덱스를 준비하지 못했다({} {}) — 잠시 뒤 다시 본다", failure.code(), httpStatus(failure));
+				log.warn("태그 검색 인덱스를 준비하지 못했다({}) — 잠시 뒤 다시 본다", reason(failure.code(), failure));
 			} catch (Throwable error) {
 				log.warn("문서 태깅 대상을 읽지 못했다 — 잠시 뒤 다시 본다", error);
 			}
@@ -156,11 +156,11 @@ public class TaggingWorker implements SmartLifecycle {
 			return false;
 		}
 		// 예기치 못한 오류(코드 결함)만 스택을 남긴다. 태깅 서버 장애는 문서마다 반복되므로 한 줄로 남긴다.
-		String retry = permanent ? "영구 실패 — " + max + " 뒤 또는 ETL 재기동 때 다시 시도" : "일시 장애 — 간격을 늘려 가며 다시 시도";
+		String retry = permanent ? "영구 실패 — " + readable(max) + " 뒤 또는 ETL 재기동 때 다시 시도" : "일시 장애 — 간격을 늘려 가며 다시 시도";
 		if ("UNEXPECTED".equals(code))
 			log.warn("문서 태깅 실패({}, {}): doc={} run={}", code, retry, target.document(), target.runSeq(), cause);
 		else
-			log.warn("문서 태깅 실패({} {}, {}): doc={} run={}", code, cause instanceof EtlFailure failure ? httpStatus(failure) : "", retry,
+			log.warn("문서 태깅 실패({}, {}): doc={} run={}", reason(code, cause instanceof EtlFailure failure ? failure : null), retry,
 					target.document(), target.runSeq());
 		return true;
 	}
@@ -169,6 +169,20 @@ public class TaggingWorker implements SmartLifecycle {
 	 * 실패의 HTTP 상태(예: "HTTP 404")만 꺼낸다. 없으면 빈 글자. 예외 메시지 전체는 남기지 않는다 — 연결 오류 메시지에는 태깅 서버 주소가
 	 * 들어 있다. 상태만 있어도 주소·모델 이름 오타(404·400)와 서버 장애(5xx)를 가를 수 있다.
 	 */
+	/** 로그에 남길 사유: 코드와(있으면) HTTP 상태. */
+	static String reason(String code, EtlFailure failure) {
+		String status = failure == null ? "" : httpStatus(failure);
+		return status.isEmpty() ? code : code + " " + status;
+	}
+
+	/** 간격을 읽기 쉽게(예: 7일, 1시간, 30초). */
+	static String readable(Duration delay) {
+		if (delay.toSeconds() % 86_400 == 0) return delay.toDays() + "일";
+		if (delay.toSeconds() % 3_600 == 0) return delay.toHours() + "시간";
+		if (delay.toSeconds() % 60 == 0) return delay.toMinutes() + "분";
+		return delay.toSeconds() + "초";
+	}
+
 	static String httpStatus(EtlFailure failure) {
 		// 메시지는 "코드: 내용"이다(EtlFailure).
 		String message = failure.getMessage().substring(failure.code().length() + 2);
