@@ -8,7 +8,7 @@ import java.util.UUID;
  * Description : 방 문서 태그 검색 인덱스의 계약(#362) — 매핑 리소스(es-thr-doc-tag-index.json)의 필드 이름, 별칭, 색인 문서 ID 규칙.
  *               태그(카테고리·핵심 키워드·요약)는 문서 단위 신호라 조각 인덱스와 따로 둔다: 처리 회차마다 문서 하나를 색인하고, 검색의
  *               태그 채널이 (문서, 현재 회차) 범위로 찾는다. 적재(ETL 태깅 작업)와 검색(BFF)이 같은 이름을 쓰게 한 곳에 둔다.
- *               필드를 바꾸면 매핑 JSON과 이 상수를 함께 바꾸고 인덱스 이름(버전)을 올린다(TagIndexContractTest가 둘을 대조한다).
+ *               필드를 바꾸면 매핑 JSON과 이 상수를 함께 바꾸고 인덱스 이름(버전)을 올린다(TagPromptTest가 둘을 대조한다).
  */
 public final class TagIndexContract {
 

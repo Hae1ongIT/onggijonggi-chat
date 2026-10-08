@@ -5,9 +5,9 @@
 
 set local lock_timeout = '10s';
 
--- 처리 회차별 태그. 조각과 같은 단위라 다시 만들기 회차가 끝나는 순간 조각과 태그가 함께 바뀐다(검색의 "현재 회차"로 읽는다).
+-- 처리 회차별 태그. 조각과 같은 단위로 두고 검색은 "현재 회차"의 태그만 읽는다(새 회차에는 READY 뒤 태깅 작업이 태그를 붙인다).
 -- thr_doc_run처럼 FK 없이 snapshot으로 둔다 — 문서·방이 지워져도 태그 색인 정리 대상을 잃지 않는다(회차 정리 때 함께 지운다).
--- status: DONE(태그 있음 — 카테고리가 UNCLASSIFIED면 미분류), FAILED(태깅 서버 장애 등, next_at 뒤 다시 시도).
+-- status: DONE(태그 있음 — 카테고리가 UNCLASSIFIED면 미분류), FAILED(태깅 서버 장애 등, next_at 뒤 또는 설정이 바뀌면 다시 시도).
 -- tag_cnf: 뽑을 때의 태깅 설정 지문(프롬프트 버전·모델·카테고리 목록·키워드 수·요약 길이). 지금 설정과 다르면 태그만 다시 뽑는다.
 create table thr_doc_tag (
     id uuid primary key,
@@ -28,4 +28,3 @@ create table thr_doc_tag (
     constraint uq_thr_doc_tag_run unique (doc_id, run_seq),
     check ((status = 'DONE') = (ctg is not null))
 );
-create index ix_thr_doc_tag_retry on thr_doc_tag(next_at) where status = 'FAILED';

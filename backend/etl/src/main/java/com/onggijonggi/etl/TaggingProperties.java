@@ -21,8 +21,8 @@ public record TaggingProperties(
 		@DefaultValue("") String model,
 		/** 요청 하나의 응답 대기 상한. 긴 입력은 수십 초가 걸린다. */
 		@DefaultValue("120s") Duration timeout,
-		/** 카테고리 목록. 모델은 이 중 하나 또는 미분류를 고른다. 배포마다 바꿀 수 있다. */
-		@DefaultValue({"인사·총무", "보안·IT", "재무·회계", "영업·고객", "법무·규정", "기술·개발", "기타"}) List<String> categories,
+		/** 카테고리 목록. 모델은 이 중 하나 또는 미분류를 고른다. 배포마다 바꿀 수 있다. 비면 기본 목록(TagPrompt.DEFAULT_CATEGORIES)이다. */
+		List<String> categories,
 		@DefaultValue("10") int maxKeywords,
 		@DefaultValue("200") int summaryMaxChars,
 		/** 응답 토큰 상한(최종 태그·덩어리 요약 공통). */
@@ -35,13 +35,23 @@ public record TaggingProperties(
 		@DefaultValue("20") int maxParts,
 		/** 한 번에 고르는 태깅 대상 수. */
 		@DefaultValue("20") int batch,
-		/** 태깅이 실패한 회차를 다시 시도하기까지의 간격. */
+		/** 일시 장애(태깅 서버·원본 저장소)로 실패한 회차의 첫 재시도 간격. 실패할 때마다 두 배로 늘려 retryDelay까지 간다. */
+		@DefaultValue("1m") Duration retryFirstDelay,
+		/** 일시 장애 재시도 간격의 상한. */
 		@DefaultValue("1h") Duration retryDelay,
+		/** 영구 실패(입력 거절·원본 없음 등)를 다시 시도하기까지의 간격. 태깅 설정이 바뀌면 이 간격을 기다리지 않고 다시 한다. */
+		@DefaultValue("7d") Duration permanentRetryDelay,
 		/** 할 일이 없거나 준비가 안 됐을 때 다시 볼 간격. */
 		@DefaultValue("30s") Duration idleDelay,
 		/** 태그 검색 인덱스의 이름(버전). 쓰기·검색은 별칭(TagIndexContract.ALIAS)으로 한다. */
 		@DefaultValue("thr_doc_tag_v1") String index,
 		@DefaultValue(TagIndexContract.ALIAS) String alias) {
+
+	public TaggingProperties {
+		// 비었거나(환경 변수를 빈 값으로 넘김) 공백뿐이면 기본 목록을 쓴다 — 빈 목록이면 모든 문서가 미분류로 굳는다.
+		List<String> named = categories == null ? List.of() : categories.stream().map(String::strip).filter(name -> !name.isEmpty()).toList();
+		categories = named.isEmpty() ? TagPrompt.DEFAULT_CATEGORIES : named;
+	}
 
 	public boolean enabled() {
 		return !url.isBlank() && !model.isBlank();

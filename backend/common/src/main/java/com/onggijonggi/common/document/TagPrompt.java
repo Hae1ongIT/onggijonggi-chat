@@ -8,7 +8,10 @@ import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
+import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectReader;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -24,10 +27,14 @@ public final class TagPrompt {
 	public static final int VERSION = 1;
 	/** 카테고리를 판단할 수 없을 때의 값. */
 	public static final String UNCLASSIFIED = "UNCLASSIFIED";
+	/** 배포 설정이 비었을 때의 카테고리 목록(ETL 태깅 기본값·평가 세트 공용). */
+	public static final List<String> DEFAULT_CATEGORIES = List.of("인사·총무", "보안·IT", "재무·회계", "영업·고객", "법무·규정", "기술·개발", "기타");
 	/** 키워드 하나의 최대 길이. 넘으면 버린다(문장을 키워드로 돌려준 경우). */
 	static final int KEYWORD_MAX_CHARS = 40;
 
 	private static final JsonMapper JSON = JsonMapper.builder().build();
+	private static final ObjectReader FIRST_VALUE = JSON.readerFor(JsonNode.class).without(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+	private static final Pattern DOCUMENT_TAG = Pattern.compile("<(/?)document", Pattern.CASE_INSENSITIVE);
 
 	/** 뽑은 태그. 미분류면 category가 UNCLASSIFIED이고, 키워드·요약은 검사를 통과한 만큼 남는다. */
 	public record Tags(String category, List<String> keywords, String summary) {
@@ -79,9 +86,9 @@ public final class TagPrompt {
 				""";
 	}
 
-	/** 자료를 감싼 사용자 메시지. */
+	/** 자료를 감싼 사용자 메시지. 자료 안의 document 태그는 무력화한다 — 본문의 </document>로 자료 경계를 끝내고 지시를 덧붙이지 못하게. */
 	public static String user(String text) {
-		return "<document>\n" + text + "\n</document>";
+		return "<document>\n" + DOCUMENT_TAG.matcher(text).replaceAll("‹$1document") + "\n</document>";
 	}
 
 	/** 덩어리 요약들을 최종 태깅에 넘길 자료로 묶는다. */
@@ -108,22 +115,27 @@ public final class TagPrompt {
 			if (keywords.size() >= settings.maxKeywords()) break;
 		}
 		String summary = node.path("summary").asString("").strip();
-		if (summary.length() > settings.summaryMaxChars()) summary = summary.substring(0, settings.summaryMaxChars()).strip();
+		if (summary.length() > settings.summaryMaxChars()) summary = cut(summary, settings.summaryMaxChars()).strip();
 		return new Tags(category, new ArrayList<>(keywords), summary);
 	}
 
-	/** 응답에서 JSON 객체를 꺼낸다(코드 블록 표시나 앞뒤 문장이 붙어도). 없으면 null. */
+	/** 응답에서 첫 JSON 객체를 꺼낸다(코드 블록 표시나 앞뒤 문장이 붙어도 — 뒤 문장에 중괄호가 있어도). 없으면 null. */
 	private static JsonNode object(String content) {
 		if (content == null) return null;
 		int start = content.indexOf('{');
-		int end = content.lastIndexOf('}');
-		if (start < 0 || end <= start) return null;
+		if (start < 0) return null;
 		try {
-			JsonNode node = JSON.readTree(content.substring(start, end + 1));
-			return node.isObject() ? node : null;
+			// 첫 값만 읽고 뒤에 남은 글은 보지 않는다.
+			JsonNode node = FIRST_VALUE.readValue(content.substring(start));
+			return node != null && node.isObject() ? node : null;
 		} catch (RuntimeException malformed) {
 			return null;
 		}
+	}
+
+	/** 앞에서 max자까지 자른다. 이모지 같은 보충 문자의 반쪽을 남기지 않는다. */
+	private static String cut(String value, int max) {
+		return value.substring(0, Character.isHighSurrogate(value.charAt(max - 1)) ? max - 1 : max);
 	}
 
 	private static String sha256(String value) {

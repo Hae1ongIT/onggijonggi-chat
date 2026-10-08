@@ -81,12 +81,14 @@ public class TaggingWorker implements SmartLifecycle {
 		List<TagStore.Target> targets = store.targets(fingerprint, settings.batch());
 		for (TagStore.Target target : targets) {
 			if (!running.get()) break;
-			tag(target, fingerprint);
+			// 일시 장애면 묶음의 나머지를 지금 시도하지 않고 쉰다 — 태깅 서버가 잠깐 끊긴 사이 대기 문서가 한꺼번에 실패로 밀리지 않게.
+			if (!tag(target, fingerprint)) return 0;
 		}
 		return targets.size();
 	}
 
-	void tag(TagStore.Target target, String fingerprint) {
+	/** 한 회차를 태깅한다. 일시 장애로 실패하면 false다. */
+	boolean tag(TagStore.Target target, String fingerprint) {
 		long started = System.nanoTime();
 		try {
 			TagPrompt.Tags tags = tagger.tag(target.job());
@@ -95,29 +97,41 @@ public class TaggingWorker implements SmartLifecycle {
 				// 태깅하는 동안 문서가 지워졌거나 회차가 정리됐다. 방금 쓴 태그 문서를 거둔다.
 				index.delete(target.document(), target.runSeq());
 				log.info("태깅 중 정리된 회차라 태그를 버린다: doc={} run={}", target.document(), target.runSeq());
-				return;
+				return true;
 			}
 			log.info("문서 태깅 완료: doc={} run={} 분류={} 키워드 {}개 ({}ms)", target.document(), target.runSeq(),
 					tags.classified() ? "됨" : "미분류", tags.keywords().size(), (System.nanoTime() - started) / 1_000_000);
+			return true;
 		} catch (EtlFailure failure) {
-			failed(target, failure.code(), fingerprint, failure);
+			failed(target, failure.code(), failure.permanent(), fingerprint, failure);
+			return failure.permanent();
 		} catch (RuntimeException unexpected) {
-			failed(target, "UNEXPECTED", fingerprint, unexpected);
+			failed(target, "UNEXPECTED", false, fingerprint, unexpected);
+			return false;
 		}
 	}
 
-	private void failed(TagStore.Target target, String code, String fingerprint, RuntimeException cause) {
+	private void failed(TagStore.Target target, String code, boolean permanent, String fingerprint, RuntimeException cause) {
+		if (!running.get()) {
+			// 종료 중 끊긴 요청이다. 실패로 남기면 다음 기동 뒤에도 간격만큼 밀린다 — 남기지 않고 다음 기동 때 바로 다시 한다.
+			log.info("종료 중이라 태깅을 멈춘다 — 다음 기동 때 다시 한다: doc={} run={}", target.document(), target.runSeq());
+			return;
+		}
 		String stored = code.length() > 64 ? code.substring(0, 64) : code;
+		// 영구 실패(입력 거절·원본 없음 등)는 다시 해도 같으니 긴 간격을 둔다. 태깅 설정이 바뀌면 간격과 무관하게 다시 대상이 된다.
+		Duration first = permanent ? settings.permanentRetryDelay() : settings.retryFirstDelay();
+		Duration max = permanent ? settings.permanentRetryDelay() : settings.retryDelay();
 		try {
-			store.saveFailed(target, stored, fingerprint, settings.retryDelay());
+			store.saveFailed(target, stored, fingerprint, first, max);
 		} catch (RuntimeException error) {
 			log.warn("태깅 실패를 기록하지 못했다 — 다음 주기에 다시 대상이 된다: doc={} run={}", target.document(), target.runSeq(), error);
 		}
 		// 예기치 못한 오류(코드 결함)만 스택을 남긴다. 태깅 서버 장애는 문서마다 반복되므로 한 줄로 남긴다.
+		String retry = permanent ? "영구 실패 — " + max + " 뒤 또는 설정 변경 시 다시 시도" : "일시 장애 — 간격을 늘려 가며 다시 시도";
 		if ("UNEXPECTED".equals(code))
-			log.warn("문서 태깅 실패({}) — {} 뒤 다시 시도: doc={} run={}", code, settings.retryDelay(), target.document(), target.runSeq(), cause);
+			log.warn("문서 태깅 실패({}, {}): doc={} run={}", code, retry, target.document(), target.runSeq(), cause);
 		else
-			log.warn("문서 태깅 실패({}) — {} 뒤 다시 시도: doc={} run={}", code, settings.retryDelay(), target.document(), target.runSeq());
+			log.warn("문서 태깅 실패({}, {}): doc={} run={}", code, retry, target.document(), target.runSeq());
 	}
 
 	private void pause() {

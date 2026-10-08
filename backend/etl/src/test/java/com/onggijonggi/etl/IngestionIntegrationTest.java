@@ -80,6 +80,7 @@ class IngestionIntegrationTest {
 		registry.add("app.etl.tagging.url", FAKE::url);
 		registry.add("app.etl.tagging.model", () -> "tag-model");
 		registry.add("app.etl.tagging.idle-delay", () -> "200ms");
+		registry.add("app.etl.tagging.retry-first-delay", () -> "500ms");
 		registry.add("app.etl.tagging.retry-delay", () -> "1s");
 		// 운영 기본값과 같은 2개 스레드로 돌려 선점 경합도 함께 지난다.
 		registry.add("app.etl.concurrency", () -> "2");

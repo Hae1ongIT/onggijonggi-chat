@@ -38,13 +38,16 @@ public class TagStore {
 		this.transactions = new TransactionTemplate(manager);
 	}
 
-	/** 태깅할 회차를 최대 limit개. 태그 없음 → 설정이 바뀐 태그 → 실패 재시도 순이다. */
+	/**
+	 * 태깅할 회차를 최대 limit개. 태그 없음 → 설정이 바뀐 태그 → 실패 재시도 순이다. 실패한 회차는 next_at을 기다리되, 설정이 바뀌었으면
+	 * 기다리지 않는다(영구 실패의 긴 간격이 설정 변경 뒤 재태깅을 막지 않게).
+	 */
 	public List<Target> targets(String fingerprint, int limit) {
 		return jdbc.query("select d.id, d.tnn_id, d.thr_id, c.run_seq, d.file_name, d.src_key, d.src_att_id"
 				+ " from thr_doc d join thr_doc_run c on c.doc_id = d.id and c.status = 'DONE'"
 				+ " and c.run_seq = (select max(m.run_seq) from thr_doc_run m where m.doc_id = d.id and m.status = 'DONE')"
 				+ " left join thr_doc_tag t on t.doc_id = d.id and t.run_seq = c.run_seq"
-				+ " where d.status = 'READY' and (t.id is null or (t.tag_cnf <> ? and t.next_at <= now())"
+				+ " where d.status = 'READY' and (t.id is null or (t.tag_cnf <> ? and (t.status = 'FAILED' or t.next_at <= now()))"
 				+ " or (t.status = 'FAILED' and t.next_at <= now()))"
 				+ " order by case when t.id is null then 0 when t.status = 'DONE' then 1 else 2 end, c.updated_at, d.id limit ?",
 				(rs, row) -> new Target(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getObject(3, UUID.class), rs.getInt(4),
@@ -83,10 +86,10 @@ public class TagStore {
 	}
 
 	/**
-	 * 태깅 실패를 남기고 retryDelay 뒤 다시 시도하게 한다. 이미 태그가 있는 회차(설정 변경 재태깅 실패)는 태그를 지우지 않고 간격만 둔다.
-	 * 그 회차가 지워졌으면 아무것도 남기지 않는다.
+	 * 태깅 실패를 남긴다. 다음 시도는 firstDelay 뒤이고, 잇따라 실패할수록 두 배씩 늘려 maxDelay까지 간다. 이미 태그가 있는 회차(설정 변경
+	 * 재태깅 실패)는 태그를 지우지 않고 간격만 둔다. 그 회차가 지워졌으면 아무것도 남기지 않는다.
 	 */
-	public void saveFailed(Target target, String code, String fingerprint, Duration retryDelay) {
+	public void saveFailed(Target target, String code, String fingerprint, Duration firstDelay, Duration maxDelay) {
 		transactions.executeWithoutResult(tx -> {
 			if (jdbc.queryForList("select id from thr_doc_run where doc_id = ? and run_seq = ? and status = 'DONE'", target.document(), target.runSeq())
 					.isEmpty())
@@ -94,10 +97,11 @@ public class TagStore {
 			jdbc.update("insert into thr_doc_tag(id, doc_id, tnn_id, thr_id, run_seq, status, tag_cnf, att_cnt, err, next_at)"
 					+ " values (?, ?, ?, ?, ?, 'FAILED', ?, 1, ?, now() + ? * interval '1 millisecond')"
 					+ " on conflict (doc_id, run_seq) do update set att_cnt = thr_doc_tag.att_cnt + 1, err = excluded.err,"
-					+ " next_at = excluded.next_at, updated_at = now(),"
+					+ " next_at = now() + least(?, ? * power(2, least(thr_doc_tag.att_cnt, 20))) * interval '1 millisecond', updated_at = now(),"
 					// 실패만 있던 행은 지금 설정 지문으로 맞춘다. 태그가 있는 행(DONE)은 이전 지문을 그대로 둬 다음 간격 뒤 다시 대상이 된다.
 					+ " tag_cnf = case when thr_doc_tag.status = 'FAILED' then excluded.tag_cnf else thr_doc_tag.tag_cnf end",
-					UUID.randomUUID(), target.document(), target.tenant(), target.thread(), target.runSeq(), fingerprint, code, retryDelay.toMillis());
+					UUID.randomUUID(), target.document(), target.tenant(), target.thread(), target.runSeq(), fingerprint, code, firstDelay.toMillis(),
+				maxDelay.toMillis(), firstDelay.toMillis());
 		});
 	}
 

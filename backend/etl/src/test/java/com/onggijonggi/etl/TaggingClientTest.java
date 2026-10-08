@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.onggijonggi.common.document.TagPrompt;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -33,7 +34,18 @@ class TaggingClientTest {
 
 	static TaggingProperties properties(String url) {
 		return new TaggingProperties(url, "tag-model", Duration.ofSeconds(5), List.of("인사·총무", "기타"), 10, 200, 512, 100, 40, 3, 20,
-				Duration.ofMinutes(1), Duration.ofMillis(100), "thr_doc_tag_v1", "thr_doc_tag");
+				Duration.ofSeconds(1), Duration.ofMinutes(1), Duration.ofDays(7), Duration.ofMillis(100), "thr_doc_tag_v1", "thr_doc_tag");
+	}
+
+	/** 카테고리 목록이 비었거나(환경 변수를 빈 값으로 넘김) 공백뿐이면 기본 목록을 쓴다 — 빈 목록이면 모든 문서가 미분류로 굳는다. */
+	@Test
+	void anEmptyCategoryListFallsBackToTheDefaults() {
+		for (List<String> empty : java.util.Arrays.<List<String>>asList(null, List.of(), List.of(" ", "")))
+			assertThat(new TaggingProperties("u", "m", Duration.ofSeconds(5), empty, 10, 200, 512, 100, 40, 3, 20, Duration.ofSeconds(1),
+					Duration.ofMinutes(1), Duration.ofDays(7), Duration.ofMillis(100), "i", "a").categories()).isEqualTo(TagPrompt.DEFAULT_CATEGORIES);
+		assertThat(new TaggingProperties("u", "m", Duration.ofSeconds(5), List.of(" 휴가 ", "기타"), 10, 200, 512, 100, 40, 3, 20,
+				Duration.ofSeconds(1), Duration.ofMinutes(1), Duration.ofDays(7), Duration.ofMillis(100), "i", "a").categories())
+				.containsExactly("휴가", "기타");
 	}
 
 	@Test

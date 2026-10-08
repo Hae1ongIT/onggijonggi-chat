@@ -398,6 +398,8 @@ services:
       # 문서 자동 태깅(#362). 게이트웨이를 거치지 않고 사내 LLM 서버를 직접 부른다. 둘 중 하나라도 비면 태깅만 꺼진다.
       APP_ETL_TAGGING_URL: ${TAGGING_URL:-}
       APP_ETL_TAGGING_MODEL: ${TAGGING_MODEL:-}
+      # 카테고리 목록(쉼표로 잇는다). 비우면 기본 7개 목록이다.
+      APP_ETL_TAGGING_CATEGORIES: ${TAGGING_CATEGORIES:-}
     depends_on:
       bff:
         condition: service_healthy

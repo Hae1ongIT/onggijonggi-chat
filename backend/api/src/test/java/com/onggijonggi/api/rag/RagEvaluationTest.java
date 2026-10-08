@@ -63,8 +63,7 @@ class RagEvaluationTest {
 	private static final String BASELINE_KEYWORD = "75%";
 	private static final String TAG_INDEX = "thr_doc_tag_v1";
 	/** ETL 기본 태깅 설정(TaggingProperties)과 같게 둔다. */
-	private static final TagPrompt.Settings TAGGING = new TagPrompt.Settings(
-			List.of("인사·총무", "보안·IT", "재무·회계", "영업·고객", "법무·규정", "기술·개발", "기타"), 10, 200);
+	private static final TagPrompt.Settings TAGGING = new TagPrompt.Settings(TagPrompt.DEFAULT_CATEGORIES, 10, 200);
 	private static final List<String> TAG_MINIMUMS = List.of("30%", "40%", "60%");
 	private static final List<Double> TAG_CHUNK_MINIMUMS = List.of(0.3, 0.35, 0.4, 0.45);
 

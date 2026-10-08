@@ -89,7 +89,7 @@ class TagStoreTest {
 		Map<String, Object> row = jdbc.queryForMap("select status, ctg, array_to_string(kyw, ',') as kyw, smm, tag_cnf from thr_doc_tag where doc_id = ?", document);
 		assertThat(row).containsEntry("status", "DONE").containsEntry("ctg", "기타").containsEntry("kyw", "연차,이월").containsEntry("smm", "요약");
 
-		store.saveFailed(target, "TAGGING_UNAVAILABLE", "tag-v1:m:newer", Duration.ofHours(1));
+		store.saveFailed(target, "TAGGING_UNAVAILABLE", "tag-v1:m:newer", Duration.ofHours(1), Duration.ofHours(1));
 		assertThat(jdbc.queryForMap("select status, ctg, tag_cnf, err from thr_doc_tag where doc_id = ?", document))
 				.as("이전 태그는 남기고 간격만 둔다").containsEntry("status", "DONE").containsEntry("ctg", "기타").containsEntry("tag_cnf", CURRENT)
 				.containsEntry("err", "TAGGING_UNAVAILABLE");
@@ -106,13 +106,31 @@ class TagStoreTest {
 		UUID document = readyDocument();
 		TagStore.Target target = store.targets(CURRENT, 10).get(0);
 
-		store.saveFailed(target, "SOURCE_MISSING", CURRENT, Duration.ofHours(1));
+		store.saveFailed(target, "SOURCE_MISSING", CURRENT, Duration.ofDays(7), Duration.ofDays(7));
 
 		assertThat(jdbc.queryForMap("select status, ctg, tag_cnf, att_cnt from thr_doc_tag where doc_id = ?", document))
 				.containsEntry("status", "FAILED").containsEntry("ctg", null).containsEntry("tag_cnf", CURRENT).containsEntry("att_cnt", 1);
 		assertThat(store.targets(CURRENT, 10)).isEmpty();
+		assertThat(store.targets("tag-v1:m:changed", 10)).as("설정이 바뀌면 영구 실패의 긴 간격을 기다리지 않는다").hasSize(1);
 		jdbc.update("update thr_doc_tag set next_at = now() - interval '1 second'");
 		assertThat(store.targets(CURRENT, 10)).hasSize(1);
+	}
+
+	/** 일시 장애가 잇따르면 간격을 두 배씩 늘려 상한까지 간다. 성공하면 횟수·사유가 지워진다. */
+	@Test
+	void repeatedFailuresBackOffUpToTheLimitAndASuccessClearsThem() throws SQLException {
+		readyDocument();
+		TagStore.Target target = store.targets(CURRENT, 10).get(0);
+
+		for (long expected : new long[] {60, 120, 240, 240}) {
+			store.saveFailed(target, "TAGGING_UNAVAILABLE", CURRENT, Duration.ofMinutes(1), Duration.ofMinutes(4));
+			assertThat(jdbc.queryForObject("select round(extract(epoch from next_at - now())) from thr_doc_tag", Long.class)).isBetween(expected - 2, expected);
+		}
+		assertThat(jdbc.queryForObject("select att_cnt from thr_doc_tag", Integer.class)).isEqualTo(4);
+
+		assertThat(store.saveDone(target, new TagPrompt.Tags("기타", List.of("연차"), "요약"), CURRENT)).isTrue();
+		assertThat(jdbc.queryForMap("select status, att_cnt, err from thr_doc_tag")).containsEntry("status", "DONE").containsEntry("att_cnt", 0)
+				.containsEntry("err", null);
 	}
 
 	private static void tag(UUID document, int runSeq, String status, String fingerprint, String nextAt) {
