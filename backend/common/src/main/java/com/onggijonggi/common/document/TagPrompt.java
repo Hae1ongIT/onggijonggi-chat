@@ -35,7 +35,9 @@ public final class TagPrompt {
 	private static final JsonMapper JSON = JsonMapper.builder().build();
 	private static final ObjectReader FIRST_VALUE = JSON.readerFor(JsonNode.class).without(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 	private static final Pattern CONTROL = Pattern.compile("\\p{Cntrl}");
-	private static final Pattern DOCUMENT_TAG = Pattern.compile("<(/?)document", Pattern.CASE_INSENSITIVE);
+	/** 여는 꺾쇠(＜·&lt; 포함) 뒤 공백·/·보이지 않는 문자를 건너 document가 오는 곳. */
+	private static final Pattern DOCUMENT_TAG = Pattern.compile("(?:<|＜|&lt;|&#0*60;|&#x0*3c;)[\\s/\\u200B-\\u200D\\u2060\\uFEFF]*document",
+			Pattern.CASE_INSENSITIVE);
 
 	/** 뽑은 태그. 미분류면 category가 UNCLASSIFIED이고, 키워드·요약은 검사를 통과한 만큼 남는다. */
 	public record Tags(String category, List<String> keywords, String summary) {
@@ -87,9 +89,12 @@ public final class TagPrompt {
 				""";
 	}
 
-	/** 자료를 감싼 사용자 메시지. 자료 안의 document 태그는 무력화한다 — 본문의 </document>로 자료 경계를 끝내고 지시를 덧붙이지 못하게. */
+	/**
+	 * 자료를 감싼 사용자 메시지. 자료 안의 document 태그는 무력화한다 — 본문의 </document>로 자료 경계를 끝내고 지시를 덧붙이지 못하게.
+	 * 모델은 꺾쇠 변형(전각 ＜, &lt;)이나 사이에 낀 공백·보이지 않는 문자도 태그로 읽을 수 있어 함께 바꾼다.
+	 */
 	public static String user(String text) {
-		return "<document>\n" + DOCUMENT_TAG.matcher(text).replaceAll("‹$1document") + "\n</document>";
+		return "<document>\n" + DOCUMENT_TAG.matcher(text).replaceAll("‹document") + "\n</document>";
 	}
 
 	/** 덩어리 요약들을 최종 태깅에 넘길 자료로 묶는다. */
