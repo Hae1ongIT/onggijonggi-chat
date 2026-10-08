@@ -82,6 +82,14 @@ class TaggingWorkerTest {
 		verify(store, never()).saveFailed(any(), anyString(), anyString(), any(Duration.class), any(Duration.class));
 	}
 
+	/** 로그에는 실패의 HTTP 상태만 남긴다 — 연결 오류 메시지에는 태깅 서버 주소가 들어 있다. */
+	@Test
+	void onlyTheHttpStatusOfAFailureIsLogged() {
+		assertThat(TaggingWorker.httpStatus(EtlFailure.permanent("TAGGING_REJECTED", "HTTP 404 {\"detail\":\"Not Found\"}"))).isEqualTo("HTTP 404");
+		assertThat(TaggingWorker.httpStatus(EtlFailure.transientFailure("TAGGING_UNAVAILABLE", "I/O error on POST request for \"http://h:1/v1\"", null)))
+				.isEmpty();
+	}
+
 	private static TagStore.Target target() {
 		return new TagStore.Target(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, "a.txt", "d", null);
 	}

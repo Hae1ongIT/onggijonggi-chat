@@ -36,6 +36,10 @@ public class TaggingWorker implements SmartLifecycle {
 	private volatile Thread thread;
 	/** 태깅이 꺼진 이유. null이면 돌고 있다. */
 	private volatile String disabledReason;
+	/** 태깅이 기다리는 이유(문서 처리 꺼짐·검색 인덱스 준비 전). null이면 기다리지 않는다. */
+	private volatile String waitingReason;
+	/** 일시 장애로 묶음을 멈춘 횟수(잇따른). 늘수록 오래 쉰다 — 태깅 서버가 오래 끊긴 동안 문서를 하나씩 두드리지 않게. */
+	private int stalls;
 
 	public TaggingWorker(TagStore store, Tagger tagger, TagIndex index, ChunkIndex chunks, IngestionWorkers workers, TaggingProperties settings) {
 		this.store = store;
@@ -66,9 +70,14 @@ public class TaggingWorker implements SmartLifecycle {
 		while (running.get()) {
 			int done = 0;
 			try {
-				// 문서 처리가 꺼져 있거나 조각 인덱스 준비·이전이 끝나지 않았으면 기다린다 — 태그만 앞서 쌓이지 않게.
 				if (!released) released = releaseFailures();
-				if (workers.isRunning() && chunks.prepared() && !chunks.migrating()) done = cycle();
+				// 문서 처리가 꺼져 있거나 조각 인덱스 준비·이전이 끝나지 않았으면 기다린다 — 태그만 앞서 쌓이지 않게.
+				waitingReason = !workers.isRunning() ? "문서 처리가 꺼져 있다(임베딩 설정 등)"
+						: !chunks.prepared() ? "검색 인덱스 준비 전이다" : chunks.migrating() ? "검색 인덱스를 옮기는 중이다" : null;
+				if (waitingReason == null) done = cycle();
+			} catch (EtlFailure failure) {
+				// 태그 검색 인덱스 준비(index.ensure) 실패. 대상 조회 실패와 구분하고, 반복되므로 스택 없이 남긴다.
+				log.warn("태그 검색 인덱스를 준비하지 못했다({} {}) — 잠시 뒤 다시 본다", failure.code(), httpStatus(failure));
 			} catch (Throwable error) {
 				log.warn("문서 태깅 대상을 읽지 못했다 — 잠시 뒤 다시 본다", error);
 			}
@@ -91,7 +100,11 @@ public class TaggingWorker implements SmartLifecycle {
 		for (TagStore.Target target : targets) {
 			if (!running.get()) break;
 			// 일시 장애면 묶음의 나머지를 지금 시도하지 않고 쉰다 — 태깅 서버가 잠깐 끊긴 사이 대기 문서가 한꺼번에 실패로 밀리지 않게.
-			if (!tag(target, fingerprint)) return 0;
+			if (!tag(target, fingerprint)) {
+				stalls++;
+				return 0;
+			}
+			stalls = 0;
 		}
 		return targets.size();
 	}
@@ -142,13 +155,29 @@ public class TaggingWorker implements SmartLifecycle {
 		if ("UNEXPECTED".equals(code))
 			log.warn("문서 태깅 실패({}, {}): doc={} run={}", code, retry, target.document(), target.runSeq(), cause);
 		else
-			log.warn("문서 태깅 실패({}, {}): doc={} run={}", code, retry, target.document(), target.runSeq());
+			log.warn("문서 태깅 실패({} {}, {}): doc={} run={}", code, cause instanceof EtlFailure failure ? httpStatus(failure) : "", retry,
+					target.document(), target.runSeq());
 		return true;
 	}
 
+	/**
+	 * 실패의 HTTP 상태(예: "HTTP 404")만 꺼낸다. 없으면 빈 글자. 예외 메시지 전체는 남기지 않는다 — 연결 오류 메시지에는 태깅 서버 주소가
+	 * 들어 있다. 상태만 있어도 주소·모델 이름 오타(404·400)와 서버 장애(5xx)를 가를 수 있다.
+	 */
+	static String httpStatus(EtlFailure failure) {
+		// 메시지는 "코드: 내용"이다(EtlFailure).
+		String message = failure.getMessage().substring(failure.code().length() + 2);
+		if (!message.startsWith("HTTP ")) return "";
+		int end = 5;
+		while (end < message.length() && Character.isDigit(message.charAt(end))) end++;
+		return message.substring(0, end);
+	}
+
 	private void pause() {
+		// 일시 장애가 잇따르면 쉬는 시간을 두 배씩 늘린다(재시도 간격 상한까지).
+		long delay = Math.min(settings.idleDelay().toMillis() << Math.min(stalls, 16), Math.max(settings.idleDelay().toMillis(), settings.retryDelay().toMillis()));
 		try {
-			Thread.sleep(settings.idleDelay().toMillis());
+			Thread.sleep(delay);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			running.set(false);
@@ -173,9 +202,10 @@ public class TaggingWorker implements SmartLifecycle {
 		return running.get();
 	}
 
-	/** 태깅이 꺼져 있으면 주기적으로 다시 알린다(검색의 태그 채널을 켰는데 태그가 붙지 않는 이유를 찾게). */
+	/** 태깅이 꺼져 있거나 기다리는 중이면 주기적으로 다시 알린다(검색의 태그 채널을 켰는데 태그가 붙지 않는 이유를 찾게). */
 	@Scheduled(fixedDelayString = "${app.etl.disabled-warn-delay:5m}", initialDelayString = "${app.etl.disabled-warn-delay:5m}")
 	public void warnIfDisabled() {
 		if (disabledReason != null) log.info("문서 태깅이 꺼져 있다 — 검색의 태그 채널에 쓸 태그가 붙지 않는다: {}", disabledReason);
+		else if (waitingReason != null) log.info("문서 태깅이 기다리는 중이다 — {}", waitingReason);
 	}
 }

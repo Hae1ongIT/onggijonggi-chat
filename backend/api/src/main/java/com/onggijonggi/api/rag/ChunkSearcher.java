@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -37,6 +38,8 @@ public class ChunkSearcher {
 	public record Hit(String chunkId, String document, int runSeq, int seq, String loc, String content, Double vectorScore, Double keywordScore) { }
 
 	private static final Logger log = LoggerFactory.getLogger(ChunkSearcher.class);
+	/** 태그 채널이 실패하면 이만큼 건너뛴다 — 태그 색인이 없을 때(태깅 꺼짐) 검색마다 실패 요청·경고가 쌓이지 않게. */
+	private static final long TAG_SKIP_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(1);
 
 	/** ES 응답 버퍼. 후보 수 × 청크 최대 길이(약 1300자, UTF-8 약 4KB)에 넉넉한 여유를 둔다. */
 	private static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -47,6 +50,8 @@ public class ChunkSearcher {
 	private final RagTagProperties tags;
 	private final WebClient client;
 	private final ObjectMapper json;
+	/** 태그 채널을 다시 시도할 시각(System.nanoTime). 그 전에는 태그 채널 없이 검색한다. */
+	private volatile long tagRetryAt = System.nanoTime();
 
 	/** 태그 채널 없이 검색한다(테스트·평가용). */
 	public ChunkSearcher(RagProperties properties, WebClient.Builder builder, ObjectMapper json) {
@@ -68,7 +73,7 @@ public class ChunkSearcher {
 		List<Object> filter = filter(scope);
 		List<Hit> keyword = keyword(filter, query);
 		List<Hit> semantic = vector(filter, vector);
-		if (!tags.enabled()) return fuse(keyword, semantic);
+		if (!tags.enabled() || System.nanoTime() - tagRetryAt < 0) return fuse(keyword, semantic);
 		return fuse(List.of(semantic, keyword, tagged(scope, filter, query, vector, semantic)));
 	}
 
@@ -105,7 +110,9 @@ public class ChunkSearcher {
 			return ranked.stream().filter(java.util.Objects::nonNull).toList();
 		} catch (RuntimeException error) {
 			// 태그가 아직 없거나(태깅 꺼짐·첫 배포 직후) 태그 색인이 잠시 안 될 때. 본문 검색은 그대로 돌려준다.
-			log.warn("태그 채널을 건너뛴다 — 본문 키워드·벡터 결과만 쓴다: {}", error.getMessage());
+			// 1분 동안 태그 채널을 쉰다. 경고도 그때 한 번만 남긴다.
+			tagRetryAt = System.nanoTime() + TAG_SKIP_NANOS;
+			log.warn("태그 채널을 1분간 건너뛴다 — 본문 키워드·벡터 결과만 쓴다: {}", error.getMessage());
 			return List.of();
 		}
 	}
@@ -239,7 +246,9 @@ public class ChunkSearcher {
 		} catch (RuntimeException error) {
 			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화). 다만 ETL이 빈 인덱스를 다시
 			// 만든 뒤에는 404가 아니라 결과 0건(NO_MATCH)이 된다 — READY 문서의 청크 유실은 감지하지 못한다(INSTALL「방 문서 검색 준비 켜기」에 대처를 적었다).
-			throw new RagUnavailableException("Elasticsearch 검색 실패: " + error.getClass().getSimpleName(), error);
+			// 상태 코드가 있으면 붙인다(404 색인 없음·400 질의 오류·5xx 장애를 가르게). 주소가 든 메시지는 남기지 않는다.
+			String status = error instanceof WebClientResponseException response ? " HTTP " + response.getStatusCode().value() : "";
+			throw new RagUnavailableException("Elasticsearch 검색 실패: " + error.getClass().getSimpleName() + status, error);
 		}
 	}
 

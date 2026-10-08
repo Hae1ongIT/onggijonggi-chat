@@ -152,16 +152,19 @@ class ChunkSearcherTest {
 	}
 
 	@Test
+	/** 태그 채널이 실패하면(색인 없음) 두 채널로 계속하고, 1분 동안은 태그 채널을 다시 부르지 않는다. 꺼져 있으면 아예 부르지 않는다. */
 	void aTagChannelOutageKeepsTheOtherChannelsAndADisabledChannelSendsNothing() throws Exception {
 		UUID a = UUID.randomUUID();
 		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
 		for (boolean enabled : List.of(true, false)) {
 			try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
 					.reply("/thr_doc_tag/_search", 404, "{\"error\":{\"type\":\"index_not_found_exception\"}}")) {
-				var result = tagged(es, enabled).search(scope(a), "연차", new float[] {1, 0, 0});
-
-				assertThat(result).as("enabled=" + enabled).singleElement().satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
-				assertThat(es.requests.stream().anyMatch(request -> request.path().startsWith("/thr_doc_tag"))).isEqualTo(enabled);
+				var searcher = tagged(es, enabled);
+				for (int i = 0; i < 2; i++)
+					assertThat(searcher.search(scope(a), "연차", new float[] {1, 0, 0})).as("enabled=" + enabled).singleElement()
+							.satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
+				assertThat(es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count()).as("enabled=" + enabled)
+						.isEqualTo(enabled ? 1 : 0);
 			}
 		}
 	}
