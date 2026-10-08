@@ -111,6 +111,22 @@ class TaggingWorkerTest {
 		verify(store).saveFailed(eq(targets.get(0)), eq("UNEXPECTED"), eq("fp"), eq(settings.retryFirstDelay()), eq(settings.retryDelay()));
 	}
 
+	/** 기동 뒤 첫 주기에 한 번, 색인이 있어도 DB 태그로 맞춘다(채우던 중 재기동됐을 수 있다). 그 뒤 주기에는 다시 하지 않는다. */
+	@Test
+	void theIndexIsAlignedWithTheStoreOnceAfterStartup() {
+		var stored = new TagStore.Stored(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1,
+				new TagPrompt.Tags("기타", List.of(), "요약"), "fp");
+		when(index.check()).thenReturn(false);
+		when(store.stored(any(), anyInt())).thenReturn(List.of(stored), List.of());
+		when(store.targets(anyString(), anyInt())).thenReturn(List.of());
+		worker.start();
+
+		worker.cycle();
+		worker.cycle();
+
+		verify(index, times(1)).restore(List.of(stored));
+	}
+
 	/** 태그 색인을 새로 만들었으면 DB 태그를 쪽 단위로 다시 쓴다. 채우다 실패하면 다음 주기에(색인이 이미 있어도) 이어 한다. */
 	@Test
 	void aRecreatedIndexIsRestoredFromTheStoreEvenAcrossAFailure() {

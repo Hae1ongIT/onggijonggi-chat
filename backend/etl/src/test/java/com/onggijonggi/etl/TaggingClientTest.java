@@ -46,6 +46,9 @@ class TaggingClientTest {
 		assertThat(new TaggingProperties("u", "m", Duration.ofSeconds(5), List.of(" 휴가 ", "기타"), 10, 200, 512, 100, 40, 3, 20,
 				Duration.ofSeconds(1), Duration.ofMinutes(1), Duration.ofDays(7), Duration.ofMillis(100), "i", "a").categories())
 				.containsExactly("휴가", "기타");
+		assertThat(new TaggingProperties("u", "m", Duration.ofSeconds(5), List.of("휴가", " 휴가", "기타", "휴가"), 10, 200, 512, 100, 40, 3, 20,
+				Duration.ofSeconds(1), Duration.ofMinutes(1), Duration.ofDays(7), Duration.ofMillis(100), "i", "a").categories())
+				.as("중복은 한 번만 — 지문이 바뀌어 불필요하게 다시 태깅되지 않게").containsExactly("휴가", "기타");
 	}
 
 	@Test

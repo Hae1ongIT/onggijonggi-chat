@@ -41,8 +41,11 @@ public class TaggingWorker implements SmartLifecycle {
 	private volatile String disabledReason;
 	/** 태깅이 기다리는 이유(문서 처리 꺼짐·검색 인덱스 준비 전). null이면 기다리지 않는다. */
 	private volatile String waitingReason;
-	/** 태그 색인을 새로 만들어 DB 태그로 다시 채워야 한다. 채우다 실패하면 다음 주기에 이어 한다. */
-	private boolean restorePending;
+	/**
+	 * 태그 색인을 DB 태그로 다시 채워야 한다. 기동 때 한 번(채우던 중 재기동됐거나 색인이 DB와 어긋났을 수 있다 — LLM 없이 bulk 쓰기라
+	 * 가볍다), 그리고 색인을 새로 만들었을 때. 채우다 실패하면 다음 주기에 이어 한다.
+	 */
+	private boolean restorePending = true;
 	/** 일시 장애로 묶음을 멈춘 횟수(잇따른). 늘수록 오래 쉰다 — 태깅 서버가 오래 끊긴 동안 문서를 하나씩 두드리지 않게. */
 	private int stalls;
 
@@ -102,7 +105,7 @@ public class TaggingWorker implements SmartLifecycle {
 
 	/** 대상 한 묶음을 태깅한다. 처리한 수를 돌려준다. */
 	int cycle() {
-		// 태그 색인만 사라졌으면(색인 삭제·스냅샷 복원) DB가 정본이므로 DB 태그로 다시 채운다 — LLM은 다시 부르지 않는다.
+		// 기동 뒤 처음, 또는 태그 색인만 사라졌으면(색인 삭제·스냅샷 복원) DB가 정본이므로 DB 태그로 다시 채운다 — LLM은 다시 부르지 않는다.
 		if (index.check()) restorePending = true;
 		if (restorePending) {
 			restoreIndex();
@@ -133,7 +136,7 @@ public class TaggingWorker implements SmartLifecycle {
 			restored += page.size();
 			after = page.get(page.size() - 1).id();
 		}
-		if (restored > 0) log.info("태그 검색 인덱스를 새로 만들어 DB의 태그 {}건으로 다시 채웠다", restored);
+		if (restored > 0) log.info("태그 검색 인덱스를 DB의 태그 {}건으로 맞췄다", restored);
 	}
 
 	/** 한 회차를 태깅한다. 일시 장애로 실패하면 false다. */

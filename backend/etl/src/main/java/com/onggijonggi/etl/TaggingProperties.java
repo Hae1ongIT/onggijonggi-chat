@@ -49,7 +49,8 @@ public record TaggingProperties(
 
 	public TaggingProperties {
 		// 비었거나(환경 변수를 빈 값으로 넘김) 공백뿐이면 기본 목록을 쓴다 — 빈 목록이면 모든 문서가 미분류로 굳는다.
-		List<String> named = categories == null ? List.of() : categories.stream().map(String::strip).filter(name -> !name.isEmpty()).toList();
+		// 같은 이름이 두 번 들어가도 한 번만 쓴다 — 설정 지문이 바뀌어 전체가 불필요하게 다시 태깅되지 않게.
+		List<String> named = categories == null ? List.of() : categories.stream().map(String::strip).filter(name -> !name.isEmpty()).distinct().toList();
 		categories = named.isEmpty() ? TagPrompt.DEFAULT_CATEGORIES : named;
 	}
 
