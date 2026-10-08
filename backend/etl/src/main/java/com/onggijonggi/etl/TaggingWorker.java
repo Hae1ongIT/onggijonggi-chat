@@ -3,6 +3,7 @@ package com.onggijonggi.etl;
 import com.onggijonggi.common.document.TagPrompt;
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +26,8 @@ public class TaggingWorker implements SmartLifecycle {
 	private static final Logger log = LoggerFactory.getLogger(TaggingWorker.class);
 	/** 종료 때 진행 중인 태깅을 기다리는 상한. 끊긴 태깅은 다음 기동에서 다시 대상이 된다. */
 	private static final Duration STOP_WAIT = Duration.ofSeconds(5);
+	/** 태그 색인을 다시 채울 때 한 요청에 담는 수. */
+	private static final int RESTORE_PAGE = 500;
 
 	private final TagStore store;
 	private final Tagger tagger;
@@ -38,6 +41,8 @@ public class TaggingWorker implements SmartLifecycle {
 	private volatile String disabledReason;
 	/** 태깅이 기다리는 이유(문서 처리 꺼짐·검색 인덱스 준비 전). null이면 기다리지 않는다. */
 	private volatile String waitingReason;
+	/** 태그 색인을 새로 만들어 DB 태그로 다시 채워야 한다. 채우다 실패하면 다음 주기에 이어 한다. */
+	private boolean restorePending;
 	/** 일시 장애로 묶음을 멈춘 횟수(잇따른). 늘수록 오래 쉰다 — 태깅 서버가 오래 끊긴 동안 문서를 하나씩 두드리지 않게. */
 	private int stalls;
 
@@ -97,7 +102,12 @@ public class TaggingWorker implements SmartLifecycle {
 
 	/** 대상 한 묶음을 태깅한다. 처리한 수를 돌려준다. */
 	int cycle() {
-		index.ensure();
+		// 태그 색인만 사라졌으면(색인 삭제·스냅샷 복원) DB가 정본이므로 DB 태그로 다시 채운다 — LLM은 다시 부르지 않는다.
+		if (index.check()) restorePending = true;
+		if (restorePending) {
+			restoreIndex();
+			restorePending = false;
+		}
 		String fingerprint = settings.fingerprint();
 		List<TagStore.Target> targets = store.targets(fingerprint, settings.batch());
 		// 할 일이 없으면 쉬는 간격을 처음으로 되돌린다 — 장애 뒤 늘어난 간격 때문에 새 문서를 오래 기다리지 않게.
@@ -112,6 +122,18 @@ public class TaggingWorker implements SmartLifecycle {
 			stalls = 0;
 		}
 		return targets.size();
+	}
+
+	/** DB의 태그를 태그 색인에 다시 쓴다. */
+	private void restoreIndex() {
+		int restored = 0;
+		UUID after = new UUID(Long.MIN_VALUE, Long.MIN_VALUE);
+		for (List<TagStore.Stored> page = store.stored(after, RESTORE_PAGE); !page.isEmpty(); page = store.stored(after, RESTORE_PAGE)) {
+			index.restore(page);
+			restored += page.size();
+			after = page.get(page.size() - 1).id();
+		}
+		if (restored > 0) log.info("태그 검색 인덱스를 새로 만들어 DB의 태그 {}건으로 다시 채웠다", restored);
 	}
 
 	/** 한 회차를 태깅한다. 일시 장애로 실패하면 false다. */

@@ -136,6 +136,31 @@ class TagStoreTest {
 		assertThat(store.releaseFailures()).as("이미 풀린 행은 다시 세지 않는다").isZero();
 	}
 
+	/** 태그 색인을 다시 채울 대상은 READY 문서의 DONE 회차에 붙은 DONE 태그뿐이고, id 순으로 나눠 읽는다. */
+	@Test
+	void storedTagsAreTheSearchableOnesInPages() throws SQLException {
+		UUID first = readyDocument();
+		UUID second = readyDocument();
+		UUID failed = readyDocument();
+		UUID deleted = readyDocument();
+		for (TagStore.Target target : store.targets(CURRENT, 10)) {
+			if (target.document().equals(failed)) store.saveFailed(target, "TAGGING_REJECTED", CURRENT, Duration.ofDays(7), Duration.ofDays(7));
+			else store.saveDone(target, new TagPrompt.Tags("기타", List.of("연차", "이월"), "요약"), CURRENT);
+		}
+		jdbc.update("update thr_doc set status = 'DELETED', pnn = false, deleted_at = now() where id = ?", deleted);
+
+		var page = store.stored(new UUID(Long.MIN_VALUE, Long.MIN_VALUE), 1);
+		var rest = store.stored(page.get(0).id(), 10);
+
+		assertThat(page).hasSize(1);
+		assertThat(List.of(page.get(0), rest.get(0))).extracting(TagStore.Stored::document).containsExactlyInAnyOrder(first, second);
+		assertThat(rest).hasSize(1).singleElement().satisfies(tag -> {
+			assertThat(tag.tags()).isEqualTo(new TagPrompt.Tags("기타", List.of("연차", "이월"), "요약"));
+			assertThat(tag.fingerprint()).isEqualTo(CURRENT);
+			assertThat(tag.runSeq()).isEqualTo(1);
+		});
+	}
+
 	/** 일시 장애가 잇따르면 간격을 두 배씩 늘려 상한까지 간다. 성공하면 횟수·사유가 지워진다. */
 	@Test
 	void repeatedFailuresBackOffUpToTheLimitAndASuccessClearsThem() throws SQLException {

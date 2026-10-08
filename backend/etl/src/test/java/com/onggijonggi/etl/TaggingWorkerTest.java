@@ -111,6 +111,24 @@ class TaggingWorkerTest {
 		verify(store).saveFailed(eq(targets.get(0)), eq("UNEXPECTED"), eq("fp"), eq(settings.retryFirstDelay()), eq(settings.retryDelay()));
 	}
 
+	/** 태그 색인을 새로 만들었으면 DB 태그를 쪽 단위로 다시 쓴다. 채우다 실패하면 다음 주기에(색인이 이미 있어도) 이어 한다. */
+	@Test
+	void aRecreatedIndexIsRestoredFromTheStoreEvenAcrossAFailure() {
+		var stored = new TagStore.Stored(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1,
+				new TagPrompt.Tags("기타", List.of(), "요약"), "fp");
+		when(index.check()).thenReturn(true, false);
+		when(store.stored(any(), anyInt())).thenReturn(List.of(stored), List.of(stored), List.of());
+		org.mockito.Mockito.doThrow(EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "끊김", null)).doNothing().when(index).restore(any());
+		when(store.targets(anyString(), anyInt())).thenReturn(List.of());
+		worker.start();
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(worker::cycle).isInstanceOf(EtlFailure.class);
+		assertThat(worker.cycle()).isZero();
+
+		verify(index, times(2)).restore(List.of(stored));
+		verify(store).targets(anyString(), anyInt());
+	}
+
 	/** 로그에는 실패의 HTTP 상태만 남긴다 — 연결 오류 메시지에는 태깅 서버 주소가 들어 있다. */
 	@Test
 	void onlyTheHttpStatusOfAFailureIsLogged() {

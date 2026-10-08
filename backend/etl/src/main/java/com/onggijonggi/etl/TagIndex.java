@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.core.io.ClassPathResource;
@@ -21,7 +22,8 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * Class Name : TagIndex.java
  * Description : 문서 태그 검색 인덱스(#362)에 처리 회차마다 문서 하나를 쓰고 지운다. 매핑은 공용 모듈의 es-thr-doc-tag-index.json이고,
- *               쓰기·검색은 항상 별칭으로 한다. 별칭이 없으면(첫 기동·ES 볼륨 삭제) 인덱스와 별칭을 만든다. 조각 인덱스(ChunkIndex)와 달리
+ *               쓰기·검색은 항상 별칭으로 한다. 별칭이 없으면(첫 기동·ES 볼륨 삭제) 인덱스와 별칭을 만들고, 태깅 작업이 DB(정본)의 태그로
+ *               다시 채운다(restore). 조각 인덱스(ChunkIndex)와 달리
  *               이전 버전에서 옮기는 일은 아직 없다 — 매핑을 바꿀 때 인덱스 이름을 올리고 태그를 다시 뽑게 하면 된다(설정 지문).
  */
 @Component
@@ -38,9 +40,16 @@ public class TagIndex {
 		this.json = json;
 	}
 
-	/** 별칭이 없으면 인덱스와 별칭을 만든다. 이미 있으면 그대로 쓴다. */
+	/** 별칭이 없으면 인덱스와 별칭을 만든다. 이미 확인했으면 다시 보지 않는다(쓰기 경로용 — 404가 나면 다시 본다). */
 	public synchronized void ensure() {
-		if (ensured) return;
+		if (!ensured) check();
+	}
+
+	/**
+	 * 별칭을 매번 확인하고, 없으면 인덱스와 별칭을 만든다. 새로 만들었으면 true — 태그 색인만 사라진 경우(색인 삭제·스냅샷 복원)
+	 * DB의 태그로 다시 채우라는 뜻이다(태깅 주기마다 부른다).
+	 */
+	public synchronized boolean check() {
 		try {
 			JsonNode aliases;
 			try {
@@ -48,8 +57,10 @@ public class TagIndex {
 			} catch (HttpClientErrorException.NotFound missing) {
 				aliases = json.createObjectNode();
 			}
-			if (aliases.isEmpty()) create();
+			boolean created = aliases.isEmpty();
+			if (created) create();
 			ensured = true;
+			return created;
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("TAG_INDEX", error);
 		}
@@ -72,15 +83,7 @@ public class TagIndex {
 	/** 한 회차의 태그를 쓴다(같은 회차면 덮어쓴다). 검색에 바로 보이게 refresh를 기다린다. */
 	public void write(TagStore.Target target, TagPrompt.Tags tags, String fingerprint) {
 		ensure();
-		Map<String, Object> document = new LinkedHashMap<>();
-		document.put(DOC_ID, target.document().toString());
-		document.put(THR_ID, target.thread().toString());
-		document.put(TNN_ID, target.tenant().toString());
-		document.put(RUN_SEQ, target.runSeq());
-		document.put(CATEGORY, tags.category());
-		document.put(KEYWORDS, tags.keywords());
-		document.put(SUMMARY, tags.summary());
-		document.put(CONFIG, fingerprint);
+		Map<String, Object> document = document(target.document(), target.thread(), target.tenant(), target.runSeq(), tags, fingerprint);
 		try {
 			client.put().uri("/{alias}/_doc/{id}?refresh=wait_for&require_alias=true", settings.alias(), tagId(target.document(), target.runSeq()))
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(document))).retrieve().toBodilessEntity();
@@ -90,6 +93,41 @@ public class TagIndex {
 		} catch (RuntimeException error) {
 			throw HttpCalls.classify("TAG_INDEX", error);
 		}
+	}
+
+	/** DB에 남은 태그 여러 건을 한 요청(_bulk)으로 다시 쓴다(태그 색인을 새로 만든 뒤 채울 때). 한 건이라도 실패하면 일시 장애다. */
+	public void restore(List<TagStore.Stored> stored) {
+		if (stored.isEmpty()) return;
+		StringBuilder lines = new StringBuilder();
+		for (TagStore.Stored tag : stored) {
+			lines.append(json.writeValueAsString(Map.of("index", Map.of("_id", tagId(tag.document(), tag.runSeq()))))).append('\n');
+			lines.append(json.writeValueAsString(document(tag.document(), tag.thread(), tag.tenant(), tag.runSeq(), tag.tags(), tag.fingerprint())))
+					.append('\n');
+		}
+		try {
+			JsonNode response = json.readTree(client.post().uri("/{alias}/_bulk?refresh=true&require_alias=true", settings.alias())
+					.contentType(MediaType.parseMediaType("application/x-ndjson")).body(utf8(lines.toString())).retrieve().body(String.class));
+			if (response.path("errors").asBoolean(true))
+				throw EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "태그 색인 다시 채우기 일부 실패", null);
+		} catch (HttpClientErrorException.NotFound aliasMissing) {
+			ensured = false;
+			throw EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "태그 인덱스 별칭이 없다 — 다음 시도에서 다시 만든다", aliasMissing);
+		} catch (RuntimeException error) {
+			throw HttpCalls.classify("TAG_INDEX", error);
+		}
+	}
+
+	private static Map<String, Object> document(UUID doc, UUID thread, UUID tenant, int runSeq, TagPrompt.Tags tags, String fingerprint) {
+		Map<String, Object> document = new LinkedHashMap<>();
+		document.put(DOC_ID, doc.toString());
+		document.put(THR_ID, thread.toString());
+		document.put(TNN_ID, tenant.toString());
+		document.put(RUN_SEQ, runSeq);
+		document.put(CATEGORY, tags.category());
+		document.put(KEYWORDS, tags.keywords());
+		document.put(SUMMARY, tags.summary());
+		document.put(CONFIG, fingerprint);
+		return document;
 	}
 
 	/** 한 회차의 태그 문서를 지운다. 멱등이다 — 문서나 인덱스가 없으면 지울 것도 없다. */

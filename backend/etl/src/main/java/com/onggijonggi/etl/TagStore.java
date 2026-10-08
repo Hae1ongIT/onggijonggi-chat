@@ -115,6 +115,25 @@ public class TagStore {
 		return jdbc.update("update thr_doc_tag set next_at = now(), att_cnt = 0, updated_at = now() where err is not null and next_at > now()");
 	}
 
+	/** DB에 있는 태그 한 건(태그 색인을 다시 채울 때 쓴다). */
+	public record Stored(UUID id, UUID document, UUID tenant, UUID thread, int runSeq, TagPrompt.Tags tags, String fingerprint) {
+	}
+
+	/**
+	 * 검색에 쓰일 수 있는 태그(READY 문서의 DONE 회차에 붙은 DONE 태그)를 id 순으로 after 다음부터 최대 limit건. 태그 색인을 새로 만든
+	 * 뒤 DB 기준으로 다시 채울 때 쓴다 — LLM을 다시 부르지 않는다.
+	 */
+	public List<Stored> stored(UUID after, int limit) {
+		return jdbc.query("select t.id, t.doc_id, t.tnn_id, t.thr_id, t.run_seq, t.ctg, t.kyw, t.smm, t.tag_cnf from thr_doc_tag t"
+				+ " join thr_doc d on d.id = t.doc_id and d.status = 'READY'"
+				+ " join thr_doc_run r on r.doc_id = t.doc_id and r.run_seq = t.run_seq and r.status = 'DONE'"
+				+ " where t.status = 'DONE' and t.id > ? order by t.id limit ?",
+				(rs, row) -> new Stored(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getObject(3, UUID.class), rs.getObject(4, UUID.class),
+						rs.getInt(5), new TagPrompt.Tags(rs.getString(6), List.of((String[]) rs.getArray(7).getArray()), rs.getString(8) == null ? "" : rs.getString(8)),
+						rs.getString(9)),
+				after, limit);
+	}
+
 	/** 회차 정리(RunSweeper) 때 그 회차의 태그를 지운다. 멱등이다. */
 	public void delete(UUID document, int runSeq) {
 		jdbc.update("delete from thr_doc_tag where doc_id = ? and run_seq = ?", document, runSeq);

@@ -332,6 +332,14 @@ class IngestionIntegrationTest {
 		await("설정이 바뀐 태그를 다시 뽑음", () -> !"tag-v0:old".equals(jdbc.queryForObject("select tag_cnf from thr_doc_tag where doc_id=?", String.class, doc.id)));
 		assertThat(FAKE.embeddingCalls.get()).as("태그만 다시 뽑고 임베딩은 다시 하지 않는다").isEqualTo(embeddings);
 		assertThat(run(doc, 1)).as("새 회차를 만들지 않는다").containsEntry("status", "DONE");
+
+		// 태그 색인만 사라지면(색인 삭제·스냅샷 복원) 다음 주기에 다시 만들고 DB의 태그로 채운다 — LLM은 다시 부르지 않는다.
+		await("재태깅 반영", () -> "DONE".equals(tagStatus(doc)));
+		int chats = FAKE.chatCalls.get();
+		es().delete().uri("/thr_doc_tag_v1").retrieve().toBodilessEntity();
+		await("태그 색인을 DB 태그로 다시 채움", () -> es().get().uri("/thr_doc_tag/_doc/{id}", doc.id + ":1")
+				.exchange((request, response) -> response.getStatusCode().value()) == 200);
+		assertThat(FAKE.chatCalls.get()).as("다시 태깅하지 않는다").isEqualTo(chats);
 	}
 
 	/** #362: 태깅 서버가 죽어 있어도 문서는 먼저 검색 준비 완료가 되고, 서버가 돌아오면 태그가 붙는다. 문서를 지우면 태그도 지운다. */

@@ -55,6 +55,28 @@ class TagIndexTest {
 		assertThat(document.path("run_seq").asInt()).isEqualTo(2);
 	}
 
+	/** 주기마다 별칭을 확인해 새로 만들었는지 알리고, DB 태그를 한 요청으로 다시 쓴다. 일부라도 실패하면 일시 장애다. */
+	@Test
+	void eachCheckLooksAgainAndStoredTagsAreRestoredInBulk() {
+		es.reply("/_alias/", 200, "{\"thr_doc_tag_v1\":{\"aliases\":{\"thr_doc_tag\":{}}}}");
+		assertThat(index.check()).isFalse();
+		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}");
+		assertThat(index.check()).as("사라져서 새로 만들었다").isTrue();
+
+		var stored = new TagStore.Stored(UUID.randomUUID(), target.document(), target.tenant(), target.thread(), 2,
+				new TagPrompt.Tags("기타", List.of("연차"), "요약"), "tag-v1:x");
+		es.reply("/thr_doc_tag/_bulk", 200, "{\"errors\":false,\"items\":[]}");
+		index.restore(List.of(stored));
+		var bulk = es.requests.get(es.requests.size() - 1);
+		assertThat(bulk.path()).startsWith("/thr_doc_tag/_bulk").contains("require_alias=true");
+		assertThat(bulk.body().split("\n")).hasSize(2);
+		assertThat(bulk.body()).contains("\"_id\":\"" + target.document() + ":2\"").contains("\"kyw\":[\"연차\"]");
+
+		es.reply("/thr_doc_tag/_bulk", 200, "{\"errors\":true,\"items\":[]}");
+		assertThatThrownBy(() -> index.restore(List.of(stored)))
+				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+	}
+
 	@Test
 	void aVanishedAliasIsTransientAndDeletionIsIdempotent() {
 		es.reply("/_alias/", 200, "{\"thr_doc_tag_v1\":{\"aliases\":{\"thr_doc_tag\":{}}}}").reply("/thr_doc_tag/_doc/", 404, "{}");
