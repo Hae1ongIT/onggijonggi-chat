@@ -117,25 +117,35 @@ class ChunkSearcherTest {
 		assertThat(fused).extracting(ChunkSearcher.Hit::document).containsExactly("a", "b", "c");
 	}
 
-	/** a는 벡터 결과의 조각을 대표로 재사용하고, b는 문서 안 kNN 1건을, c는 최소 유사도 미달(빈 결과)이라 뺀다. */
+	/** a는 벡터 결과의 조각을 대표로 재사용하고, b는 문서 안 kNN 1건을, c는 최소 유사도 미달(빈 결과)이라 뺀다. b·c의 검색은 한 요청으로 묶는다. */
 	@Test
 	void representativesReuseVectorHitsThenSearchInsideTheDocumentAndDropWeakOnes() throws Exception {
 		UUID a = UUID.randomUUID(), b = UUID.randomUUID(), c = UUID.randomUUID();
 		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"%s:1:%d\",\"doc_id\":\"%s\",\"run_seq\":1,\"seq\":%d,\"loc\":\"para=1\",\"content\":\"본문\"}}";
 		Function<String, StubHttpServer.Reply> chunks = body -> {
 			if (body.contains("\"match\"")) return hits();
-			if (body.contains("\"k\":1,")) return body.contains(b.toString()) ? hits(String.format(chunk, b, 7, b, 7)) : hits();
 			return hits(String.format(chunk, a, 2, a, 2));
 		};
+		// 묶음 검색: 머리줄·본문 줄이 번갈아 온다. 본문마다 b면 조각 1건, 아니면 빈 결과(최소 유사도 미달)를 같은 순서로 돌려준다.
+		Function<String, StubHttpServer.Reply> lookups = ndjson -> {
+			List<String> responses = new java.util.ArrayList<>();
+			String[] lines = ndjson.split("\n");
+			for (int i = 1; i < lines.length; i += 2)
+				responses.add(lines[i].contains(b.toString()) ? hits(String.format(chunk, b, 7, b, 7)).body() : hits().body());
+			return new StubHttpServer.Reply(200, "{\"responses\":[" + String.join(",", responses) + "]}");
+		};
 		String tags = "{\"_source\":{\"doc_id\":\"%s\",\"run_seq\":1}}";
-		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", chunks)
+		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", chunks).reply("/_msearch", lookups)
 				.reply("/thr_doc_tag/_search", 200, "{\"hits\":{\"hits\":[" + String.format(tags, c) + "," + String.format(tags, b) + ","
 						+ String.format(tags, a) + "]}}")) {
 			var result = tagged(es, true).search(scope(a, b, c), "연차", new float[] {1, 0, 0});
 
 			assertThat(result).extracting(ChunkSearcher.Hit::chunkId).containsExactly(a + ":1:2", b + ":1:7");
-			assertThat(es.requests).filteredOn(request -> request.body().contains("\"k\":1,")).as("a는 벡터 결과를 재사용한다").hasSize(2)
-					.allSatisfy(request -> assertThat(request.body()).contains("\"similarity\":0.35").doesNotContain(a.toString()));
+			assertThat(es.requests).filteredOn(request -> request.path().startsWith("/_msearch")).singleElement().satisfies(request -> {
+				assertThat(request.body().split("\n")).as("b·c 두 검색(머리줄·본문)").hasSize(4);
+				assertThat(request.body()).contains("\"index\":\"thr_doc_chunk\"").contains("\"similarity\":0.35").contains("\"k\":1,")
+						.as("a는 벡터 결과를 재사용한다").doesNotContain(a.toString());
+			});
 			assertThat(es.requests).filteredOn(request -> request.path().startsWith("/thr_doc_tag")).singleElement()
 					.satisfies(request -> assertThat(request.body()).contains("kyw^2").contains("\"minimum_should_match\":\"40%\""));
 		}
@@ -169,5 +179,18 @@ class ChunkSearcherTest {
 		return new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)), null, null,
 				new RagProperties.Search(5, 2, 20, 100, 0.5, "75%", 60, 2, 10), true),
 				new RagTagProperties(enabled, "thr_doc_tag", "40%", 10, 0.35), WebClient.builder(), JsonMapper.builder().build());
+	}
+
+	@Test
+	void aFailedLookupInTheBatchSkipsOnlyTheTagChannel() throws Exception {
+		UUID a = UUID.randomUUID(), b = UUID.randomUUID();
+		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
+		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
+				.reply("/thr_doc_tag/_search", 200, "{\"hits\":{\"hits\":[{\"_source\":{\"doc_id\":\"" + b + "\",\"run_seq\":1}}]}}")
+				.reply("/_msearch", 200, "{\"responses\":[{\"error\":{\"type\":\"search_phase_execution_exception\"},\"status\":500}]}")) {
+			var result = tagged(es, true).search(scope(a, b), "연차", new float[] {1, 0, 0});
+
+			assertThat(result).extracting(ChunkSearcher.Hit::chunkId).containsExactly("c");
+		}
 	}
 }

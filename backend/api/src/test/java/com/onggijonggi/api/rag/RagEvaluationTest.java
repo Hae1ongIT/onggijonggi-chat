@@ -36,7 +36,7 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Class Name : RagEvaluationTest.java
  * Description : 방 문서 검색 평가 세트(#344). 가상 회사 규정 문서 5개(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
- *               nori Elasticsearch에 색인하고, 질문 44개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택·주제)를
+ *               nori Elasticsearch에 색인하고, 질문 54개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택·주제)를
  *               검색 기준 조합마다 돌려 적중률·무관 질문 오채택률·다시 쓰기 효과·지연을 표로 낸다(build/rag-eval/report.md).
  *               대화 모델이 있으면 ETL과 같은 태깅 규칙(공용 TagPrompt)으로 문서를 태깅해 태그 색인을 만들고, 태그 채널(#362) 끔/켬과
  *               그 기준값을 비교한다. 주제(tag) 질문은 기대 문서가 상위에 오면 적중이다.
@@ -64,8 +64,8 @@ class RagEvaluationTest {
 	private static final String TAG_INDEX = "thr_doc_tag_v1";
 	/** ETL 기본 태깅 설정(TaggingProperties)과 같게 둔다. */
 	private static final TagPrompt.Settings TAGGING = new TagPrompt.Settings(TagPrompt.DEFAULT_CATEGORIES, 10, 200);
-	private static final List<String> TAG_MINIMUMS = List.of("30%", "40%", "60%");
-	private static final List<Double> TAG_CHUNK_MINIMUMS = List.of(0.3, 0.35, 0.4, 0.45);
+	private static final List<String> TAG_MINIMUMS = List.of("30%", "40%", "60%", "2<60%", "3<75%");
+	private static final List<Double> TAG_CHUNK_MINIMUMS = List.of(0.35, 0.4, 0.45);
 
 	private final ObjectMapper json = JsonMapper.builder().build();
 

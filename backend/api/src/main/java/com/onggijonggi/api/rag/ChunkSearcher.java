@@ -74,7 +74,8 @@ public class ChunkSearcher {
 
 	/**
 	 * 태그 채널: 태그 색인을 같은 범위로 찾아 관련 문서 순위를 내고, 문서마다 대표 조각을 세운다. 대표는 벡터 채널에 그 문서 조각이 있으면
-	 * 그중 1위, 없으면 그 문서(현재 회차)로 좁힌 벡터 검색 1건이다. 대표가 최소 유사도에 못 미치면 그 문서는 뺀다. 실패하면 빈 채널이다.
+	 * 그중 1위, 없으면 그 문서(현재 회차)로 좁힌 벡터 검색 1건이다 — 이런 문서들의 검색은 한 요청(_msearch)으로 묶는다(문서마다 차례로
+	 * 보내면 후보 수만큼 왕복이 늘어 검색이 느려진다). 대표가 최소 유사도에 못 미치면 그 문서는 뺀다. 실패하면 빈 채널이다.
 	 */
 	private List<Hit> tagged(ThreadDocumentScope scope, List<Object> filter, String query, float[] vector, List<Hit> semantic) {
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -83,25 +84,34 @@ public class ChunkSearcher {
 		body.put("query", Map.of("bool", Map.of("must", List.of(Map.of("multi_match", Map.of("query", query,
 				"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", tags.minimumShouldMatch()))),
 				"filter", filter)));
-		List<Hit> representatives = new ArrayList<>();
 		try {
+			// 태그 순위대로 대표를 세운다. 벡터 채널에 없는 문서는 자리만 잡아 두고 한 번에 찾는다.
+			List<Hit> ranked = new ArrayList<>();
+			List<Map<String, Object>> lookups = new ArrayList<>();
+			List<Integer> slots = new ArrayList<>();
 			for (JsonNode tag : call(tags.alias(), body)) {
 				String document = tag.path("_source").path(TagIndexContract.DOC_ID).asString("");
 				int runSeq = tag.path("_source").path(TagIndexContract.RUN_SEQ).asInt();
-				Hit representative = semantic.stream().filter(hit -> hit.document().equals(document) && hit.runSeq() == runSeq).findFirst()
-						.orElseGet(() -> bestChunk(scope, document, runSeq, vector));
-				if (representative != null) representatives.add(representative);
+				Hit reused = semantic.stream().filter(hit -> hit.document().equals(document) && hit.runSeq() == runSeq).findFirst().orElse(null);
+				if (reused == null) {
+					slots.add(ranked.size());
+					lookups.add(bestChunk(scope, document, runSeq, vector));
+				}
+				ranked.add(reused);
 			}
+			List<List<JsonNode>> found = multiCall(settings.alias(), lookups);
+			for (int i = 0; i < slots.size(); i++)
+				for (JsonNode hit : found.get(i)) ranked.set(slots.get(i), hit(hit, cosine(hit), null));
+			return ranked.stream().filter(java.util.Objects::nonNull).toList();
 		} catch (RuntimeException error) {
 			// 태그가 아직 없거나(태깅 꺼짐·첫 배포 직후) 태그 색인이 잠시 안 될 때. 본문 검색은 그대로 돌려준다.
 			log.warn("태그 채널을 건너뛴다 — 본문 키워드·벡터 결과만 쓴다: {}", error.getMessage());
 			return List.of();
 		}
-		return representatives;
 	}
 
-	/** 한 문서(현재 회차) 안에서 질문과 의미가 가장 가까운 조각. 최소 유사도에 못 미치면 null. */
-	private Hit bestChunk(ThreadDocumentScope scope, String document, int runSeq, float[] vector) {
+	/** 한 문서(현재 회차) 안에서 질문과 의미가 가장 가까운 조각 1건을 찾는 검색. 최소 유사도에 못 미치면 결과가 없다. */
+	private Map<String, Object> bestChunk(ThreadDocumentScope scope, String document, int runSeq, float[] vector) {
 		Map<String, Object> knn = new LinkedHashMap<>();
 		knn.put("field", EMB);
 		knn.put("query_vector", vector);
@@ -115,8 +125,7 @@ public class ChunkSearcher {
 		body.put("size", 1);
 		body.put("_source", SOURCE);
 		body.put("knn", knn);
-		for (JsonNode hit : call(settings.alias(), body)) return hit(hit, cosine(hit), null);
-		return null;
+		return body;
 	}
 
 	/** 고객사·방·(문서, 현재 회차) 쌍. 회차까지 거는 이유는 재처리 직후 이전 회차 청크가 정리 전까지 남아 있기 때문이다. */
@@ -201,29 +210,55 @@ public class ChunkSearcher {
 		return call(settings.alias(), body);
 	}
 
+	/** 여러 검색을 한 요청(_msearch)으로 보낸다. 검색마다 결과 목록을 같은 순서로 돌려준다. 하나라도 실패하면 장애다. */
+	private List<List<JsonNode>> multiCall(String alias, List<Map<String, Object>> bodies) {
+		if (bodies.isEmpty()) return List.of();
+		StringBuilder lines = new StringBuilder();
+		for (Map<String, Object> body : bodies)
+			lines.append(json.writeValueAsString(Map.of("index", alias))).append('\n').append(json.writeValueAsString(body)).append('\n');
+		JsonNode responses = parse(post("/_msearch", MediaType.parseMediaType("application/x-ndjson"), lines.toString())).path("responses");
+		if (!responses.isArray() || responses.size() != bodies.size())
+			throw new RagUnavailableException("Elasticsearch 묶음 검색 응답의 결과 수가 요청과 다르다");
+		List<List<JsonNode>> results = new ArrayList<>();
+		for (JsonNode response : responses) {
+			if (response.has("error")) throw new RagUnavailableException("Elasticsearch 묶음 검색 일부 실패: " + response.path("status").asInt());
+			List<JsonNode> hits = new ArrayList<>();
+			hits(response).forEach(hits::add);
+			results.add(hits);
+		}
+		return results;
+	}
+
 	private Iterable<JsonNode> call(String alias, Map<String, Object> body) {
-		String response;
+		return hits(parse(post("/" + alias + "/_search", MediaType.APPLICATION_JSON, body)));
+	}
+
+	private String post(String path, MediaType type, Object body) {
 		try {
-			response = client.post().uri("/{alias}/_search", alias).contentType(MediaType.APPLICATION_JSON)
-					.bodyValue(body).retrieve().bodyToMono(String.class).block(settings.timeout());
+			return client.post().uri(path).contentType(type).bodyValue(body).retrieve().bodyToMono(String.class).block(settings.timeout());
 		} catch (RuntimeException error) {
 			// 별칭이 없는 404도 장애다 — 검색 대상 문서가 있는데 색인이 없다(인덱스 삭제·ES 볼륨 초기화). 다만 ETL이 빈 인덱스를 다시
 			// 만든 뒤에는 404가 아니라 결과 0건(NO_MATCH)이 된다 — READY 문서의 청크 유실은 감지하지 못한다(INSTALL「방 문서 검색 준비 켜기」에 대처를 적었다).
 			throw new RagUnavailableException("Elasticsearch 검색 실패: " + error.getClass().getSimpleName(), error);
 		}
+	}
+
+	private JsonNode parse(String response) {
 		try {
-			JsonNode tree = json.readTree(response == null ? "" : response);
-			if (tree.path("timed_out").asBoolean(false) || tree.path("_shards").path("failed").asInt(0) > 0)
-				throw new RagUnavailableException("Elasticsearch 검색이 일부 샤드에서 끝나지 않았다");
-			// 결과 목록이 없는 응답(빈 본문, 프록시 오류 페이지를 JSON으로 감싼 것 등)을 "결과 0건"으로 읽으면 장애가 근거 없음으로 숨는다.
-			JsonNode hits = tree.path("hits").path("hits");
-			if (!hits.isArray()) throw new RagUnavailableException("Elasticsearch 응답에 검색 결과 목록이 없다");
-			return hits;
-		} catch (RagUnavailableException error) {
-			throw error;
+			return json.readTree(response == null ? "" : response);
 		} catch (RuntimeException unreadable) {
 			throw new RagUnavailableException("Elasticsearch 응답을 해석할 수 없다", unreadable);
 		}
+	}
+
+	/** 검색 응답 하나의 결과 목록. 끝나지 않은 검색이나 결과 목록이 없는 응답은 장애다. */
+	private static JsonNode hits(JsonNode tree) {
+		if (tree.path("timed_out").asBoolean(false) || tree.path("_shards").path("failed").asInt(0) > 0)
+			throw new RagUnavailableException("Elasticsearch 검색이 일부 샤드에서 끝나지 않았다");
+		// 결과 목록이 없는 응답(빈 본문, 프록시 오류 페이지를 JSON으로 감싼 것 등)을 "결과 0건"으로 읽으면 장애가 근거 없음으로 숨는다.
+		JsonNode hits = tree.path("hits").path("hits");
+		if (!hits.isArray()) throw new RagUnavailableException("Elasticsearch 응답에 검색 결과 목록이 없다");
+		return hits;
 	}
 
 	private static Hit hit(JsonNode hit, Double vectorScore, Double keywordScore) {

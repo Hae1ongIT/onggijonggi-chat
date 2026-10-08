@@ -57,5 +57,13 @@
   {"id": "tag-4", "type": "tag", "question": "외근 경비 처리 방법", "document": "travel.md"},
   {"id": "tag-5", "type": "tag", "question": "원격 근무 제도 개요", "document": "remote-work.md"},
   {"id": "tag-6", "type": "tag", "question": "직원 복리후생 중 휴무 관련 내용", "document": "leave.md"},
-  {"id": "tag-7", "type": "tag", "question": "업무용 기기 지급 기준", "document": "equipment.md"}
+  {"id": "tag-7", "type": "tag", "question": "업무용 기기 지급 기준", "document": "equipment.md"},
+  {"id": "tag-8", "type": "tag", "question": "올해 남은 연차 휴가를 쓰려면 어떤 절차로 신청하는지 알려주실 수 있나요", "document": "leave.md"},
+  {"id": "tag-9", "type": "tag", "question": "회사에서 받은 노트북이랑 모니터는 평소에 어떻게 관리해야 하는 건지 궁금해요", "document": "equipment.md"},
+  {"id": "tag-10", "type": "tag", "question": "출장 다녀와서 쓴 비용은 언제까지 어떻게 처리해야 되는 거야", "document": "travel.md"},
+
+  {"id": "unrelated-7", "type": "unrelated", "question": "사내 식당 메뉴"},
+  {"id": "unrelated-8", "type": "unrelated", "question": "회의실 예약 방법"},
+  {"id": "unrelated-9", "type": "unrelated", "question": "회사 주차 등록"},
+  {"id": "unrelated-10", "type": "unrelated", "question": "사내 동호회 가입"}
 ]
