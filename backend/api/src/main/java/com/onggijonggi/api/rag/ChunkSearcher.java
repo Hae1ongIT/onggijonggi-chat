@@ -11,7 +11,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,7 +42,7 @@ public class ChunkSearcher {
 
 	private static final Logger log = LoggerFactory.getLogger(ChunkSearcher.class);
 	/** 태그 채널이 실패하면 이만큼 건너뛴다 — 태그 색인이 없을 때(태깅 꺼짐) 검색마다 실패 요청·경고가 쌓이지 않게. */
-	private static final long TAG_SKIP_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(1);
+	private static final long TAG_SKIP_NANOS = TimeUnit.MINUTES.toNanos(1);
 
 	/** ES 응답 버퍼. 후보 수 × 청크 최대 길이(약 1300자, UTF-8 약 4KB)에 넉넉한 여유를 둔다. */
 	private static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -52,6 +55,8 @@ public class ChunkSearcher {
 	private final ObjectMapper json;
 	/** 태그 채널을 다시 시도할 시각(System.nanoTime). 그 전에는 태그 채널 없이 검색한다. */
 	private volatile long tagRetryAt = System.nanoTime();
+	/** 단조 시계(나노초). 테스트가 건너뜀 만료를 확인하려고 바꾼다. */
+	LongSupplier clock = System::nanoTime;
 
 	/** 태그 채널 없이 검색한다(테스트·평가용). */
 	public ChunkSearcher(RagProperties properties, WebClient.Builder builder, ObjectMapper json) {
@@ -73,7 +78,7 @@ public class ChunkSearcher {
 		List<Object> filter = filter(scope);
 		List<Hit> keyword = keyword(filter, query);
 		List<Hit> semantic = vector(filter, vector);
-		if (!tags.enabled() || System.nanoTime() - tagRetryAt < 0) return fuse(keyword, semantic);
+		if (!tags.enabled() || clock.getAsLong() - tagRetryAt < 0) return fuse(keyword, semantic);
 		return fuse(List.of(semantic, keyword, tagged(scope, filter, query, vector, semantic)));
 	}
 
@@ -86,9 +91,7 @@ public class ChunkSearcher {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("size", tags.candidates());
 		body.put("_source", List.of(TagIndexContract.DOC_ID, TagIndexContract.RUN_SEQ));
-		body.put("query", Map.of("bool", Map.of("must", List.of(Map.of("multi_match", Map.of("query", query,
-				"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", tags.minimumShouldMatch()))),
-				"filter", filter)));
+		body.put("query", tagQuery(query, tags.minimumShouldMatch(), filter));
 		try {
 			// 태그 순위대로 대표를 세운다. 벡터 채널에 없는 문서는 자리만 잡아 두고 한 번에 찾는다.
 			List<Hit> ranked = new ArrayList<>();
@@ -107,14 +110,21 @@ public class ChunkSearcher {
 			List<List<JsonNode>> found = multiCall(settings.alias(), lookups);
 			for (int i = 0; i < slots.size(); i++)
 				for (JsonNode hit : found.get(i)) ranked.set(slots.get(i), hit(hit, cosine(hit), null));
-			return ranked.stream().filter(java.util.Objects::nonNull).toList();
+			return ranked.stream().filter(Objects::nonNull).toList();
 		} catch (RuntimeException error) {
 			// 태그가 아직 없거나(태깅 꺼짐·첫 배포 직후) 태그 색인이 잠시 안 될 때. 본문 검색은 그대로 돌려준다.
 			// 1분 동안 태그 채널을 쉰다. 경고도 그때 한 번만 남긴다.
-			tagRetryAt = System.nanoTime() + TAG_SKIP_NANOS;
+			tagRetryAt = clock.getAsLong() + TAG_SKIP_NANOS;
 			log.warn("태그 채널을 1분간 건너뛴다 — 본문 키워드·벡터 결과만 쓴다: {}", error.getMessage());
 			return List.of();
 		}
+	}
+
+	/** 태그 색인 질의: 키워드(가중 2)·요약에 질문 낱말이 기준만큼 맞는 문서, 범위는 조각 검색과 같다(평가 세트도 이 질의를 쓴다). */
+	static Map<String, Object> tagQuery(String query, String minimumShouldMatch, List<Object> filter) {
+		return Map.of("bool", Map.of("must", List.of(Map.of("multi_match", Map.of("query", query,
+				"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", minimumShouldMatch))),
+				"filter", filter));
 	}
 
 	/** 한 문서(현재 회차) 안에서 질문과 의미가 가장 가까운 조각 1건을 찾는 검색. 최소 유사도에 못 미치면 결과가 없다. */

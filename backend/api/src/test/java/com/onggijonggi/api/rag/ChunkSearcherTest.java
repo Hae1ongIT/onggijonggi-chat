@@ -7,8 +7,10 @@ import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
 import java.time.Duration;
 import java.util.List;
-import java.util.function.Function;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -147,12 +149,14 @@ class ChunkSearcherTest {
 						.as("a는 벡터 결과를 재사용한다").doesNotContain(a.toString());
 			});
 			assertThat(es.requests).filteredOn(request -> request.path().startsWith("/thr_doc_tag")).singleElement()
-					.satisfies(request -> assertThat(request.body()).contains("kyw^2").contains("\"minimum_should_match\":\"40%\""));
+					.satisfies(request -> assertThat(request.body()).contains("kyw^2").contains("\"minimum_should_match\":\"40%\"")
+							// 조각 검색과 같은 범위(고객사·방·(문서, 회차)) 안의 태그만 찾는다.
+							.contains("\"tnn_id\"").contains("\"thr_id\"").contains("\"doc_id\":\"" + a + "\"").contains("\"run_seq\":1"));
 		}
 	}
 
-	@Test
 	/** 태그 채널이 실패하면(색인 없음) 두 채널로 계속하고, 1분 동안은 태그 채널을 다시 부르지 않는다. 꺼져 있으면 아예 부르지 않는다. */
+	@Test
 	void aTagChannelOutageKeepsTheOtherChannelsAndADisabledChannelSendsNothing() throws Exception {
 		UUID a = UUID.randomUUID();
 		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
@@ -160,11 +164,18 @@ class ChunkSearcherTest {
 			try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
 					.reply("/thr_doc_tag/_search", 404, "{\"error\":{\"type\":\"index_not_found_exception\"}}")) {
 				var searcher = tagged(es, enabled);
+				AtomicLong now = new AtomicLong(System.nanoTime());
+				searcher.clock = now::get;
 				for (int i = 0; i < 2; i++)
 					assertThat(searcher.search(scope(a), "연차", new float[] {1, 0, 0})).as("enabled=" + enabled).singleElement()
 							.satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
 				assertThat(es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count()).as("enabled=" + enabled)
 						.isEqualTo(enabled ? 1 : 0);
+				// 1분이 지나면 다시 시도한다(색인이 생겼을 수 있다).
+				now.addAndGet(TimeUnit.SECONDS.toNanos(61));
+				searcher.search(scope(a), "연차", new float[] {1, 0, 0});
+				assertThat(es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count()).as("1분 뒤 enabled=" + enabled)
+						.isEqualTo(enabled ? 2 : 0);
 			}
 		}
 	}
@@ -184,16 +195,19 @@ class ChunkSearcherTest {
 				new RagTagProperties(enabled, "thr_doc_tag", "40%", 10, 0.35), WebClient.builder(), JsonMapper.builder().build());
 	}
 
+	/** 묶음 검색이 모두 실패하면 태그 채널 전체를 장애로 보고 두 채널 결과만 돌려준 뒤, 1분 동안 태그 채널을 쉰다. */
 	@Test
-	void aFailedLookupInTheBatchSkipsOnlyTheTagChannel() throws Exception {
+	void aWhollyFailedBatchSkipsTheTagChannel() throws Exception {
 		UUID a = UUID.randomUUID(), b = UUID.randomUUID();
 		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
 		try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
 				.reply("/thr_doc_tag/_search", 200, "{\"hits\":{\"hits\":[{\"_source\":{\"doc_id\":\"" + b + "\",\"run_seq\":1}}]}}")
 				.reply("/_msearch", 200, "{\"responses\":[{\"error\":{\"type\":\"search_phase_execution_exception\"},\"status\":500}]}")) {
-			var result = tagged(es, true).search(scope(a, b), "연차", new float[] {1, 0, 0});
+			var searcher = tagged(es, true);
 
-			assertThat(result).extracting(ChunkSearcher.Hit::chunkId).containsExactly("c");
+			assertThat(searcher.search(scope(a, b), "연차", new float[] {1, 0, 0})).extracting(ChunkSearcher.Hit::chunkId).containsExactly("c");
+			searcher.search(scope(a, b), "연차", new float[] {1, 0, 0});
+			assertThat(es.requests).filteredOn(request -> request.path().startsWith("/thr_doc_tag")).hasSize(1);
 		}
 	}
 

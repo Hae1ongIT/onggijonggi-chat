@@ -76,6 +76,8 @@ class ThreadDocumentSearchIntegrationTest {
 	private static final String TAG_INDEX = "thr_doc_tag_v1";
 	/** 이 낱말이 든 질문은 "이월" 축과 코사인 0.45인 벡터다 — 벡터 채널 기준(0.5)엔 못 미치고 태그 대표 조각 기준(0.4)은 넘는다. */
 	private static final String NEAR = "휴가";
+	/** 이 낱말까지 든 질문은 "이월" 축과 코사인 0.3이다 — 태그는 맞아도 대표 조각 기준(0.4)에 못 미친다. */
+	private static final String FAR = "문의";
 
 	@Container static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
 			.withDatabaseName("thread_search").withUsername("test").withPassword("test");
@@ -255,7 +257,11 @@ class ThreadDocumentSearchIntegrationTest {
 		assertThat(search(question).reason()).as("본문 키워드·벡터만으로는 못 찾는다").isEqualTo(SearchResult.Reason.NO_MATCH);
 
 		tag(doc, room, tenant, 1, List.of("휴가", "연차 이월"), "남은 휴가를 다음 해로 넘기는 규정이다.");
-		tag(UUID.randomUUID(), otherRoom, tenant, 1, List.of("휴가"), "다른 방 문서의 휴가 규정이다.");
+		// 다른 방 문서에도 같은 태그와 질문에 가까운 조각이 있다 — 범위 필터가 빠지면 이 문서가 근거로 섞인다.
+		UUID elsewhere = readyDocument(otherRoom, true, 1);
+		index(elsewhere, otherRoom, tenant, 1, 1, "다른 방의 연차 이월 규정.", 0);
+		refresh();
+		tag(elsewhere, otherRoom, tenant, 1, List.of("휴가", "연차 이월"), "남은 휴가를 다음 해로 넘기는 규정이다.");
 		SearchResult result = search(question);
 
 		assertThat(result.status()).isEqualTo(SearchResult.Status.FOUND);
@@ -265,6 +271,9 @@ class ThreadDocumentSearchIntegrationTest {
 			assertThat(chunk.vectorScore()).isBetween(0.44, 0.46);
 			assertThat(chunk.keywordScore()).isNull();
 		});
+
+		// 태그는 맞지만 문서 안 어느 조각도 질문과 대표 조각 기준(코사인 0.4)만큼 가깝지 않으면 근거로 넣지 않는다.
+		assertThat(search("남은 휴가 넘기기 " + FAR).reason()).isEqualTo(SearchResult.Reason.NO_MATCH);
 	}
 
 	private SearchResult search(String question) {
@@ -358,9 +367,10 @@ class ThreadDocumentSearchIntegrationTest {
 	private String embedding(String body) {
 		String text = json.readTree(body).path("input").get(0).asString("");
 		if (text.contains(NEAR)) {
+			float cosine = text.contains(FAR) ? 0.3f : 0.45f;
 			List<Float> near = unit(2);
-			near.set(0, 0.45f);
-			near.set(2, (float) Math.sqrt(1 - 0.45 * 0.45));
+			near.set(0, cosine);
+			near.set(2, (float) Math.sqrt(1 - cosine * cosine));
 			return json.writeValueAsString(Map.of("model", "bge-m3", "data", List.of(Map.of("index", 0, "embedding", near))));
 		}
 		int axis = AXES.entrySet().stream().filter(entry -> text.contains(entry.getKey())).map(Map.Entry::getValue)

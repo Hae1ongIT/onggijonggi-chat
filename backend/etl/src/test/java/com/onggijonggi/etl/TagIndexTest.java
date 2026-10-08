@@ -61,6 +61,10 @@ class TagIndexTest {
 
 		assertThatThrownBy(() -> index.write(target, TagPrompt.Tags.unclassified(), "c"))
 				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
+		// 다음 쓰기는 별칭을 다시 확인하고, 없으면 인덱스를 다시 만든다(ES 초기화 뒤 ETL을 재기동하지 않아도 복구된다).
+		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}").reply("/thr_doc_tag/_doc/", 201, "{}");
+		index.write(target, TagPrompt.Tags.unclassified(), "c");
+		assertThat(es.requests).anySatisfy(request -> assertThat(request.method() + " " + request.path()).isEqualTo("PUT /thr_doc_tag_v1"));
 		index.delete(target.document(), 2);
 		assertThat(es.requests).anySatisfy(request -> assertThat(request.method()).isEqualTo("DELETE"));
 	}

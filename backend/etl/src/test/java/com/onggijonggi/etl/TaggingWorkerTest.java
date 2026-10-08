@@ -11,6 +11,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.onggijonggi.common.document.TagPrompt;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -29,7 +30,8 @@ class TaggingWorkerTest {
 	private final Tagger tagger = mock(Tagger.class);
 	private final IngestionWorkers workers = mock(IngestionWorkers.class);
 	private final TaggingProperties settings = TaggingClientTest.properties("http://unused");
-	private final TaggingWorker worker = new TaggingWorker(store, tagger, mock(TagIndex.class), mock(ChunkIndex.class), workers, settings);
+	private final TagIndex index = mock(TagIndex.class);
+	private final TaggingWorker worker = new TaggingWorker(store, tagger, index, mock(ChunkIndex.class), workers, settings);
 	private final List<TagStore.Target> targets = List.of(target(), target(), target());
 
 	@AfterEach
@@ -80,6 +82,33 @@ class TaggingWorkerTest {
 		assertThat(worker.tag(targets.get(0), "fp")).isFalse();
 
 		verify(store, never()).saveFailed(any(), anyString(), anyString(), any(Duration.class), any(Duration.class));
+	}
+
+	@Test
+	void aTaggedRunIsIndexedThenSavedAndARunRemovedMeanwhileIsWithdrawnFromTheIndex() {
+		TagPrompt.Tags tags = new TagPrompt.Tags("기타", List.of("연차"), "요약");
+		when(tagger.tag(any(RunStore.Job.class))).thenReturn(tags);
+		when(store.saveDone(targets.get(0), tags, "fp")).thenReturn(true);
+		when(store.saveDone(targets.get(1), tags, "fp")).thenReturn(false);
+		worker.start();
+
+		assertThat(worker.tag(targets.get(0), "fp")).isTrue();
+		assertThat(worker.tag(targets.get(1), "fp")).as("정리된 회차도 실패는 아니다").isTrue();
+
+		var order = org.mockito.Mockito.inOrder(index, store);
+		order.verify(index).write(targets.get(0), tags, "fp");
+		order.verify(store).saveDone(targets.get(0), tags, "fp");
+		verify(index, never()).delete(targets.get(0).document(), 1);
+		verify(index).delete(targets.get(1).document(), 1);
+	}
+
+	@Test
+	void anUnexpectedErrorIsATransientFailure() {
+		when(tagger.tag(any(RunStore.Job.class))).thenThrow(new IllegalStateException("결함"));
+		worker.start();
+
+		assertThat(worker.tag(targets.get(0), "fp")).isFalse();
+		verify(store).saveFailed(eq(targets.get(0)), eq("UNEXPECTED"), eq("fp"), eq(settings.retryFirstDelay()), eq(settings.retryDelay()));
 	}
 
 	/** 로그에는 실패의 HTTP 상태만 남긴다 — 연결 오류 메시지에는 태깅 서버 주소가 들어 있다. */

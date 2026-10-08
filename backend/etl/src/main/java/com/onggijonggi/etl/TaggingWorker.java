@@ -70,7 +70,11 @@ public class TaggingWorker implements SmartLifecycle {
 		while (running.get()) {
 			int done = 0;
 			try {
-				if (!released) released = releaseFailures();
+				// 기동 뒤 한 번. DB가 아직 안 되면 다음 바퀴에 다시 한다.
+				if (!released) {
+					releaseFailures();
+					released = true;
+				}
 				// 문서 처리가 꺼져 있거나 조각 인덱스 준비·이전이 끝나지 않았으면 기다린다 — 태그만 앞서 쌓이지 않게.
 				waitingReason = !workers.isRunning() ? "문서 처리가 꺼져 있다(임베딩 설정 등)"
 						: !chunks.prepared() ? "검색 인덱스 준비 전이다" : chunks.migrating() ? "검색 인덱스를 옮기는 중이다" : null;
@@ -85,11 +89,10 @@ public class TaggingWorker implements SmartLifecycle {
 		}
 	}
 
-	/** 기동 뒤 한 번, 지난 실패를 바로 다시 시도하게 푼다(설정·주소를 고쳐 재기동한 경우). 끝냈으면 true. */
-	boolean releaseFailures() {
+	/** 기동 뒤 한 번, 지난 실패를 바로 다시 시도하게 푼다(설정·주소를 고쳐 재기동한 경우). */
+	void releaseFailures() {
 		int released = store.releaseFailures();
 		if (released > 0) log.info("지난 태깅 실패 {}건을 바로 다시 시도한다(기동 — 태깅 설정·서버 주소가 바뀌었을 수 있다)", released);
-		return true;
 	}
 
 	/** 대상 한 묶음을 태깅한다. 처리한 수를 돌려준다. */

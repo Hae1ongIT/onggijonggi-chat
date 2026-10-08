@@ -222,10 +222,8 @@ class RagEvaluationTest {
 			ThreadDocumentScope scope) {
 		int matched = 0, unrelated = 0;
 		for (Question question : questions) {
-			Map<String, Object> body = Map.of("size", 0, "track_total_hits", true, "query", Map.of("bool", Map.of(
-					"must", List.of(Map.of("multi_match", Map.of("query", queries.get(question.id()).query(),
-							"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", tagMinimum))),
-					"filter", ChunkSearcher.filter(scope))));
+			Map<String, Object> body = Map.of("size", 0, "track_total_hits", true, "query",
+					ChunkSearcher.tagQuery(queries.get(question.id()).query(), tagMinimum, ChunkSearcher.filter(scope)));
 			String response = es.post().uri("/" + TagIndexContract.ALIAS + "/_search").contentType(MediaType.APPLICATION_JSON)
 					.body(json.writeValueAsString(body).getBytes(StandardCharsets.UTF_8)).retrieve().body(String.class);
 			if (json.readTree(response).path("hits").path("total").path("value").asLong() > 0) {
