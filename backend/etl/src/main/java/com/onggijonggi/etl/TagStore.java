@@ -39,20 +39,25 @@ public class TagStore {
 	}
 
 	/**
-	 * 태깅할 회차를 최대 limit개. 태그 없음 → 설정이 바뀐 태그 → 실패 재시도 순이다. 실패한 회차는 next_at을 기다리되, 설정이 바뀌었으면
-	 * 기다리지 않는다(영구 실패의 긴 간격이 설정 변경 뒤 재태깅을 막지 않게).
+	 * 태깅할 회차를 최대 limit개. 대상은 READY 문서의 현재 회차(가장 큰 DONE 회차) 가운데
+	 *   1. 태그 행이 없다,
+	 *   2. 다시 할 때가 됐다(next_at 지남) — 실패했거나(FAILED) 태그의 설정 지문이 지금과 다르다,
+	 *   3. 실패했고 설정 지문이 지금과 다르다 — 설정을 바꿨으면 실패 간격(영구 실패 7일)을 기다리지 않는다.
+	 * 태그가 있던 회차의 재태깅이 실패하면 행은 DONE(이전 태그)으로 남고 next_at만 미뤄진다(saveFailed) — 그래서 2에 걸린다.
+	 * 순서는 태그 없음 → 이전 태그가 있는 재태깅 → 실패 재시도다.
 	 */
 	public List<Target> targets(String fingerprint, int limit) {
 		return jdbc.query("select d.id, d.tnn_id, d.thr_id, c.run_seq, d.file_name, d.src_key, d.src_att_id"
 				+ " from thr_doc d join thr_doc_run c on c.doc_id = d.id and c.status = 'DONE'"
 				+ " and c.run_seq = (select max(m.run_seq) from thr_doc_run m where m.doc_id = d.id and m.status = 'DONE')"
 				+ " left join thr_doc_tag t on t.doc_id = d.id and t.run_seq = c.run_seq"
-				+ " where d.status = 'READY' and (t.id is null or (t.tag_cnf <> ? and (t.status = 'FAILED' or t.next_at <= now()))"
-				+ " or (t.status = 'FAILED' and t.next_at <= now()))"
+				+ " where d.status = 'READY' and (t.id is null"
+				+ " or (t.next_at <= now() and (t.status = 'FAILED' or t.tag_cnf <> ?))"
+				+ " or (t.status = 'FAILED' and t.tag_cnf <> ?))"
 				+ " order by case when t.id is null then 0 when t.status = 'DONE' then 1 else 2 end, c.updated_at, d.id limit ?",
 				(rs, row) -> new Target(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getObject(3, UUID.class), rs.getInt(4),
 						rs.getString(5), rs.getString(6), rs.getObject(7, UUID.class)),
-				fingerprint, limit);
+				fingerprint, fingerprint, limit);
 	}
 
 	/**

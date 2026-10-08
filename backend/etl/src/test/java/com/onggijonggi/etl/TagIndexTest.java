@@ -41,6 +41,7 @@ class TagIndexTest {
 	void aMissingAliasCreatesTheIndexFromTheMappingAndDocumentsAreWrittenThroughTheAlias() {
 		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}").reply("/thr_doc_tag/_doc/", 201, "{}");
 
+		assertThat(index.ensure()).isTrue();
 		index.write(target, new TagPrompt.Tags("기타", List.of("연차"), "요약"), "tag-v1:x");
 
 		var create = es.requests.stream().filter(request -> request.path().equals("/thr_doc_tag_v1")).findFirst().orElseThrow();
@@ -59,9 +60,9 @@ class TagIndexTest {
 	@Test
 	void eachCheckLooksAgainAndStoredTagsAreRestoredInBulk() {
 		es.reply("/_alias/", 200, "{\"thr_doc_tag_v1\":{\"aliases\":{\"thr_doc_tag\":{}}}}");
-		assertThat(index.check()).isFalse();
+		assertThat(index.ensure()).isFalse();
 		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}");
-		assertThat(index.check()).as("사라져서 새로 만들었다").isTrue();
+		assertThat(index.ensure()).as("사라져서 새로 만들었다").isTrue();
 
 		var stored = new TagStore.Stored(UUID.randomUUID(), target.document(), target.tenant(), target.thread(), 2,
 				new TagPrompt.Tags("기타", List.of("연차"), "요약"), "tag-v1:x");
@@ -83,8 +84,9 @@ class TagIndexTest {
 
 		assertThatThrownBy(() -> index.write(target, TagPrompt.Tags.unclassified(), "c"))
 				.isInstanceOfSatisfying(EtlFailure.class, failure -> assertThat(failure.permanent()).isFalse());
-		// 다음 쓰기는 별칭을 다시 확인하고, 없으면 인덱스를 다시 만든다(ES 초기화 뒤 ETL을 재기동하지 않아도 복구된다).
+		// 다음 태깅 주기가 별칭을 다시 확인해 인덱스를 다시 만든다(ES 초기화 뒤 ETL을 재기동하지 않아도 복구된다).
 		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}").reply("/thr_doc_tag/_doc/", 201, "{}");
+		assertThat(index.ensure()).isTrue();
 		index.write(target, TagPrompt.Tags.unclassified(), "c");
 		assertThat(es.requests).anySatisfy(request -> assertThat(request.method() + " " + request.path()).isEqualTo("PUT /thr_doc_tag_v1"));
 		index.delete(target.document(), 2);

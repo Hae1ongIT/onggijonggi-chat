@@ -10,7 +10,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /**
  * Class Name : TaggingProperties.java
  * Description : 방 문서 태깅 설정(app.etl.tagging.*, #362). url·model이 비면 태깅 작업이 돌지 않는다. 태깅은 문서 본문 전체를 LLM에
- *               보내므로 url에는 사내 모델 서버만 둔다(게이트웨이·외부 공급자를 거치지 않는다 — 비어 있으면 건너뛰고 대신 보내지 않는다).
+ *               보내므로 url에는 사내 모델 서버만 둔다(게이트웨이·외부 공급자를 거치지 않는다).
  *               카테고리 목록·키워드 수·요약 길이·모델이 바뀌면 설정 지문이 바뀌어 태그만 다시 뽑힌다(조각·임베딩은 그대로).
  */
 @ConfigurationProperties("app.etl.tagging")

@@ -78,7 +78,9 @@ public class ChunkSearcher {
 		List<Object> filter = filter(scope);
 		List<Hit> keyword = keyword(filter, query);
 		List<Hit> semantic = vector(filter, vector);
-		if (!tags.enabled() || clock.getAsLong() - tagRetryAt < 0) return fuse(keyword, semantic);
+		// 채널 순서가 동점일 때의 우선이다: 벡터 → 키워드 → 태그. 태그 채널이 꺼졌거나 실패 뒤 쉬는 중이면 두 채널만 합친다.
+		boolean tagging = tags.enabled() && clock.getAsLong() - tagRetryAt >= 0;
+		if (!tagging) return fuse(List.of(semantic, keyword));
 		return fuse(List.of(semantic, keyword, tagged(scope, filter, query, vector, semantic)));
 	}
 
@@ -88,29 +90,8 @@ public class ChunkSearcher {
 	 * 보내면 후보 수만큼 왕복이 늘어 검색이 느려진다). 대표가 최소 유사도에 못 미치면 그 문서는 뺀다. 실패하면 빈 채널이다.
 	 */
 	private List<Hit> tagged(ThreadDocumentScope scope, List<Object> filter, String query, float[] vector, List<Hit> semantic) {
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("size", tags.candidates());
-		body.put("_source", List.of(TagIndexContract.DOC_ID, TagIndexContract.RUN_SEQ));
-		body.put("query", tagQuery(query, tags.minimumShouldMatch(), filter));
 		try {
-			// 태그 순위대로 대표를 세운다. 벡터 채널에 없는 문서는 자리만 잡아 두고 한 번에 찾는다.
-			List<Hit> ranked = new ArrayList<>();
-			List<Map<String, Object>> lookups = new ArrayList<>();
-			List<Integer> slots = new ArrayList<>();
-			for (JsonNode tag : call(tags.alias(), body)) {
-				String document = tag.path("_source").path(TagIndexContract.DOC_ID).asString("");
-				int runSeq = tag.path("_source").path(TagIndexContract.RUN_SEQ).asInt();
-				Hit reused = semantic.stream().filter(hit -> hit.document().equals(document) && hit.runSeq() == runSeq).findFirst().orElse(null);
-				if (reused == null) {
-					slots.add(ranked.size());
-					lookups.add(bestChunk(scope, document, runSeq, vector));
-				}
-				ranked.add(reused);
-			}
-			List<List<JsonNode>> found = multiCall(settings.alias(), lookups);
-			for (int i = 0; i < slots.size(); i++)
-				for (JsonNode hit : found.get(i)) ranked.set(slots.get(i), hit(hit, cosine(hit), null));
-			return ranked.stream().filter(Objects::nonNull).toList();
+			return representatives(scope, taggedDocuments(filter, query), vector, semantic);
 		} catch (RuntimeException error) {
 			// 태그가 아직 없거나(태깅 꺼짐·첫 배포 직후) 태그 색인이 잠시 안 될 때. 본문 검색은 그대로 돌려준다.
 			// 1분 동안 태그 채널을 쉰다. 경고도 그때 한 번만 남긴다.
@@ -125,6 +106,41 @@ public class ChunkSearcher {
 		return Map.of("bool", Map.of("must", List.of(Map.of("multi_match", Map.of("query", query,
 				"fields", List.of(TagIndexContract.KEYWORDS + "^2", TagIndexContract.SUMMARY), "minimum_should_match", minimumShouldMatch))),
 				"filter", filter));
+	}
+
+	/** 태그 색인에서 질문과 맞는 (문서, 회차)를 태그 순위대로. */
+	private List<Map.Entry<String, Integer>> taggedDocuments(List<Object> filter, String query) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("size", tags.candidates());
+		body.put("_source", List.of(TagIndexContract.DOC_ID, TagIndexContract.RUN_SEQ));
+		body.put("query", tagQuery(query, tags.minimumShouldMatch(), filter));
+		List<Map.Entry<String, Integer>> documents = new ArrayList<>();
+		for (JsonNode tag : call(tags.alias(), body))
+			documents.add(Map.entry(tag.path("_source").path(TagIndexContract.DOC_ID).asString(""), tag.path("_source").path(TagIndexContract.RUN_SEQ).asInt()));
+		return documents;
+	}
+
+	/**
+	 * 태그 순위대로 문서마다 대표 조각을 세운다. 벡터 채널에 그 문서(같은 회차) 조각이 있으면 그중 1위를 쓰고, 없으면 그 문서 안 검색을
+	 * 한 요청으로 묶어 찾는다 — ranked의 그 자리(slots)를 비워 두었다가 결과로 채운다. 기준 미달로 결과가 없으면 그 문서는 빠진다.
+	 */
+	private List<Hit> representatives(ThreadDocumentScope scope, List<Map.Entry<String, Integer>> documents, float[] vector, List<Hit> semantic) {
+		List<Hit> ranked = new ArrayList<>();
+		List<Map<String, Object>> lookups = new ArrayList<>();
+		List<Integer> slots = new ArrayList<>();
+		for (Map.Entry<String, Integer> document : documents) {
+			Hit reused = semantic.stream().filter(hit -> hit.document().equals(document.getKey()) && hit.runSeq() == document.getValue())
+					.findFirst().orElse(null);
+			if (reused == null) {
+				slots.add(ranked.size());
+				lookups.add(bestChunk(scope, document.getKey(), document.getValue(), vector));
+			}
+			ranked.add(reused);
+		}
+		List<List<JsonNode>> found = multiCall(settings.alias(), lookups);
+		for (int i = 0; i < slots.size(); i++)
+			for (JsonNode hit : found.get(i)) ranked.set(slots.get(i), hit(hit, cosine(hit), null));
+		return ranked.stream().filter(Objects::nonNull).toList();
 	}
 
 	/** 한 문서(현재 회차) 안에서 질문과 의미가 가장 가까운 조각 1건을 찾는 검색. 최소 유사도에 못 미치면 결과가 없다. */

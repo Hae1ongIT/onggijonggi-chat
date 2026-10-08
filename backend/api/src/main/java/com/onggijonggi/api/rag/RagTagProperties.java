@@ -18,12 +18,17 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record RagTagProperties(
 		@DefaultValue("false") boolean enabled,
 		@DefaultValue(TagIndexContract.ALIAS) String alias,
-		@DefaultValue("3<75%") String minimumShouldMatch,
-		@DefaultValue("10") int candidates,
-		@DefaultValue("0.4") double chunkMinSimilarity) {
+		@DefaultValue(MINIMUM_SHOULD_MATCH) String minimumShouldMatch,
+		@DefaultValue(CANDIDATES) int candidates,
+		@DefaultValue(CHUNK_MIN_SIMILARITY) double chunkMinSimilarity) {
 
-	/** 태그 채널을 쓰지 않는 설정(테스트·기존 생성자용). */
+	static final String MINIMUM_SHOULD_MATCH = "3<75%";
+	static final String CANDIDATES = "10";
+	static final String CHUNK_MIN_SIMILARITY = "0.4";
+
+	/** 태그 채널을 쓰지 않는 설정(테스트·기존 생성자용). 값은 기본값과 같다. */
 	public static RagTagProperties disabled() {
-		return new RagTagProperties(false, TagIndexContract.ALIAS, "3<75%", 10, 0.4);
+		return new RagTagProperties(false, TagIndexContract.ALIAS, MINIMUM_SHOULD_MATCH, Integer.parseInt(CANDIDATES),
+				Double.parseDouble(CHUNK_MIN_SIMILARITY));
 	}
 }

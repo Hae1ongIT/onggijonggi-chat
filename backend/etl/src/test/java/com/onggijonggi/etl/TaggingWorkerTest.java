@@ -5,6 +5,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -66,7 +69,7 @@ class TaggingWorkerTest {
 	void aPermanentFailureThatCannotBeRecordedPausesInsteadOfSpinning() {
 		when(store.targets(anyString(), anyInt())).thenReturn(targets);
 		when(tagger.tag(any(RunStore.Job.class))).thenThrow(EtlFailure.permanent("SOURCE_MISSING", "원본 없음"));
-		org.mockito.Mockito.doThrow(new IllegalStateException("DB 끊김")).when(store)
+		doThrow(new IllegalStateException("DB 끊김")).when(store)
 				.saveFailed(any(), anyString(), anyString(), any(Duration.class), any(Duration.class));
 		worker.start();
 
@@ -95,7 +98,7 @@ class TaggingWorkerTest {
 		assertThat(worker.tag(targets.get(0), "fp")).isTrue();
 		assertThat(worker.tag(targets.get(1), "fp")).as("정리된 회차도 실패는 아니다").isTrue();
 
-		var order = org.mockito.Mockito.inOrder(index, store);
+		var order = inOrder(index, store);
 		order.verify(index).write(targets.get(0), tags, "fp");
 		order.verify(store).saveDone(targets.get(0), tags, "fp");
 		verify(index, never()).delete(targets.get(0).document(), 1);
@@ -116,7 +119,7 @@ class TaggingWorkerTest {
 	void theIndexIsAlignedWithTheStoreOnceAfterStartup() {
 		var stored = new TagStore.Stored(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1,
 				new TagPrompt.Tags("기타", List.of(), "요약"), "fp");
-		when(index.check()).thenReturn(false);
+		when(index.ensure()).thenReturn(false);
 		when(store.stored(any(), anyInt())).thenReturn(List.of(stored), List.of());
 		when(store.targets(anyString(), anyInt())).thenReturn(List.of());
 		worker.start();
@@ -132,9 +135,9 @@ class TaggingWorkerTest {
 	void aRecreatedIndexIsRestoredFromTheStoreEvenAcrossAFailure() {
 		var stored = new TagStore.Stored(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1,
 				new TagPrompt.Tags("기타", List.of(), "요약"), "fp");
-		when(index.check()).thenReturn(true, false);
+		when(index.ensure()).thenReturn(true, false);
 		when(store.stored(any(), anyInt())).thenReturn(List.of(stored), List.of(stored), List.of());
-		org.mockito.Mockito.doThrow(EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "끊김", null)).doNothing().when(index).restore(any());
+		doThrow(EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "끊김", null)).doNothing().when(index).restore(any());
 		when(store.targets(anyString(), anyInt())).thenReturn(List.of());
 		worker.start();
 

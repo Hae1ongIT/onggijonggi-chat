@@ -18,7 +18,13 @@ import org.springframework.stereotype.Component;
  *               새 문서, 다시 만들기(#348)로 새로 생긴 회차, 첫 배포의 기존 문서, 설정 변경이 모두 이 한 경로로 처리된다.
  *               태깅이 늦거나 실패해도 문서 상태에는 영향이 없다 — 문서는 이미 "검색 준비 완료"이고, 태그가 없는 동안 검색의 태그 채널에만
  *               걸리지 않는다. 태깅 서버 설정이 비면 돌지 않는다(본문을 다른 곳으로 대신 보내지 않는다).
- *               로그에는 문서·회차 ID와 건수·시간만 남긴다(본문·태그 원문은 남기지 않는다).
+ *               로그에는 문서·회차 ID와 건수·시간, 실패 사유 코드·HTTP 상태만 남긴다(본문·태그 원문·예외 메시지는 남기지 않는다).
+ *               한 주기의 흐름(loop → cycle):
+ *                 1. 기동 뒤 한 번 지난 실패를 풀어 바로 다시 대상이 되게 한다(설정·주소를 고쳐 재기동한 경우).
+ *                 2. 문서 처리가 꺼져 있거나 검색 인덱스 준비·이전 중이면 기다린다(waitingReason — 5분마다 알린다).
+ *                 3. 태그 색인 별칭을 확인하고, 기동 뒤 처음이거나 새로 만들었으면 DB(정본)의 태그로 다시 채운다(restorePending).
+ *                 4. 대상 한 묶음을 차례로 태깅한다. 일시 장애면 묶음을 멈추고 쉬며, 잇따를수록 오래 쉰다(stalls).
+ *               restorePending·stalls는 이 스레드만 읽고 쓴다(volatile이 아니다).
  */
 @Component
 public class TaggingWorker implements SmartLifecycle {
@@ -41,12 +47,9 @@ public class TaggingWorker implements SmartLifecycle {
 	private volatile String disabledReason;
 	/** 태깅이 기다리는 이유(문서 처리 꺼짐·검색 인덱스 준비 전). null이면 기다리지 않는다. */
 	private volatile String waitingReason;
-	/**
-	 * 태그 색인을 DB 태그로 다시 채워야 한다. 기동 때 한 번(채우던 중 재기동됐거나 색인이 DB와 어긋났을 수 있다 — LLM 없이 bulk 쓰기라
-	 * 가볍다), 그리고 색인을 새로 만들었을 때. 채우다 실패하면 다음 주기에 이어 한다.
-	 */
+	/** 태그 색인을 DB 태그로 다시 채워야 한다(기동 뒤 처음·색인을 새로 만들었을 때, 실패하면 다음 주기에 다시). */
 	private boolean restorePending = true;
-	/** 일시 장애로 묶음을 멈춘 횟수(잇따른). 늘수록 오래 쉰다 — 태깅 서버가 오래 끊긴 동안 문서를 하나씩 두드리지 않게. */
+	/** 일시 장애로 묶음을 잇따라 멈춘 횟수. 대상이 없거나 한 건이라도 태깅하면 0으로 돌아간다. */
 	private int stalls;
 
 	public TaggingWorker(TagStore store, Tagger tagger, TagIndex index, ChunkIndex chunks, IngestionWorkers workers, TaggingProperties settings) {
@@ -88,7 +91,7 @@ public class TaggingWorker implements SmartLifecycle {
 						: !chunks.prepared() ? "검색 인덱스 준비 전이다" : chunks.migrating() ? "검색 인덱스를 옮기는 중이다" : null;
 				if (waitingReason == null) done = cycle();
 			} catch (EtlFailure failure) {
-				// 태그 검색 인덱스 준비(index.ensure) 실패. 대상 조회 실패와 구분하고, 반복되므로 스택 없이 남긴다.
+				// 태그 색인 별칭 확인·생성(index.ensure) 실패. 대상 조회 실패와 구분하고, 반복되므로 스택 없이 남긴다.
 				log.warn("태그 검색 인덱스를 준비하지 못했다({}) — 잠시 뒤 다시 본다", reason(failure.code(), failure));
 			} catch (Throwable error) {
 				log.warn("문서 태깅 대상을 읽지 못했다 — 잠시 뒤 다시 본다", error);
@@ -106,7 +109,7 @@ public class TaggingWorker implements SmartLifecycle {
 	/** 대상 한 묶음을 태깅한다. 처리한 수를 돌려준다. */
 	int cycle() {
 		// 기동 뒤 처음, 또는 태그 색인만 사라졌으면(색인 삭제·스냅샷 복원) DB가 정본이므로 DB 태그로 다시 채운다 — LLM은 다시 부르지 않는다.
-		if (index.check()) restorePending = true;
+		if (index.ensure()) restorePending = true;
 		if (restorePending) {
 			try {
 				restoreIndex();
@@ -197,10 +200,9 @@ public class TaggingWorker implements SmartLifecycle {
 	}
 
 	/**
-	 * 실패의 HTTP 상태(예: "HTTP 404")만 꺼낸다. 없으면 빈 글자. 예외 메시지 전체는 남기지 않는다 — 연결 오류 메시지에는 태깅 서버 주소가
-	 * 들어 있다. 상태만 있어도 주소·모델 이름 오타(404·400)와 서버 장애(5xx)를 가를 수 있다.
+	 * 로그에 남길 사유: 코드와(있으면) HTTP 상태. 예외 메시지 전체는 남기지 않는다 — 연결 오류 메시지에는 태깅 서버 주소가 들어 있다.
+	 * 상태만 있어도 주소·모델 이름 오타(404·400)와 서버 장애(5xx)를 가를 수 있다.
 	 */
-	/** 로그에 남길 사유: 코드와(있으면) HTTP 상태. */
 	static String reason(String code, EtlFailure failure) {
 		String status = failure == null ? "" : httpStatus(failure);
 		return status.isEmpty() ? code : code + " " + status;
@@ -214,6 +216,7 @@ public class TaggingWorker implements SmartLifecycle {
 		return delay.toSeconds() + "초";
 	}
 
+	/** 실패의 HTTP 상태(예: "HTTP 404")만 꺼낸다. 없으면 빈 글자. */
 	static String httpStatus(EtlFailure failure) {
 		// 메시지는 "코드: 내용"이다(EtlFailure).
 		String message = failure.getMessage().substring(failure.code().length() + 2);
@@ -224,8 +227,12 @@ public class TaggingWorker implements SmartLifecycle {
 	}
 
 	private void pause() {
-		// 일시 장애가 잇따르면 쉬는 시간을 두 배씩 늘린다(재시도 간격 상한까지).
-		long delay = Math.min(settings.idleDelay().toMillis() << Math.min(stalls, 16), Math.max(settings.idleDelay().toMillis(), settings.retryDelay().toMillis()));
+		// 일시 장애가 잇따르면 쉬는 시간을 두 배씩 늘린다 — 태깅 서버가 오래 끊긴 동안 문서를 하나씩 두드리지 않게. 상한은 실패한
+		// 회차의 재시도 간격 상한(retryDelay)과 같게 둔다(그보다 오래 쉬면 다시 할 때가 된 회차를 늦게 본다). 16은 시프트가 넘치지 않게
+		// 하는 안전장치일 뿐이다(그 전에 상한에 닿는다).
+		long idle = settings.idleDelay().toMillis();
+		long longest = Math.max(idle, settings.retryDelay().toMillis());
+		long delay = Math.min(idle << Math.min(stalls, 16), longest);
 		try {
 			Thread.sleep(delay);
 		} catch (InterruptedException interrupted) {
