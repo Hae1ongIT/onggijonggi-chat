@@ -35,8 +35,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Class Name : RagEvaluationTest.java
- * Description : 방 문서 검색 평가 세트(#344). 가상 회사 규정 문서 5개(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
- *               nori Elasticsearch에 색인하고, 질문 54개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택·주제)를
+ * Description : 방 문서 검색 평가 세트(#344). 가상 회사 규정 문서 10개(주제가 겹치는 문서 포함)(rag-eval/documents)를 ETL과 같은 청킹(공용 Chunker)·매핑으로
+ *               nori Elasticsearch에 색인하고, 질문 76개(rag-eval/questions.json — 직접·다른 표현·고유명사·무관·후속·문서 선택·주제)를
  *               검색 기준 조합마다 돌려 적중률·무관 질문 오채택률·다시 쓰기 효과·지연을 표로 낸다(build/rag-eval/report.md).
  *               대화 모델이 있으면 ETL과 같은 태깅 규칙(공용 TagPrompt)으로 문서를 태깅해 태그 색인을 만들고, 태그 채널(#362) 끔/켬과
  *               그 기준값을 비교한다. 주제(tag) 질문은 기대 문서가 상위에 오면 적중이다.
@@ -55,7 +55,8 @@ class RagEvaluationTest {
 	private static final String INDEX = "thr_doc_chunk_v2";
 	private static final UUID TENANT = UUID.randomUUID();
 	private static final UUID ROOM = UUID.randomUUID();
-	private static final List<String> DOCUMENTS = List.of("leave.md", "security.md", "travel.md", "equipment.md", "remote-work.md");
+	private static final List<String> DOCUMENTS = List.of("leave.md", "security.md", "travel.md", "equipment.md", "remote-work.md",
+			"benefits.md", "attendance.md", "info-assets.md", "expenses.md", "privacy.md");
 	private static final List<Double> VECTOR_MINIMUMS = List.of(0.0, 0.4, 0.45, 0.5, 0.55, 0.6);
 	private static final List<String> KEYWORD_MINIMUMS = List.of("1", "60%", "75%", "100%");
 	/** 질문별 결과를 보여 줄 기준(설정 기본값과 같게 둔다). */
