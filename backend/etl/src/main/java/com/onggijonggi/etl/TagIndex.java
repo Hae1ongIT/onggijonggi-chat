@@ -35,11 +35,13 @@ public class TagIndex {
 
 	private final RestClient client;
 	private final ObjectMapper json;
-	private final TaggingProperties settings;
+	private final String alias;
+	private final String index;
 
-	public TagIndex(EtlProperties properties, TaggingProperties settings, ObjectMapper json) {
+	public TagIndex(EtlProperties properties, ObjectMapper json) {
 		this.client = HttpCalls.client(properties.elasticsearch().url(), properties.requestTimeout());
-		this.settings = settings;
+		this.alias = properties.elasticsearch().tagAlias();
+		this.index = properties.elasticsearch().tagIndex();
 		this.json = json;
 	}
 
@@ -51,7 +53,7 @@ public class TagIndex {
 		try {
 			JsonNode aliases;
 			try {
-				aliases = json.readTree(client.get().uri("/_alias/{alias}", settings.alias()).retrieve().body(String.class));
+				aliases = json.readTree(client.get().uri("/_alias/{alias}", alias).retrieve().body(String.class));
 			} catch (HttpClientErrorException.NotFound missing) {
 				aliases = json.createObjectNode();
 			}
@@ -65,15 +67,15 @@ public class TagIndex {
 
 	private void create() {
 		ObjectNode body = (ObjectNode) mapping();
-		body.putObject("aliases").putObject(settings.alias());
+		body.putObject("aliases").putObject(alias);
 		try {
-			client.put().uri("/{index}", settings.index()).contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(body)))
+			client.put().uri("/{index}", index).contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(body)))
 					.retrieve().toBodilessEntity();
 		} catch (HttpClientErrorException.BadRequest rejected) {
 			String reason = rejected.getResponseBodyAsString();
 			if (!reason.contains("resource_already_exists_exception"))
 				throw EtlFailure.permanent("TAG_INDEX_REJECTED", "태그 인덱스 생성 거절: " + HttpCalls.abbreviate(reason), rejected);
-			client.put().uri("/{index}/_alias/{alias}", settings.index(), settings.alias()).retrieve().toBodilessEntity();
+			client.put().uri("/{index}/_alias/{alias}", index, alias).retrieve().toBodilessEntity();
 		}
 	}
 
@@ -84,7 +86,7 @@ public class TagIndex {
 	public void write(TagStore.Target target, TagPrompt.Tags tags, String fingerprint) {
 		Map<String, Object> document = document(target.document(), target.thread(), target.tenant(), target.runSeq(), tags, fingerprint);
 		try {
-			client.put().uri("/{alias}/_doc/{id}?require_alias=true", settings.alias(), tagId(target.document(), target.runSeq()))
+			client.put().uri("/{alias}/_doc/{id}?require_alias=true", alias, tagId(target.document(), target.runSeq()))
 					.contentType(MediaType.APPLICATION_JSON).body(utf8(json.writeValueAsString(document))).retrieve().toBodilessEntity();
 		} catch (HttpClientErrorException.NotFound aliasMissing) {
 			throw EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "태그 인덱스 별칭이 없다 — 다음 태깅 주기에 다시 만든다", aliasMissing);
@@ -103,7 +105,7 @@ public class TagIndex {
 					.append('\n');
 		}
 		try {
-			JsonNode response = json.readTree(client.post().uri("/{alias}/_bulk?refresh=true&require_alias=true", settings.alias())
+			JsonNode response = json.readTree(client.post().uri("/{alias}/_bulk?refresh=true&require_alias=true", alias)
 					.contentType(NDJSON).body(utf8(lines.toString())).retrieve().body(String.class));
 			if (response.path("errors").asBoolean(true))
 				throw EtlFailure.transientFailure("TAG_INDEX_UNAVAILABLE", "태그 색인 다시 채우기 일부 실패", null);
@@ -130,7 +132,7 @@ public class TagIndex {
 	/** 한 회차의 태그 문서를 지운다. 멱등이다 — 문서나 인덱스가 없으면 지울 것도 없다. */
 	public void delete(UUID document, int runSeq) {
 		try {
-			client.delete().uri("/{alias}/_doc/{id}?refresh=true", settings.alias(), tagId(document, runSeq)).retrieve().toBodilessEntity();
+			client.delete().uri("/{alias}/_doc/{id}?refresh=true", alias, tagId(document, runSeq)).retrieve().toBodilessEntity();
 		} catch (HttpClientErrorException.NotFound gone) {
 			// 이미 없거나(태깅 전·태깅 꺼짐) 인덱스가 없다.
 		} catch (RuntimeException error) {

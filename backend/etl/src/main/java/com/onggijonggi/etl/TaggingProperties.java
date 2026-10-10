@@ -1,6 +1,5 @@
 package com.onggijonggi.etl;
 
-import com.onggijonggi.common.document.TagIndexContract;
 import com.onggijonggi.common.document.TagPrompt;
 import java.time.Duration;
 import java.util.List;
@@ -42,10 +41,7 @@ public record TaggingProperties(
 		/** 영구 실패(입력 거절·원본 없음 등)를 다시 시도하기까지의 간격. 태깅 설정이 바뀌면 이 간격을 기다리지 않고 다시 한다. */
 		@DefaultValue("7d") Duration permanentRetryDelay,
 		/** 할 일이 없거나 준비가 안 됐을 때 다시 볼 간격. */
-		@DefaultValue("30s") Duration idleDelay,
-		/** 태그 검색 인덱스의 이름(버전). 쓰기·검색은 별칭(TagIndexContract.ALIAS)으로 한다. */
-		@DefaultValue("thr_doc_tag_v1") String index,
-		@DefaultValue(TagIndexContract.ALIAS) String alias) {
+		@DefaultValue("30s") Duration idleDelay) {
 
 	public TaggingProperties {
 		// 비었거나(환경 변수를 빈 값으로 넘김) 공백뿐이면 기본 목록을 쓴다 — 빈 목록이면 모든 문서가 미분류로 굳는다.

@@ -5,10 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.onggijonggi.api.authz.ThreadScopeFilter;
 import com.onggijonggi.api.chat.ThreadDocumentScope;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
@@ -155,29 +158,52 @@ class ChunkSearcherTest {
 		}
 	}
 
-	/** 태그 채널이 실패하면(색인 없음) 두 채널로 계속하고, 1분 동안은 태그 채널을 다시 부르지 않는다. 꺼져 있으면 아예 부르지 않는다. */
+	/** 태그 채널이 실패하면(색인 없음) 두 채널로 계속하고, 1분 동안은 태그 채널을 다시 부르지 않다가 1분이 지나면 다시 시도한다. */
 	@Test
-	void aTagChannelOutageKeepsTheOtherChannelsAndADisabledChannelSendsNothing() throws Exception {
+	void aTagChannelOutageKeepsTheOtherChannelsAndRetriesAfterAMinute() throws Exception {
 		UUID a = UUID.randomUUID();
-		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + a + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
-		for (boolean enabled : List.of(true, false)) {
-			try (StubHttpServer es = new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
-					.reply("/thr_doc_tag/_search", 404, "{\"error\":{\"type\":\"index_not_found_exception\"}}")) {
-				var searcher = tagged(es, enabled);
-				AtomicLong now = new AtomicLong(System.nanoTime());
-				searcher.clock = now::get;
-				for (int i = 0; i < 2; i++)
-					assertThat(searcher.search(scope(a), "연차", new float[] {1, 0, 0})).as("enabled=" + enabled).singleElement()
-							.satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
-				assertThat(es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count()).as("enabled=" + enabled)
-						.isEqualTo(enabled ? 1 : 0);
-				// 1분이 지나면 다시 시도한다(색인이 생겼을 수 있다).
-				now.addAndGet(TimeUnit.SECONDS.toNanos(61));
-				searcher.search(scope(a), "연차", new float[] {1, 0, 0});
-				assertThat(es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count()).as("1분 뒤 enabled=" + enabled)
-						.isEqualTo(enabled ? 2 : 0);
-			}
+		try (StubHttpServer es = outage(a)) {
+			AtomicLong now = new AtomicLong(1_000_000);
+			var searcher = tagged(es, true, clock(now));
+			for (int i = 0; i < 2; i++)
+				assertThat(searcher.search(scope(a), "연차", new float[] {1, 0, 0})).singleElement().satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
+			assertThat(tagRequests(es)).as("실패 뒤 1분 동안은 다시 부르지 않는다").isEqualTo(1);
+
+			now.addAndGet(Duration.ofSeconds(61).toMillis());
+			searcher.search(scope(a), "연차", new float[] {1, 0, 0});
+			assertThat(tagRequests(es)).as("1분이 지나면 다시 시도한다(색인이 생겼을 수 있다)").isEqualTo(2);
 		}
+	}
+
+	/** 태그 채널이 꺼져 있으면 태그 색인을 아예 부르지 않는다. */
+	@Test
+	void aDisabledTagChannelSendsNothing() throws Exception {
+		UUID a = UUID.randomUUID();
+		try (StubHttpServer es = outage(a)) {
+			assertThat(tagged(es, false).search(scope(a), "연차", new float[] {1, 0, 0})).singleElement()
+					.satisfies(hit -> assertThat(hit.chunkId()).isEqualTo("c"));
+			assertThat(tagRequests(es)).isZero();
+		}
+	}
+
+	/** 조각 검색은 조각 하나("c")를, 태그 색인은 404(색인 없음)를 돌려준다. */
+	private static StubHttpServer outage(UUID document) throws Exception {
+		String chunk = "{\"_score\":0.9,\"_source\":{\"chunk_id\":\"c\",\"doc_id\":\"" + document + "\",\"run_seq\":1,\"seq\":1,\"loc\":\"para=1\",\"content\":\"본문\"}}";
+		return new StubHttpServer().reply("/thr_doc_chunk/_search", 200, "{\"hits\":{\"hits\":[" + chunk + "]}}")
+				.reply("/thr_doc_tag/_search", 404, "{\"error\":{\"type\":\"index_not_found_exception\"}}");
+	}
+
+	private static long tagRequests(StubHttpServer es) {
+		return es.requests.stream().filter(request -> request.path().startsWith("/thr_doc_tag")).count();
+	}
+
+	/** 테스트가 옮기는 시계. */
+	private static Clock clock(AtomicLong millis) {
+		return new Clock() {
+			@Override public ZoneId getZone() { return ZoneOffset.UTC; }
+			@Override public Clock withZone(ZoneId zone) { return this; }
+			@Override public Instant instant() { return Instant.ofEpochMilli(millis.get()); }
+		};
 	}
 
 	private static StubHttpServer.Reply hits(String... hits) {
@@ -190,9 +216,13 @@ class ChunkSearcherTest {
 	}
 
 	private static ChunkSearcher tagged(StubHttpServer es, boolean enabled) {
+		return tagged(es, enabled, Clock.systemUTC());
+	}
+
+	private static ChunkSearcher tagged(StubHttpServer es, boolean enabled, Clock clock) {
 		return new ChunkSearcher(new RagProperties(new RagProperties.Elasticsearch(es.url(), "thr_doc_chunk", Duration.ofSeconds(2)), null, null,
 				new RagProperties.Search(5, 2, 20, 100, 0.5, "75%", 60, 2, 10), true),
-				new RagTagProperties(enabled, "thr_doc_tag", "40%", 10, 0.35), WebClient.builder(), JsonMapper.builder().build());
+				new RagTagProperties(enabled, "thr_doc_tag", "40%", 10, 0.35), WebClient.builder(), JsonMapper.builder().build(), clock);
 	}
 
 	/** 묶음 검색이 모두 실패하면 태그 채널 전체를 장애로 보고 두 채널 결과만 돌려준 뒤, 1분 동안 태그 채널을 쉰다. */

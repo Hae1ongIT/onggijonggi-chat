@@ -88,20 +88,29 @@ class TaggingWorkerTest {
 	}
 
 	@Test
-	void aTaggedRunIsIndexedThenSavedAndARunRemovedMeanwhileIsWithdrawnFromTheIndex() {
+	void aTaggedRunIsIndexedThenSaved() {
 		TagPrompt.Tags tags = new TagPrompt.Tags("기타", List.of("연차"), "요약");
 		when(tagger.tag(any(RunStore.Job.class))).thenReturn(tags);
 		when(store.saveDone(targets.get(0), tags, "fp")).thenReturn(true);
-		when(store.saveDone(targets.get(1), tags, "fp")).thenReturn(false);
 		worker.start();
 
 		assertThat(worker.tag(targets.get(0), "fp")).isTrue();
-		assertThat(worker.tag(targets.get(1), "fp")).as("정리된 회차도 실패는 아니다").isTrue();
 
 		var order = inOrder(index, store);
 		order.verify(index).write(targets.get(0), tags, "fp");
 		order.verify(store).saveDone(targets.get(0), tags, "fp");
 		verify(index, never()).delete(targets.get(0).document(), 1);
+	}
+
+	/** 태깅하는 동안 회차가 정리됐으면(저장 거부) 방금 쓴 태그 색인 문서를 거둔다. 실패는 아니다. */
+	@Test
+	void aRunRemovedWhileTaggingIsWithdrawnFromTheIndex() {
+		TagPrompt.Tags tags = new TagPrompt.Tags("기타", List.of("연차"), "요약");
+		when(tagger.tag(any(RunStore.Job.class))).thenReturn(tags);
+		when(store.saveDone(targets.get(1), tags, "fp")).thenReturn(false);
+		worker.start();
+
+		assertThat(worker.tag(targets.get(1), "fp")).isTrue();
 		verify(index).delete(targets.get(1).document(), 1);
 	}
 

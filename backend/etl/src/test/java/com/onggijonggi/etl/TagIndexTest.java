@@ -27,9 +27,9 @@ class TagIndexTest {
 	@BeforeEach
 	void setUp() throws Exception {
 		es = new StubHttpServer();
-		var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(es.url(), "thr_doc_chunk", "thr_doc_chunk_v2", 200),
+		var properties = new EtlProperties(null, new EtlProperties.Elasticsearch(es.url(), "thr_doc_chunk", "thr_doc_chunk_v2", 200, "thr_doc_tag", "thr_doc_tag_v1"),
 				null, new EtlProperties.Chunk(800, 1200, 100), 1, Duration.ofSeconds(1), Duration.ofMinutes(1), List.of(), Duration.ofSeconds(5));
-		index = new TagIndex(properties, TaggingClientTest.properties("http://unused"), JsonMapper.builder().build());
+		index = new TagIndex(properties, JsonMapper.builder().build());
 	}
 
 	@AfterEach
@@ -56,14 +56,18 @@ class TagIndexTest {
 		assertThat(document.path("run_seq").asInt()).isEqualTo(2);
 	}
 
-	/** 주기마다 별칭을 확인해 새로 만들었는지 알리고, DB 태그를 한 요청으로 다시 쓴다. 일부라도 실패하면 일시 장애다. */
+	/** 태깅 주기마다 별칭을 다시 확인하고, 새로 만들었는지 알린다. */
 	@Test
-	void eachCheckLooksAgainAndStoredTagsAreRestoredInBulk() {
+	void eachEnsureLooksAgainAndTellsWhetherItCreatedTheIndex() {
 		es.reply("/_alias/", 200, "{\"thr_doc_tag_v1\":{\"aliases\":{\"thr_doc_tag\":{}}}}");
 		assertThat(index.ensure()).isFalse();
 		es.reply("/_alias/", 404, "{}").reply("/thr_doc_tag_v1", 200, "{}");
 		assertThat(index.ensure()).as("사라져서 새로 만들었다").isTrue();
+	}
 
+	/** DB 태그를 한 요청(_bulk)으로 다시 쓰고, 일부라도 실패하면 일시 장애다. */
+	@Test
+	void storedTagsAreRestoredInOneBulkRequest() {
 		var stored = new TagStore.Stored(UUID.randomUUID(), target.document(), target.tenant(), target.thread(), 2,
 				new TagPrompt.Tags("기타", List.of("연차"), "요약"), "tag-v1:x");
 		es.reply("/thr_doc_tag/_bulk", 200, "{\"errors\":false,\"items\":[]}");

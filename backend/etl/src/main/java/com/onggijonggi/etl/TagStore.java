@@ -30,6 +30,9 @@ public class TagStore {
 		}
 	}
 
+	/** stored를 처음 부를 때의 기준. PostgreSQL은 uuid를 바이트(부호 없음)로 비교하므로 모두 0인 값이 가장 작다(Java UUID 비교와 다르다). */
+	public static final UUID FIRST = new UUID(0, 0);
+
 	private final JdbcTemplate jdbc;
 	private final TransactionTemplate transactions;
 
@@ -119,9 +122,6 @@ public class TagStore {
 	public int releaseFailures() {
 		return jdbc.update("update thr_doc_tag set next_at = now(), att_cnt = 0, updated_at = now() where err is not null and next_at > now()");
 	}
-
-	/** stored를 처음 부를 때의 기준. PostgreSQL은 uuid를 바이트(부호 없음)로 비교하므로 모두 0인 값이 가장 작다(Java UUID 비교와 다르다). */
-	public static final UUID FIRST = new UUID(0, 0);
 
 	/** DB에 있는 태그 한 건(태그 색인을 다시 채울 때 쓴다). */
 	public record Stored(UUID id, UUID document, UUID tenant, UUID thread, int runSeq, TagPrompt.Tags tags, String fingerprint) {
