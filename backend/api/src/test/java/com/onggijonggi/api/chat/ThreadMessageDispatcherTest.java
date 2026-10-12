@@ -704,7 +704,10 @@ class ThreadMessageDispatcherTest {
 				new ChatMessage("user", "요약해줘"));
 	}
 
-	/** 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹은 사용자가 먼저 요청했을 때만, 먼저 제안하지 않음"을 지시한다(이슈 #368). */
+	/**
+	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹은 사용자가 먼저 요청했을 때만, 먼저 제안하지 않음"을 지시하고, 요청받으면 도구를
+	 * 반드시 부르고 부르지 않았으면 웹에서 찾았다고 말하지 말라고 한다(이슈 #368).
+	 */
 	@Test
 	void aFoundTurnPrefersTheDocumentsAndUsesTheWebOnlyWhenAsked() {
 		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
@@ -712,7 +715,7 @@ class ThreadMessageDispatcherTest {
 
 		List<ChatMessage> withWeb = promptFor(Mono.just(found), true);
 		assertThat(systemBeforeLastUser(withWeb)).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
-				.contains("명시적으로 요청했을 때만").contains("먼저 제안하지 마세요");
+				.contains("명시적으로 요청했을 때만").contains("먼저 제안하지 마세요").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
 
 		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
 				.contains("문서 근거를 우선").doesNotContain("웹");
@@ -738,7 +741,7 @@ class ThreadMessageDispatcherTest {
 			String prompt = systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, reason, "q", false,
 					List.of())), true));
 			assertThat(prompt).as(reason.name()).contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지 물어보세요")
-					.contains("앞선 제안에 응했으면").doesNotContain(reason.name()).doesNotContain("Elasticsearch");
+					.contains("앞선 제안에 응했으면").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY).doesNotContain(reason.name()).doesNotContain("Elasticsearch");
 		}
 		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), true)))
 				.as("검색 호출 예외도 같은 지시").contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지").doesNotContain("끊김");
