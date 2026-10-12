@@ -86,6 +86,13 @@ public class ThreadMessageDispatcher {
 	*/
 	private static final int SEQ_BLOCK_SIZE = 100;
 
+	/**
+	* 웹이 켜진 배포의 FOUND·UNAVAILABLE 지시에 붙는 공통 규칙 — 요청받고도 도구를 부르지 않거나, 부르지 않고 웹에서
+	* 찾은 것처럼 말하는 경우가 실제로 있었다(이슈 #368). 지시는 모델 재량을 좁힐 뿐 강제하지 못한다.
+	*/
+	static final String WEB_TOOL_HONESTY = "웹 검색을 요청받으면 반드시 웹 검색 도구를 호출해 결과를 확인한 뒤 답하세요. "
+			+ "이번 답변에서 웹 검색 도구를 호출하지 않았다면 웹에서 찾았다고 말하지 마세요.";
+
 	private final ConcurrentMap<RoomKey, RoomAiState> states = new ConcurrentHashMap<>();
 
 	@Autowired
@@ -708,33 +715,27 @@ public class ThreadMessageDispatcher {
 		return withPrompt;
 	}
 
-	/**
-	* 웹이 켜진 배포의 공통 지시 — 요청받고도 도구를 부르지 않거나, 부르지 않고 웹에서 찾은 것처럼 말하는 경우가
-	* 실제로 있었다(#368 수동 확인). 지시는 모델 재량을 좁힐 뿐 강제하지 못한다.
-	*/
-	static final String WEB_TOOL_HONESTY = "웹 검색을 요청받으면 반드시 웹 검색 도구를 호출해 결과를 확인한 뒤 답하세요. "
-			+ "이번 답변에서 웹 검색 도구를 호출하지 않았다면 웹에서 찾았다고 말하지 마세요.";
-
 	/** 문서 검색을 하지 못한 턴의 지시. 고장 원인(검색 엔진·모델 불일치·설정)은 넣지 않는다. */
-	static String unavailablePrompt(boolean webEnabled) {
+	private static String unavailablePrompt(boolean webEnabled) {
 		String prompt = "이번 질문에 대해 방에 고정된 문서를 검색하지 못했습니다. 문서 없이 답할 수 있는 일반 질문이면 그대로 답하세요. "
 				+ "고정 문서의 내용이 필요한 질문이면 지금 문서를 확인할 수 없다고 알리세요.";
-		if (!webEnabled) return prompt;
+		if (!webEnabled) {
+			return prompt;
+		}
 		return prompt + " 이때 웹 검색은 하지 말고, 답변 끝에 웹 검색으로 답변해 드릴지 물어보세요. "
 				+ "사용자가 웹 검색을 요청했거나 앞선 제안에 응했으면 웹 검색으로 답하세요. " + WEB_TOOL_HONESTY;
 	}
 
 	/** 찾은 근거와, 근거를 우선하라는 지시. 웹은 사용자가 먼저 요청했을 때만 쓰고 먼저 제안하지 않게 한다(웹이 켜진 배포). */
-	static String groundingPrompt(SearchResult result, boolean webEnabled) {
+	private static String groundingPrompt(SearchResult result, boolean webEnabled) {
 		StringBuilder prompt = new StringBuilder(
-				"다음은 이 방에 고정된 문서에서 찾은 근거입니다. 답변에 참고하되, 근거에 없는 내용은 추측하지 마세요. 답변은 이 문서 근거를 우선합니다.");
-		prompt.append('\n');
+				"다음은 이 방에 고정된 문서에서 찾은 근거입니다. 답변에 참고하되, 근거에 없는 내용은 추측하지 마세요. 답변은 이 문서 근거를 우선합니다.\n");
 		for (SearchResult.Chunk chunk : result.chunks()) {
 			prompt.append("- [").append(chunk.fileName()).append(' ').append(chunk.loc()).append("] ")
 					.append(chunk.content()).append('\n');
 		}
 		// 웹 규칙은 근거 목록 뒤(이번 발화 바로 앞)에 둔다 — 근거 앞에 두면 근거에 묻혀, 요청받고도 도구를 부르지 않고
-		// 웹에서 찾은 것처럼 답하는 경우가 있었다(#368 수동 확인).
+		// 웹에서 찾은 것처럼 답하는 경우가 있었다(이슈 #368).
 		if (webEnabled) {
 			prompt.append("웹 검색은 사용자가 이번 대화에서 명시적으로 요청했을 때만 쓰고, 웹 검색을 먼저 제안하지 마세요. ")
 					.append(WEB_TOOL_HONESTY);

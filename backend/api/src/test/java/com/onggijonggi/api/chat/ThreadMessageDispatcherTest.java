@@ -713,9 +713,11 @@ class ThreadMessageDispatcherTest {
 		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
 				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "최저임금은 시간당 1만 원이다.", 0.9, null)));
 
-		List<ChatMessage> withWeb = promptFor(Mono.just(found), true);
-		assertThat(systemBeforeLastUser(withWeb)).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
+		String withWeb = systemBeforeLastUser(promptFor(Mono.just(found), true));
+		assertThat(withWeb).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
 				.contains("명시적으로 요청했을 때만").contains("먼저 제안하지 마세요").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
+		assertThat(withWeb.indexOf("명시적으로 요청했을 때만")).as("웹 규칙은 근거 목록 뒤에 둔다")
+				.isGreaterThan(withWeb.indexOf("최저임금은 시간당 1만 원이다."));
 
 		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
 				.contains("문서 근거를 우선").doesNotContain("웹");
@@ -748,6 +750,8 @@ class ThreadMessageDispatcherTest {
 		assertThat(systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE,
 				SearchResult.Reason.BACKEND_ERROR, "q", false, List.of())), false)))
 				.as("웹이 꺼진 배포").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
+		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), false)))
+				.as("웹이 꺼진 배포의 검색 호출 예외").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
 	}
 
 	/** 검색 결과를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
