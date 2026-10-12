@@ -704,6 +704,77 @@ class ThreadMessageDispatcherTest {
 				new ChatMessage("user", "요약해줘"));
 	}
 
+	/** 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹은 사용자가 먼저 요청했을 때만, 먼저 제안하지 않음"을 지시한다(이슈 #368). */
+	@Test
+	void aFoundTurnPrefersTheDocumentsAndUsesTheWebOnlyWhenAsked() {
+		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
+				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "최저임금은 시간당 1만 원이다.", 0.9, null)));
+
+		List<ChatMessage> withWeb = promptFor(Mono.just(found), true);
+		assertThat(systemBeforeLastUser(withWeb)).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
+				.contains("명시적으로 요청했을 때만").contains("먼저 제안하지 마세요");
+
+		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
+				.contains("문서 근거를 우선").doesNotContain("웹");
+	}
+
+	/** 근거가 없으면(고정 문서 없음·맞는 내용 없음) 지시를 넣지 않는다 — 웹을 쓸지는 모델이 판단한다(이슈 #368). */
+	@Test
+	void aNoEvidenceTurnAddsNoInstruction() {
+		for (SearchResult.Reason reason : List.of(SearchResult.Reason.NO_PINNED_DOCUMENTS, SearchResult.Reason.NO_MATCH)) {
+			List<ChatMessage> messages = promptFor(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, reason, "q", false, List.of())), true);
+			assertThat(messages).as(reason.name()).noneSatisfy(message -> assertThat(message.role()).isEqualTo("system"));
+		}
+	}
+
+	/**
+	 * 문서 검색을 하지 못하면(UNAVAILABLE·검색 호출 예외) 알리게 하고, 웹은 쓰지 말고 웹 검색 여부를 묻게 한다. 답변은 계속된다.
+	 * 고장 원인은 지시에 넣지 않고, 웹이 꺼진 배포에서는 웹을 제안하지 않는다(이슈 #368).
+	 */
+	@Test
+	void anUnavailableSearchIsToldToTheModelAndOffersTheWebOnlyWhenAvailable() {
+		for (SearchResult.Reason reason : List.of(SearchResult.Reason.BACKEND_ERROR, SearchResult.Reason.MODEL_MISMATCH,
+				SearchResult.Reason.NOT_CONFIGURED, SearchResult.Reason.OVERLOADED)) {
+			String prompt = systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, reason, "q", false,
+					List.of())), true));
+			assertThat(prompt).as(reason.name()).contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지 물어보세요")
+					.contains("앞선 제안에 응했으면").doesNotContain(reason.name()).doesNotContain("Elasticsearch");
+		}
+		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), true)))
+				.as("검색 호출 예외도 같은 지시").contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지").doesNotContain("끊김");
+		assertThat(systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE,
+				SearchResult.Reason.BACKEND_ERROR, "q", false, List.of())), false)))
+				.as("웹이 꺼진 배포").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
+	}
+
+	/** 검색 결과를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
+	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled) {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(search);
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled);
+
+		dispatcher.dispatch(command(room, "@AI 올해 최저임금 얼마야?"), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		return request.getValue().messages();
+	}
+
+	/** 이번 발화(맨 끝 user) 바로 앞의 system 지시. */
+	private static String systemBeforeLastUser(List<ChatMessage> messages) {
+		assertThat(messages.get(messages.size() - 1).role()).isEqualTo("user");
+		ChatMessage instruction = messages.get(messages.size() - 2);
+		assertThat(instruction.role()).isEqualTo("system");
+		return instruction.content();
+	}
+
 	/** 방 문서 검색(#344)이 FOUND면 근거가 프롬프트에 끼워 들어가고, 완료 프레임·저장 둘 다에
 	 * citations가 채워진다(이슈 #347). */
 	@Test
