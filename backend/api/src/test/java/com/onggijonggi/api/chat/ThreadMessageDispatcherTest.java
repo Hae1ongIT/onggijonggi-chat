@@ -186,6 +186,23 @@ class ThreadMessageDispatcherTest {
 		assertThat(request.getValue().messages().get(1).content()).isEqualTo("비용 관점에서 검토해줘");
 	}
 
+	/**
+	 * 역할별 에이전트도 방 문서 검색 결과별 웹 규칙(이슈 #368)을 그대로 받는다 — 페르소나는 근거만 말하고 "문서만"이라고
+	 * 하지 않아 그 규칙과 부딪히지 않는다.
+	 */
+	@Test
+	void roleAgentsGetTheSameWebRulesAsAi() {
+		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
+				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "출장 일비는 하루 4만 원이다.", 0.9, null)));
+
+		List<ChatMessage> messages = promptFor(Mono.just(found), true, "@FIN 출장 일비를 웹에서 찾은 기준과 비교해줘");
+		assertThat(messages.get(0).content()).isEqualTo(Agent.FIN.systemPrompt());
+		assertThat(systemBeforeLastUser(messages)).contains(ThreadMessageDispatcher.FOUND_WEB_RULE);
+		for (Agent agent : Agent.values()) {
+			assertThat(agent.systemPrompt()).as(agent.name()).doesNotContain("문서만").doesNotContain("웹");
+		}
+	}
+
 	/** `@AI`는 역할 구분이 없어 페르소나 system 메시지를 끼우지 않는다(이슈 #357) — 기존 동작 그대로다. */
 	@Test
 	void plainAiMentionHasNoPersonaMessage() {
@@ -760,6 +777,11 @@ class ThreadMessageDispatcherTest {
 
 	/** 검색 결과를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
 	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled) {
+		return promptFor(search, webEnabled, "@AI 올해 최저임금 얼마야?");
+	}
+
+	/** 검색 결과와 발화를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
+	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled, String content) {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
@@ -771,7 +793,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled);
 
-		dispatcher.dispatch(command(room, "@AI 올해 최저임금 얼마야?"), room.membership.generation());
+		dispatcher.dispatch(command(room, content), room.membership.generation());
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());

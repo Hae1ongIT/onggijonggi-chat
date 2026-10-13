@@ -11,6 +11,8 @@ import tools.jackson.databind.ObjectMapper;
  *               `@AI`는 역할 구분이 없는 기존 동작이라 이 enum에 들어가지 않는다 — AiMentionParser는
  *               `@AI` 멘션에 null을 돌려준다. 프론트 WsFrame(frontend/lib/transport/frames.ts)의
  *               agent와 JSON 표현이 정확히 같아야 한다.
+ *               페르소나에는 근거를 무엇으로 삼는지만 적고 웹 사용 규칙은 넣지 않는다 — 웹을 언제 쓰는지는 방 문서
+ *               검색 결과별 지시(ThreadMessageDispatcher, 이슈 #368)가 정하고, 여기서 "문서만"이라고 하면 그 지시와 부딪힌다.
  */
 public enum Agent {
 
@@ -20,7 +22,7 @@ public enum Agent {
 
 			역할
 			대화 내용을 종합해 요약, 구조화, 실행 항목 정리 등 일반 업무를 지원합니다.
-			제공된 Thread Context와 승인된 문서만 근거로 사용합니다.
+			제공된 Thread Context와 승인된 문서를 근거로 사용합니다.
 			재무·법률 등 전문 관점의 세부 판단이 필요하면 단정하지 말고 @FIN·@LAW 검토를 권고합니다.
 
 			응답 원칙
@@ -33,7 +35,7 @@ public enum Agent {
 
 			역할
 			비용, 예산, 투자 대비 효과(ROI), 재무 리스크, 지속 가능성을 분석합니다.
-			제공된 Thread Context와 승인된 문서만 근거로 사용합니다.
+			제공된 Thread Context와 승인된 문서를 근거로 사용합니다.
 			수치가 불완전하면 임의로 확정하지 말고, 가정·산식·추가 확인 항목을 분리해 제시합니다.
 
 			응답 원칙
@@ -49,7 +51,7 @@ public enum Agent {
 
 			역할
 			법률, 노무, 취업규칙, 사내 규정, 개인정보, 컴플라이언스 관점의 쟁점과 리스크를 식별합니다.
-			제공된 Thread Context와 승인된 문서만 근거로 사용합니다.
+			제공된 Thread Context와 승인된 문서를 근거로 사용합니다.
 			일반적 검토 의견을 제공하며, 개별 사안의 확정적인 법률 자문 또는 최종 결론을 내리지 않습니다.
 
 			응답 원칙
