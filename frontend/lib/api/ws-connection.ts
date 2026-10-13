@@ -45,7 +45,7 @@ import { decodeJwtTimes, proactiveRefreshMarginMs } from '../auth/refresh-gate';
 import { WS_PATH, bffWsUrl } from './config';
 
 /** JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지. 파싱 불가·exp 없음이면 null.
- * freshToken()의 근-만료 토큰 판정(이슈 #181)에 쓴다 — `[#181][ws]` 계측 로그에도 함께 실린다.
+ * freshToken()의 근-만료 토큰 판정(이슈 #181)에 쓴다.
  * JWT 디코드 자체는 lib/auth/refresh-gate.ts와 공유한다 — A(선제 리프레시)·B′(이 판정) 둘 다
  * 같은 디코더를 쓴다. */
 function tokenSkewSeconds(token: string | null | undefined): number | null {
@@ -302,10 +302,6 @@ function connectOnce(
       options.onMessage(event.data);
     });
     socket.addEventListener('close', (event) => {
-      // [#181 계측] 브라우저가 실제로 받는 close code/reason. 서버 의도(4000 등) ↔ 수신 코드 간극 확인용.
-      console.info(
-        `[#181][ws] close opened=${opened} code=${event.code} reason=${JSON.stringify((event as { reason?: string }).reason ?? '')}`,
-      );
       // code가 없는 close는 표준상 나오지 않지만, 온다면 정상 종료로 읽어 조용히 끊기는 것보다
       // 비정상으로 읽어 재연결을 시도하는 쪽이 안전하다.
       finish(event.code ?? CLOSE_ABNORMAL);
@@ -385,10 +381,6 @@ export function openWsConnection(
   const freshToken = async (): Promise<string | null> => {
     const session = await deps.getSession();
     const lifeSeconds = tokenSkewSeconds(session?.accessToken);
-    // [#181 계측] getSession()이 매번 돌려주는 토큰의 수명 + error 상태. 근-사망 토큰 무한 재발급 확인용.
-    console.info(
-      `[#181][ws] freshToken error=${session?.error ?? 'none'} hasToken=${!!session?.accessToken} skewSeconds=${lifeSeconds} shortLived=${shortLivedTokens}`,
-    );
     if (session?.error === 'RefreshAccessTokenError' || !session?.accessToken) {
       await forceReauth();
       return null;
@@ -531,16 +523,10 @@ export function openWsConnection(
       await Promise.race([swapJoinedSignal, swapPending.then(() => undefined)]);
 
       if (!swapJoined) {
-        console.info(
-          '[#188][ws] proactive refresh handshake rejected — keeping current connection',
-        );
         socket = oldSocket;
         return await currentPending;
       }
 
-      console.info(
-        '[#188][ws] proactive refresh swapped to a new connection ahead of expiry',
-      );
       oldSocket?.close(CLOSE_NORMAL);
       onTokenSwapped(newToken);
       // 갈아탄 새 소켓에도 다음 선제 갱신을 건다(이슈 #382). 전에는 여기서 새 소켓이 끊길 때까지
@@ -568,11 +554,6 @@ export function openWsConnection(
         },
       );
       if (closedByCaller || code === CLOSE_NORMAL) return;
-
-      // [#181 계측] 매 루프 반복의 상태 — opened가 매번 true라 백오프/가드가 리셋되는지 확인용.
-      console.info(
-        `[#181][ws] loop opened=${opened} code=${code} backoffAttempt=${backoffAttempt} failedHandshakes=${failedHandshakes} afterExpiry=${afterExpiry} expiryRetried=${expiryRetried}`,
-      );
 
       if (opened) {
         backoffAttempt = 0;

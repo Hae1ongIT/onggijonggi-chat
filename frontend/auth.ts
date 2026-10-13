@@ -8,7 +8,6 @@
 import {
   allowsForcedRefresh,
   needsProactiveRefresh,
-  proactiveRefreshMarginMs,
 } from '@/lib/auth/refresh-gate';
 import NextAuth from 'next-auth';
 import type { JWT } from 'next-auth/jwt';
@@ -38,10 +37,6 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
       },
     );
     const refreshed = await response.json();
-    // [#181 계측] 리프레시 결과 — 근본 원인 규명 후 제거한다.
-    console.info(
-      `[#181][auth] refresh status=${response.status} ok=${response.ok} hasToken=${!!refreshed.access_token} expiresIn=${refreshed.expires_in} err=${refreshed.error ?? 'none'}`,
-    );
     // 성공 응답인데 access_token이 없으면 실패로 간주한다 — "error 없이 토큰만 사라지는" 상태를 막는다.
     if (!response.ok || !refreshed.access_token) {
       throw { status: response.status, error: refreshed.error };
@@ -115,35 +110,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // 시점(토큰 exp·브라우저 시계)과 마진 판정(accessTokenExpires·서버 시계)의 기준이 달라 경계에서
       // 옛 토큰을 돌려주던 문제를 없앤다. session 본문은 갱신 요청 표시로만 읽고 토큰에 합치지 않는다.
       if (trigger === 'update' && session?.refreshAccessToken === true) {
-        const allowed = allowsForcedRefresh(
-          token.accessToken,
-          token.accessTokenExpires,
-        );
-        // [#181 계측] 강제 갱신 요청 판정 — 근본 원인 규명 후 제거한다.
-        console.info(
-          `[#181][auth] jwt: forced refresh requested (allowed=${allowed})`,
-        );
-        return allowed ? refreshAccessToken(token) : token;
+        return allowsForcedRefresh(token.accessToken, token.accessTokenExpires)
+          ? refreshAccessToken(token)
+          : token;
       }
 
-      // [#181 계측] accessTokenExpires가 실제로 세팅되는지 + 리프레시 게이트 판정 — 근본 원인 규명 후 제거한다.
-      const expIn =
-        typeof token.accessTokenExpires === 'number'
-          ? Math.round((token.accessTokenExpires - Date.now()) / 1000)
-          : 'unset';
       if (!needsProactiveRefresh(token.accessToken, token.accessTokenExpires)) {
-        const marginS = Math.round(
-          proactiveRefreshMarginMs(token.accessToken) / 1000,
-        );
-        console.info(
-          `[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s, margin=${marginS}s)`,
-        );
         return token;
       }
-
-      console.info(
-        `[#181][auth] jwt: refreshing (expIn=${expIn}s, prevError=${token.error ?? 'none'})`,
-      );
       return refreshAccessToken(token);
     },
     async session({ session, token }) {
