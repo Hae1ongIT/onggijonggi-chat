@@ -10,8 +10,8 @@
  같은 문서에서 청크 여러 개가 근거로 쓰이면 docId가 같아지므로, 목록 key는 chunkId를 우선
  쓰고 없으면(과거 메시지) 배열 index로 보강한다.
  groundingNotice는 citations가 비어 있어도 단독으로 패널을 띄운다(이슈 #353) — "근거를 못
- 찾았다"와 "검색을 못 했다"를 서로 다른 문구로 구분해, 사용자가 답변이 문서 기반인지 AI의
- 일반 지식인지 헷갈리지 않게 한다.
+ 찾았다"와 "검색을 못 했다"를 서로 다른 문구로 구분해, 답변이 문서 기반이 아님을 알린다.
+ 무엇으로 답했는지는 말하지 않는다 — 이 경우 웹 검색으로 답할 수도 있어서다(이슈 #368).
  *********************************************************/
 
 import { AnimatePresence, motion } from 'framer-motion';
@@ -25,8 +25,8 @@ import { ChevronDownIcon, InfoIcon, LoaderIcon, LockIcon } from './icons';
 function groundingNoticeText(
   notice: ChatAnswerFrame['groundingNotice'],
 ): string | null {
-  if (notice === 'no_evidence') return '이 방에 고정된 문서에서 근거를 찾지 못해 일반 지식으로 답했습니다.';
-  if (notice === 'unavailable') return '문서 검색을 하지 못해 일반 지식으로 답했습니다.';
+  if (notice === 'no_evidence') return '이 방에 고정된 문서에서 근거를 찾지 못했습니다.';
+  if (notice === 'unavailable') return '문서 검색을 하지 못했습니다.';
   return null;
 }
 
