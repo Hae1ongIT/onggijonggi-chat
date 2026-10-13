@@ -705,18 +705,22 @@ class ThreadMessageDispatcherTest {
 	}
 
 	/**
-	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹은 사용자가 먼저 요청했을 때만, 먼저 제안하지 않음"을 지시하고, 요청받으면 도구를
-	 * 반드시 부르고 부르지 않았으면 웹에서 찾았다고 말하지 말라고 한다(이슈 #368).
+	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹 검색을 요청받았으면 근거가 있어도 먼저 webSearch를 부르고, 요청하지 않았으면
+	 * 웹을 쓰지도 제안하지도 않음, 도구 결과가 없으면 웹에서 찾았다고 말하지 않음"을 한 system 메시지로 지시한다(이슈 #368).
 	 */
 	@Test
 	void aFoundTurnPrefersTheDocumentsAndUsesTheWebOnlyWhenAsked() {
 		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
 				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "최저임금은 시간당 1만 원이다.", 0.9, null)));
 
-		String withWeb = systemBeforeLastUser(promptFor(Mono.just(found), true));
+		List<ChatMessage> messages = promptFor(Mono.just(found), true);
+		assertThat(messages).filteredOn(message -> message.role().equals("system")).as("지시는 system 메시지 하나").hasSize(1);
+		String withWeb = systemBeforeLastUser(messages);
 		assertThat(withWeb).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
-				.contains("명시적으로 요청했을 때만").contains("먼저 제안하지 마세요").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
-		assertThat(withWeb.indexOf("명시적으로 요청했을 때만")).as("웹 규칙은 근거 목록 뒤에 둔다")
+				.contains(ThreadMessageDispatcher.FOUND_WEB_RULE).doesNotContain(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
+		assertThat(ThreadMessageDispatcher.FOUND_WEB_RULE).contains("먼저 webSearch 도구를 호출")
+				.contains("웹 검색을 먼저 제안하지도 마세요").contains("웹 검색을 하지 못했다고 말하세요");
+		assertThat(withWeb.indexOf(ThreadMessageDispatcher.FOUND_WEB_RULE)).as("웹 규칙은 근거 목록 뒤에 둔다")
 				.isGreaterThan(withWeb.indexOf("최저임금은 시간당 1만 원이다."));
 
 		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
