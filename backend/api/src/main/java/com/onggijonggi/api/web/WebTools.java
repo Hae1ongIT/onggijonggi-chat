@@ -63,6 +63,7 @@ public class WebTools {
 	}
 
 	@Tool(description = "웹을 검색해 제목·주소·요약 목록을 돌려준다. 최신 정보나 대화·문서에 없는 사실이 필요할 때 쓴다. "
+			+ "사용자가 웹 검색을 요청하면 반드시 이 도구를 호출하고, 호출하지 않았다면 웹에서 찾았다고 말하지 않는다. "
 			+ "검색어에 사내 문서 내용이나 개인정보를 넣지 않는다.")
 	public String webSearch(@ToolParam(description = "검색어") String query, ToolContext toolContext) {
 		if (query == null || query.isBlank()) return "검색어가 비어 있다.";

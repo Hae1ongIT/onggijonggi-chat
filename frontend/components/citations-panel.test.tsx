@@ -95,7 +95,8 @@ describe('CitationsPanel', () => {
       />,
     );
 
-    expect(screen.getByText(/근거를 찾지 못해/)).toBeTruthy();
+    expect(screen.getByText(/근거를 찾지 못했습니다/)).toBeTruthy();
+    expect(screen.queryByText(/일반 지식/)).toBeNull();
   });
 
   it('shows a different notice when the document search itself failed', () => {
@@ -110,7 +111,8 @@ describe('CitationsPanel', () => {
       />,
     );
 
-    expect(screen.getByText(/검색을 하지 못해/)).toBeTruthy();
+    expect(screen.getByText(/검색을 하지 못했습니다/)).toBeTruthy();
+    expect(screen.queryByText(/일반 지식/)).toBeNull();
   });
 
   it('renders nothing when there is no citation, no restriction, and no notice', () => {

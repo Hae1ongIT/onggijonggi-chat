@@ -3,6 +3,7 @@ package com.onggijonggi.api.chat;
 import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.rag.SearchResult;
 import com.onggijonggi.api.rag.ThreadDocumentSearch;
+import com.onggijonggi.api.web.WebTools;
 import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
@@ -67,6 +68,9 @@ public class ThreadMessageDispatcher {
 
 	private final Scheduler deadlineScheduler;
 
+	/** 답변에 웹 검색·웹 읽기 도구가 붙는지(app.web.enabled). 꺼져 있으면 지시에서 웹을 말하지 않는다 — 쓸 수 없는 도구를 제안하지 않게. */
+	private final boolean webEnabled;
+
 	/**
 	* 방 하나가 워커 앞에 쌓아둘 수 있는 메시지 수. 초과하면 그 자리에서 RATE_LIMITED로 거절한다
 	* — 워커가 막혔을 때 메모리가 무한히 늘지 않게 하는 백프레셔다. AI 대기열 한도
@@ -82,6 +86,23 @@ public class ThreadMessageDispatcher {
 	*/
 	private static final int SEQ_BLOCK_SIZE = 100;
 
+	/**
+	* 웹이 켜진 배포의 UNAVAILABLE 지시에 붙는 규칙 — 요청받고도 도구를 부르지 않거나, 부르지 않고 웹에서 찾은 것처럼
+	* 말하는 경우가 실제로 있었다(이슈 #368). 지시는 모델 재량을 좁힐 뿐 강제하지 못한다.
+	*/
+	static final String WEB_TOOL_HONESTY = "웹 검색을 요청받으면 반드시 웹 검색 도구를 호출해 결과를 확인한 뒤 답하세요. "
+			+ "이번 답변에서 웹 검색 도구를 호출하지 않았다면 웹에서 찾았다고 말하지 마세요.";
+
+	/**
+	* 웹이 켜진 배포의 FOUND 웹 규칙. 근거가 이미 프롬프트에 있으면 모델이 웹 요청을 받고도 도구를 건너뛰고 웹을 쓴 척하는
+	* 경우가 잦아(이슈 #368, 같은 질문 40회 중 호출 20회·쓴 척 13회), "요청했을 때만"이 아니라 요청받았을 때 할 일을
+	* 의무형으로 쓰고 도구 이름·피할 표현·예시를 준다(같은 조건 60회 중 호출 60회·쓴 척 0회, 요청 없는 질문은 웹 0회).
+	*/
+	static final String FOUND_WEB_RULE = "사용자가 이번 대화에서 웹 검색을 요청했다면, 위 문서 근거가 있더라도 먼저 webSearch 도구를 호출해 결과를 확인한 뒤 답하세요. "
+			+ "웹 검색을 요청하지 않았다면 웹을 쓰지 말고 웹 검색을 먼저 제안하지도 마세요. "
+			+ "이번 답변에서 webSearch 도구의 결과를 받지 않았다면 \"웹 검색 결과\", \"웹에서 찾은\" 같은 표현을 쓰지 말고 웹 검색을 하지 못했다고 말하세요. "
+			+ "예: \"웹에서 찾아서 우리 규정과 비교해줘\" → webSearch를 먼저 호출하고, 그 결과와 문서 근거를 함께 비교한다.";
+
 	private final ConcurrentMap<RoomKey, RoomAiState> states = new ConcurrentHashMap<>();
 
 	@Autowired
@@ -89,19 +110,29 @@ public class ThreadMessageDispatcher {
 			LlmChatStreamService llmChatStreamService,
 			MsgPersistenceService msgPersistenceService,
 			ThreadDocumentSearch threadDocumentSearch,
+			WebTools webTools,
 			ObjectMapper json,
 			@Value("${app.thread.ai.model:${spring.ai.openai.chat.options.model}}") String modelId,
 			@Value("${app.thread.ai.turn-timeout:120s}") Duration turnTimeout,
 			@Value("${app.thread.ai.max-pending-per-room:20}") int maxPendingPerRoom,
 			@Value("${app.thread.ai.max-context-messages:20}") int maxContextMessages) {
 		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
-				turnTimeout, maxPendingPerRoom, maxContextMessages, Schedulers.parallel());
+				turnTimeout, maxPendingPerRoom, maxContextMessages, Schedulers.parallel(), webTools.enabled());
+	}
+
+	/** 웹 도구가 켜진 배포(기본값)로 만든다. */
+	ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry, LlmChatStreamService llmChatStreamService,
+			MsgPersistenceService msgPersistenceService, ThreadDocumentSearch threadDocumentSearch, ObjectMapper json,
+			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
+			Scheduler deadlineScheduler) {
+		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
+				turnTimeout, maxPendingPerRoom, maxContextMessages, deadlineScheduler, true);
 	}
 
 	ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry, LlmChatStreamService llmChatStreamService,
 			MsgPersistenceService msgPersistenceService, ThreadDocumentSearch threadDocumentSearch, ObjectMapper json,
 			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
-			Scheduler deadlineScheduler) {
+			Scheduler deadlineScheduler, boolean webEnabled) {
 		if (modelId == null || modelId.isBlank()) {
 			throw new IllegalArgumentException("app.thread.ai.model must not be blank");
 		}
@@ -123,6 +154,7 @@ public class ThreadMessageDispatcher {
 		this.turnTimeout = turnTimeout;
 		this.maxPendingPerRoom = maxPendingPerRoom;
 		this.maxContextMessages = maxContextMessages;
+		this.webEnabled = webEnabled;
 		this.deadlineScheduler = deadlineScheduler;
 	}
 
@@ -640,59 +672,83 @@ public class ThreadMessageDispatcher {
 	* buildPromptMessages가 항상 맨 끝에 이번 발화 하나만 user로 붙이므로, 그 앞까지가 "이번 발화
 	* 이전의 대화 history"다.
 	*
-	* FOUND가 아니면 messages를 그대로 돌려주되, NO_PINNED_DOCUMENTS(고정 문서 자체가 없는 방)만은
-	* 검색을 안 부른 것과 같게 조용히 넘어간다(이슈 #353) — 그 방은 원래부터 안내 대상이 아니다.
-	* 그 외(NO_MATCH·UNAVAILABLE 전부)는 사용자에게 안내할 GroundingNotice를 activeTurn에 남긴다 —
-	* 검색 실패가 답변 자체를 막지는 않지만, 문서 기반으로 답한 것처럼 보이면 안 되기 때문이다.
-	* 검색 호출 자체가 예기치 않게 에러를 던지면 UNAVAILABLE과 같은 취급으로 삼킨다.
+	* 검색 결과마다 웹 검색 사용 규칙을 다르게 지시한다(이슈 #368). 웹 도구 자체는 늘 붙는다 — 빼면 사용자가 원해도
+	* 웹으로 답할 길이 없어진다(LlmChatStreamService).
+	* - FOUND: 근거와 함께 "문서 근거를 우선하고, 사용자가 웹 검색을 요청했으면 먼저 웹 검색 도구를 부르고, 요청하지 않았으면
+	*   웹을 쓰지도 제안하지도 않는다"를 지시한다(FOUND_WEB_RULE).
+	* - NO_EVIDENCE(고정 문서 없음·맞는 내용 없음): 지시를 넣지 않는다 — 웹을 쓸지는 모델이 판단한다.
+	* - UNAVAILABLE·검색 호출 예외: 문서를 확인하지 못했다고 알리게 한다. 답변은 막지 않는다 — 일반 질문은 그대로
+	*   답하고, 문서가 필요한 질문이면 확인할 수 없다고 알린 뒤 웹 검색 여부를 묻는다(그 안내는 저장돼 다음 턴 문맥에
+	*   남아, 사용자가 응하면 모델이 웹으로 답한다). 장애를 조용히 넘기지 않는다. 고장 원인은 지시에 넣지 않는다.
+	* 웹이 켜진 배포의 UNAVAILABLE 지시에는 "요청받으면 웹 검색 도구를 반드시 부르고, 부르지 않았으면 웹에서 찾았다고
+	* 말하지 않는다"(WEB_TOOL_HONESTY)를 붙인다(FOUND는 FOUND_WEB_RULE이 같은 규칙을 담는다). NO_EVIDENCE는 지시를 넣지 않으므로 같은 규칙을 웹 검색 도구 설명(WebTools)에 둔다.
+	* 웹이 꺼진 배포에서는 웹을 말하는 문장을 빼고 지시한다.
+	*
+	* 지시와 별개로 화면 안내(GroundingNotice)를 activeTurn에 남긴다(이슈 #353) — NO_MATCH는 NO_EVIDENCE, UNAVAILABLE·
+	* 검색 호출 예외는 UNAVAILABLE. 고정 문서 자체가 없는 방(NO_PINNED_DOCUMENTS)은 원래부터 안내 대상이 아니다.
 	*/
 	private Mono<List<ChatMessage>> augmentWithDocumentSearch(ActiveTurn activeTurn, List<ChatMessage> messages) {
 		PendingTurn turn = activeTurn.turn;
 		List<ChatMessage> history = messages.subList(0, messages.size() - 1);
 		CurrentActor actor = new CurrentActor(turn.fromUserId(), turn.fromSubject(), turn.fromDisplayName());
 		return threadDocumentSearch.search(turn.threadId(), actor, turn.prompt(), history, modelIdFor(turn))
-				.map(result -> {
-					if (result.status() != SearchResult.Status.FOUND) {
-						if (result.reason() == SearchResult.Reason.NO_PINNED_DOCUMENTS) {
-							return messages;
-						}
-						activeTurn.groundingNotice = result.status() == SearchResult.Status.UNAVAILABLE
-								? GroundingNotice.UNAVAILABLE
-								: GroundingNotice.NO_EVIDENCE;
-						log.info("방 문서 근거를 못 찾아 안내를 보낸다 threadId={} traceId={} notice={} reason={}",
-								turn.threadId(), turn.traceId(), activeTurn.groundingNotice, result.reason());
-						// 사용자에게 보내는 안내(groundingNotice)와 AI 자신의 인식을 맞춘다 — 문서를
-						// 못 봤는데도 문서 기반인 것처럼 답하면 안내와 답변이 서로 어긋난다(이슈 #353).
-						List<ChatMessage> withNotice = new ArrayList<>(messages);
-						withNotice.add(messages.size() - 1, new ChatMessage("system", noGroundingPrompt(activeTurn.groundingNotice)));
-						return withNotice;
+				.map(result -> switch (result.status()) {
+					case FOUND -> {
+						activeTurn.citations = result.chunks().stream().map(this::toCitation).toList();
+						yield withSystem(messages, groundingPrompt(result, webEnabled));
 					}
-					activeTurn.citations = result.chunks().stream().map(this::toCitation).toList();
-					List<ChatMessage> withGrounding = new ArrayList<>(messages);
-					withGrounding.add(messages.size() - 1, new ChatMessage("system", groundingPrompt(result)));
-					return withGrounding;
+					case UNAVAILABLE -> {
+						activeTurn.groundingNotice = GroundingNotice.UNAVAILABLE;
+						log.warn("방 문서 검색을 끝내지 못해 근거 없이 답변하고 안내를 보낸다 threadId={} traceId={} reason={}",
+								turn.threadId(), turn.traceId(), result.reason());
+						yield withSystem(messages, unavailablePrompt(webEnabled));
+					}
+					case NO_EVIDENCE -> {
+						if (result.reason() != SearchResult.Reason.NO_PINNED_DOCUMENTS) {
+							activeTurn.groundingNotice = GroundingNotice.NO_EVIDENCE;
+							log.info("방 문서 근거를 못 찾아 안내를 보낸다 threadId={} traceId={} reason={}",
+									turn.threadId(), turn.traceId(), result.reason());
+						}
+						yield messages;
+					}
 				})
 				.onErrorResume(error -> {
 					activeTurn.groundingNotice = GroundingNotice.UNAVAILABLE;
 					log.error("방 문서 검색 호출 실패로 안내를 보낸다 threadId={} traceId={}", turn.threadId(), turn.traceId(), error);
-					List<ChatMessage> withNotice = new ArrayList<>(messages);
-					withNotice.add(messages.size() - 1, new ChatMessage("system", noGroundingPrompt(GroundingNotice.UNAVAILABLE)));
-					return Mono.just(withNotice);
+					return Mono.just(withSystem(messages, unavailablePrompt(webEnabled)));
 				});
 	}
 
-	private static String noGroundingPrompt(GroundingNotice notice) {
-		return notice == GroundingNotice.UNAVAILABLE
-				? "이 방에 고정된 문서를 지금 검색할 수 없습니다. 문서를 확인한 것처럼 말하지 말고, 일반 지식으로만 답하세요."
-				: "이 방에 고정된 문서에서 관련 근거를 찾지 못했습니다. 문서에 있는 내용처럼 추측하지 말고, 일반 지식으로만 답하세요.";
+	/** 이번 발화(맨 끝 user) 바로 앞에 system 지시를 끼운다. */
+	private static List<ChatMessage> withSystem(List<ChatMessage> messages, String prompt) {
+		List<ChatMessage> withPrompt = new ArrayList<>(messages);
+		withPrompt.add(messages.size() - 1, new ChatMessage("system", prompt));
+		return withPrompt;
 	}
 
-	private static String groundingPrompt(SearchResult result) {
+	/** 문서 검색을 하지 못한 턴의 지시. 고장 원인(검색 엔진·모델 불일치·설정)은 넣지 않는다. */
+	private static String unavailablePrompt(boolean webEnabled) {
+		String prompt = "이번 질문에 대해 방에 고정된 문서를 검색하지 못했습니다. 문서 없이 답할 수 있는 일반 질문이면 그대로 답하세요. "
+				+ "고정 문서의 내용이 필요한 질문이면 지금 문서를 확인할 수 없다고 알리세요.";
+		if (!webEnabled) {
+			return prompt;
+		}
+		return prompt + " 이때 웹 검색은 하지 말고, 답변 끝에 웹 검색으로 답변해 드릴지 물어보세요. "
+				+ "사용자가 웹 검색을 요청했거나 앞선 제안에 응했으면 웹 검색으로 답하세요. " + WEB_TOOL_HONESTY;
+	}
+
+	/** 찾은 근거와, 근거를 우선하라는 지시. 웹은 사용자가 요청했을 때만 쓰고 먼저 제안하지 않게 한다(웹이 켜진 배포). */
+	private static String groundingPrompt(SearchResult result, boolean webEnabled) {
 		StringBuilder prompt = new StringBuilder(
-				"다음은 이 방에 고정된 문서에서 찾은 근거입니다. 답변에 참고하되, 근거에 없는 내용은 추측하지 마세요.\n");
+				"다음은 이 방에 고정된 문서에서 찾은 근거입니다. 답변에 참고하되, 근거에 없는 내용은 추측하지 마세요. 답변은 이 문서 근거를 우선합니다.\n");
 		for (SearchResult.Chunk chunk : result.chunks()) {
 			prompt.append("- [").append(chunk.fileName()).append(' ').append(chunk.loc()).append("] ")
 					.append(chunk.content()).append('\n');
+		}
+		// 웹 규칙은 근거 목록 뒤(이번 발화 바로 앞)에 둔다 — 근거 앞에 두면 근거에 묻혀, 요청받고도 도구를 부르지 않고
+		// 웹에서 찾은 것처럼 답하는 경우가 있었다(이슈 #368).
+		if (webEnabled) {
+			prompt.append(FOUND_WEB_RULE);
 		}
 		return prompt.toString();
 	}
