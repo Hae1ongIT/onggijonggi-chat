@@ -33,9 +33,14 @@
  커넥션이 하나로 모이면 방을 옮길 때마다 새로 붙던 계기가 사라져, 절전 복귀 등으로 소켓이 죽었는데
  close가 오지 않으면 화면이 계속 "연결됨"인 채 아무것도 못 받는다. 그래서 소켓마다 ping을 보내고
  그 사이 아무 프레임도 오지 않으면 죽은 것으로 보고 다시 붙는다(하트비트).
+
+ 연결 중 토큰이 만료 마진에 들어오면 새 소켓으로 조용히 갈아탄다(선제 갱신, 이슈 #188). 이때는 세션을
+ 일반 조회(getSession)하지 않고 서버에 갱신을 직접 요청한다(이슈 #382) — 일반 조회는 서버의 마진
+ 판정이 기준 시각·시계가 달라 경계에서 옛 토큰을 돌려줘, 연결이 만료 시각에 끊기곤 했다.
  *********************************************************/
 
-import { getSession, signIn } from 'next-auth/react';
+import type { Session } from 'next-auth';
+import { getCsrfToken, getSession, signIn } from 'next-auth/react';
 import { decodeJwtTimes, proactiveRefreshMarginMs } from '../auth/refresh-gate';
 import { WS_PATH, bffWsUrl } from './config';
 
@@ -92,14 +97,6 @@ const MIN_USABLE_TOKEN_LIFE_FRACTION = 0.3;
  * 있으나, 연속이면 세션이 쓸 만한 토큰을 내주지 못하는 상태다 — #181 루프가 여기서 끝난다. */
 const SHORT_LIVED_TOKENS_BEFORE_REAUTH = 2;
 
-/** 선제 갱신(#188)이 freshToken()을 불렀는데 옛 토큰 그대로 돌아왔을 때, 한 번 더 물어보기
- * 전에 기다리는 시간(이슈 #226). next-auth의 jwt 콜백이 리프레시를 시작은 했지만 아직 새
- * 토큰으로 세션을 갱신하지 못한 채로 getSession()이 그 틈을 비집고 들어오면 옛 토큰이 그대로
- * 나온다 — 그 순간 곧바로 포기하면 옛 소켓 하나로 만료 시각까지 버티다 서버가 4000으로 끊을
- * 때까지 그 소켓으로 보낸 메시지가 유실될 수 있다. 리프레시 왕복(네트워크 1회)이 끝나기에
- * 충분하면서도 만료 마진을 다 까먹지 않을 만큼 짧게 잡는다. */
-const SAME_TOKEN_RETRY_DELAY_MS = 200;
-
 /** "쓸 수 있는 토큰"의 최소 잔여 수명(초). 토큰 자기 수명(exp - iat)이 MIN_USABLE_TOKEN_LIFE_S
  * 보다 짧으면(극단 설정) 고정 하한 대신 그 수명의 MIN_USABLE_TOKEN_LIFE_FRACTION을 쓴다 —
  * 안 그러면 그런 설정에서 방금 발급된 정상 토큰마저 매번 근-만료로 오판한다. iat을 모르면
@@ -131,6 +128,8 @@ interface WsConnectionDeps {
   /** URL 결정까지 소켓 팩토리가 맡는다 — 그래야 테스트가 window.location에 기대지 않는다. */
   createSocket: (protocols: string[], path: string) => SocketLike;
   getSession: typeof getSession;
+  /** 서버에 토큰 갱신을 직접 요청하고 갱신된 세션을 받는다(이슈 #382). 실패는 null. */
+  forceRefreshSession: () => Promise<Session | null>;
   signIn: typeof signIn;
   sleep: (ms: number) => Promise<void>;
 }
@@ -139,6 +138,22 @@ const defaultDeps: WsConnectionDeps = {
   createSocket: (protocols, path) =>
     new WebSocket(bffWsUrl(path), protocols) as unknown as SocketLike,
   getSession,
+  /** next-auth의 useSession().update()와 같은 요청(POST /api/auth/session, { csrfToken, data })을 훅 밖에서
+   * 보낸다 — 서버 jwt 콜백이 trigger "update"와 data의 refreshAccessToken 표시를 보고 갱신한다(auth.ts).
+   * 경로는 next-auth 기본값이다(next.config에 basePath 없음) — 앱을 하위 경로로 배포하면 함께 바꾼다. */
+  forceRefreshSession: async () => {
+    try {
+      const csrfToken = await getCsrfToken();
+      const response = await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csrfToken, data: { refreshAccessToken: true } }),
+      });
+      return response.ok ? ((await response.json()) as Session) : null;
+    } catch {
+      return null;
+    }
+  },
   signIn,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
@@ -331,7 +346,10 @@ export function openWsConnection(
    * authoritativeSocket이 새 소켓으로 바뀌므로, 그 뒤에 도착하는 옛 소켓의 close는 자동으로
    * 무시된다 — 그 소켓은 더 이상 "지금의 연결"이 아니기 때문이다.
    */
-  function scopedOptions(): { options: WsConnectionOptions; ref: { current: SocketLike | null } } {
+  function scopedOptions(): {
+    options: WsConnectionOptions;
+    ref: { current: SocketLike | null };
+  } {
     const ref: { current: SocketLike | null } = { current: null };
     return {
       ref,
@@ -392,6 +410,25 @@ export function openWsConnection(
     return session.accessToken;
   };
 
+  /** 선제 갱신 전용(이슈 #382). 서버에 갱신을 직접 요청한다 — 일반 조회는 서버의 마진 판정과 경계에서
+   * 엇갈려 옛 토큰을 돌려주곤 했다. 갱신에 실패해도(RefreshAccessTokenError·요청 실패) 곧바로
+   * 재로그인하지 않고 지금 연결을 유지한다('keep') — 옛 토큰이 아직 유효하고, 만료 뒤 재연결의 일반
+   * 조회(freshToken)가 다시 갱신을 시도해 그때도 실패면 재로그인한다. Keycloak 재시작·순간 끊김 한 번에
+   * 화면이 새로고침되고 진행 중 AI 턴이 취소되지 않게 한다. 세션 자체가 없으면(토큰 없음) 재로그인한다. */
+  const proactiveToken = async (): Promise<
+    { kind: 'token'; token: string } | { kind: 'keep' } | { kind: 'reauth' }
+  > => {
+    const session = await deps.forceRefreshSession();
+    if (session === null || session.error === 'RefreshAccessTokenError') {
+      return { kind: 'keep' };
+    }
+    if (!session.accessToken) {
+      await forceReauth();
+      return { kind: 'reauth' };
+    }
+    return { kind: 'token', token: session.accessToken };
+  };
+
   /**
    * 연결 하나를 열고 끊길 때까지 기다리되, 그 사이 액세스 토큰이 만료 마진 안으로 들어오면
    * 조용히 새 소켓으로 갈아탄다(이슈 #188). 새 소켓을 먼저 열어 옛 소켓과 잠깐 겹친 뒤(그래야
@@ -401,7 +438,8 @@ export function openWsConnection(
    * 매번 입퇴장 한 쌍이 뜬다.
    *
    * 갱신에 실패하면(새 소켓이 핸드셰이크에서 거부되는 등) 지금 연결을 그대로 두고 다음 만료
-   * 시점에 다시 시도한다 — 이 실패를 지금 연결의 장애로 취급하지 않는다.
+   * 시점에 다시 시도한다 — 이 실패를 지금 연결의 장애로 취급하지 않는다. 갈아타는 데 성공하면 새
+   * 소켓에도 같은 선제 갱신을 이어 건다(이슈 #382).
    *
    * onTokenSwapped는 호출부(run 루프)의 token 변수를 갱신한다 — 다음 바깥 루프 반복이
    * 새로 연결할 때도 이 최신 토큰을 쓰게 한다.
@@ -411,91 +449,106 @@ export function openWsConnection(
     onTokenSwapped: (token: string) => void,
   ): Promise<{ opened: boolean; code: number }> => {
     const { options: initialOptions, ref: initialRef } = scopedOptions();
-    const pending = connectOnce(initialToken, path, initialOptions, deps, (s) => {
-      socket = s;
-      initialRef.current = s;
-    });
-
-    const times = decodeJwtTimes(initialToken);
-    if (!times) {
-      // exp를 모르면 언제 갱신해야 할지 정할 수 없다 — 이 연결은 선제 갱신 없이 원래 종료를
-      // 그대로 기다린다.
-      return await pending;
-    }
-    const refreshDelayMs = Math.max(
-      0,
-      times.expiresAtMs - proactiveRefreshMarginMs(initialToken) - Date.now(),
-    );
-
-    const raced = await Promise.race([
-      pending.then((result) => ({ kind: 'closed' as const, result })),
-      realSleep(refreshDelayMs).then(() => ({ kind: 'refresh-due' as const })),
-    ]);
-    if (raced.kind === 'closed') {
-      return raced.result;
-    }
-
-    // 여기부터는 갱신 시점이 됐다는 뜻이다. 아직 핸드셰이크 중이면(isOpen이 아직 false)
-    // 포기하고 지금 연결의 원래 종료를 기다린다. auth.ts 쪽 리프레시가 아직 안 끝나 같은
-    // 토큰을 받으면 SAME_TOKEN_RETRY_DELAY_MS만큼 기다려 한 번 더 확인하고(이슈 #226), 그래도
-    // 같거나 새 소켓이 거부되면 그때 포기한다. 이 연결이 다음에 자연스럽게 재연결될 때 다시
-    // 시도된다 — 계속 재시도하려고 여기서 실 타이머로 바쁘게 돌 필요는 없다.
-    if (!isOpen || closedByCaller) {
-      return await pending;
-    }
-    let newToken = await freshToken();
-    if (newToken === null) return { opened: true, code: CLOSE_NORMAL };
-    if (newToken === initialToken) {
-      // next-auth의 리프레시가 아직 안 끝난 채로 옛 토큰이 나왔을 수 있다(이슈 #226) — 곧바로
-      // 포기하지 않고 짧게 한 번 더 확인한다.
-      await realSleep(SAME_TOKEN_RETRY_DELAY_MS);
-      newToken = await freshToken();
-      if (newToken === null) return { opened: true, code: CLOSE_NORMAL };
-      if (newToken === initialToken) {
-        return await pending;
-      }
-    }
-
-    const oldSocket = socket;
-    let swapJoined = false;
-    let signalSwapJoined: (() => void) | undefined;
-    const swapJoinedSignal = new Promise<void>((resolve) => {
-      signalSwapJoined = resolve;
-    });
-    // 새 소켓을 먼저 열어 옛 소켓과 겹친다(RoomSessionRegistry.add()가 "이미 다른 연결이
-    // 있다"로 보고 presence.join을 쏘지 않게 하려는 것 — 위 connectAndProactivelyRefresh
-    // 설명 참고). scopedOptions()로 별도 options를 받는 이유는 그 함수 설명 참고 — 옛 소켓의
-    // 뒤늦은 close가 이 소켓이 이미 연 isOpen을 되돌리지 못하게 한다.
-    const { options: swapOptions, ref: swapRef } = scopedOptions();
-    const swapPending = connectOnce(
-      newToken,
+    const pending = connectOnce(
+      initialToken,
       path,
-      swapOptions,
+      initialOptions,
       deps,
       (s) => {
         socket = s;
-        swapRef.current = s;
-      },
-      () => {
-        swapJoined = true;
-        signalSwapJoined?.();
+        initialRef.current = s;
       },
     );
-    // 새 소켓이 방에 등록되는지(성공) 또는 등록 전에 닫히는지(실패) 중 먼저 오는 쪽을 본다 —
-    // 실패면 swapPending 자체가 그 결과로 resolve되므로 별도 처리가 필요 없다. 열리기만 하고
-    // 등록 전인 때 옛 소켓을 닫으면 방이 비는 순간이 생긴다(connectOnce의 onJoined 설명).
-    await Promise.race([swapJoinedSignal, swapPending.then(() => undefined)]);
 
-    if (!swapJoined) {
-      console.info('[#188][ws] proactive refresh handshake rejected — keeping current connection');
-      socket = oldSocket;
-      return await pending;
+    let currentToken = initialToken;
+    let currentPending = pending;
+    for (;;) {
+      const times = decodeJwtTimes(currentToken);
+      if (!times) {
+        // exp를 모르면 언제 갱신해야 할지 정할 수 없다 — 이 연결은 선제 갱신 없이 원래 종료를
+        // 그대로 기다린다.
+        return await currentPending;
+      }
+      const refreshDelayMs = Math.max(
+        0,
+        times.expiresAtMs - proactiveRefreshMarginMs(currentToken) - Date.now(),
+      );
+
+      const raced = await Promise.race([
+        currentPending.then((result) => ({ kind: 'closed' as const, result })),
+        realSleep(refreshDelayMs).then(() => ({
+          kind: 'refresh-due' as const,
+        })),
+      ]);
+      if (raced.kind === 'closed') {
+        return raced.result;
+      }
+
+      // 여기부터는 갱신 시점이 됐다는 뜻이다. 아직 핸드셰이크 중이면(isOpen이 아직 false)
+      // 포기하고 지금 연결의 원래 종료를 기다린다. 서버에 갱신을 직접 요청하고(이슈 #382), 갱신에
+      // 실패하거나 같은 토큰이 오거나(허용 창 밖 — 브라우저·서버 시계 차가 큰 경우) 새 소켓이
+      // 거부되면 이 연결을 그대로 둔다. 만료 뒤 재연결이 다시 시도한다 — 계속 재시도하려고 여기서
+      // 실 타이머로 바쁘게 돌 필요는 없다.
+      if (!isOpen || closedByCaller) {
+        return await currentPending;
+      }
+      const refreshed = await proactiveToken();
+      if (refreshed.kind === 'reauth')
+        return { opened: true, code: CLOSE_NORMAL };
+      if (refreshed.kind === 'keep' || refreshed.token === currentToken) {
+        return await currentPending;
+      }
+      const newToken = refreshed.token;
+
+      const oldSocket = socket;
+      let swapJoined = false;
+      let signalSwapJoined: (() => void) | undefined;
+      const swapJoinedSignal = new Promise<void>((resolve) => {
+        signalSwapJoined = resolve;
+      });
+      // 새 소켓을 먼저 열어 옛 소켓과 겹친다(RoomSessionRegistry.add()가 "이미 다른 연결이
+      // 있다"로 보고 presence.join을 쏘지 않게 하려는 것 — 위 connectAndProactivelyRefresh
+      // 설명 참고). scopedOptions()로 별도 options를 받는 이유는 그 함수 설명 참고 — 옛 소켓의
+      // 뒤늦은 close가 이 소켓이 이미 연 isOpen을 되돌리지 못하게 한다.
+      const { options: swapOptions, ref: swapRef } = scopedOptions();
+      const swapPending = connectOnce(
+        newToken,
+        path,
+        swapOptions,
+        deps,
+        (s) => {
+          socket = s;
+          swapRef.current = s;
+        },
+        () => {
+          swapJoined = true;
+          signalSwapJoined?.();
+        },
+      );
+      // 새 소켓이 방에 등록되는지(성공) 또는 등록 전에 닫히는지(실패) 중 먼저 오는 쪽을 본다 —
+      // 실패면 swapPending 자체가 그 결과로 resolve되므로 별도 처리가 필요 없다. 열리기만 하고
+      // 등록 전인 때 옛 소켓을 닫으면 방이 비는 순간이 생긴다(connectOnce의 onJoined 설명).
+      await Promise.race([swapJoinedSignal, swapPending.then(() => undefined)]);
+
+      if (!swapJoined) {
+        console.info(
+          '[#188][ws] proactive refresh handshake rejected — keeping current connection',
+        );
+        socket = oldSocket;
+        return await currentPending;
+      }
+
+      console.info(
+        '[#188][ws] proactive refresh swapped to a new connection ahead of expiry',
+      );
+      oldSocket?.close(CLOSE_NORMAL);
+      onTokenSwapped(newToken);
+      // 갈아탄 새 소켓에도 다음 선제 갱신을 건다(이슈 #382). 전에는 여기서 새 소켓이 끊길 때까지
+      // 기다리기만 해, 새 토큰이 만료되면 서버가 4000으로 끊고 재연결해서야 다시 갱신했다 — 선제
+      // 갱신이 정확히 한 번 걸러 하드 만료로 끝나던 원인이다.
+      currentToken = newToken;
+      currentPending = swapPending;
     }
-
-    console.info('[#188][ws] proactive refresh swapped to a new connection ahead of expiry');
-    oldSocket?.close(CLOSE_NORMAL);
-    onTokenSwapped(newToken);
-    return await swapPending;
   };
 
   const run = async () => {
@@ -508,9 +561,12 @@ export function openWsConnection(
     let failedHandshakes = 0;
 
     while (token !== null && !closedByCaller) {
-      const { opened, code } = await connectAndProactivelyRefresh(token, (newToken) => {
-        token = newToken;
-      });
+      const { opened, code } = await connectAndProactivelyRefresh(
+        token,
+        (newToken) => {
+          token = newToken;
+        },
+      );
       if (closedByCaller || code === CLOSE_NORMAL) return;
 
       // [#181 계측] 매 루프 반복의 상태 — opened가 매번 true라 백오프/가드가 리셋되는지 확인용.

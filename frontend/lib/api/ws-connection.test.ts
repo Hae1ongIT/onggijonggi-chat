@@ -97,6 +97,8 @@ class FakeSocket implements SocketLike {
 interface Harness {
   sockets: FakeSocket[];
   getSession: ReturnType<typeof vi.fn>;
+  /** 선제 갱신이 서버에 직접 요청하는 갱신(이슈 #382). getSession과 같은 세션 큐에서 꺼낸다. */
+  forceRefreshSession: ReturnType<typeof vi.fn>;
   signIn: ReturnType<typeof vi.fn>;
   sleep: ReturnType<typeof vi.fn>;
   onMessage: ReturnType<typeof vi.fn>;
@@ -113,13 +115,17 @@ function harness(
   extraOptions: Omit<WsConnectionOptions, 'onMessage'> = {},
 ): Harness {
   const sockets: FakeSocket[] = [];
-  // 준비한 세션을 순서대로 하나씩 내주고, 다 떨어지면 마지막 것을 계속 돌려준다.
+  // 준비한 세션을 순서대로 하나씩 내주고, 다 떨어지면 마지막 것을 계속 돌려준다. 일반 조회(getSession)와
+  // 선제 갱신의 직접 요청(forceRefreshSession, 이슈 #382)이 같은 큐를 쓴다 — 선제 갱신 테스트는 두 번째
+  // 세션을 "갱신 결과"로 준비한다.
   let call = 0;
-  const getSession = vi.fn(async () => {
+  const nextSession = async () => {
     const session = sessions[Math.min(call, sessions.length - 1)];
     call += 1;
     return session;
-  });
+  };
+  const getSession = vi.fn(nextSession);
+  const forceRefreshSession = vi.fn(nextSession);
   const signIn = vi.fn(async () => undefined);
   const sleep = vi.fn(async () => undefined);
   const onMessage = vi.fn();
@@ -133,6 +139,7 @@ function harness(
         return socket;
       },
       getSession: getSession as never,
+      forceRefreshSession: forceRefreshSession as never,
       signIn: signIn as never,
       sleep,
     },
@@ -141,6 +148,7 @@ function harness(
   return {
     sockets,
     getSession,
+    forceRefreshSession,
     signIn,
     sleep,
     onMessage,
@@ -276,6 +284,7 @@ describe('openWsConnection', () => {
           accessToken: 't1',
           error: 'RefreshAccessTokenError',
         })) as never,
+        forceRefreshSession: vi.fn(async () => null),
         signIn: signIn as never,
         sleep: vi.fn(async () => undefined),
       },
@@ -579,58 +588,131 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     h.connection.close();
   });
 
-  it('갱신 시도에서 옛 토큰 그대로 받으면 곧바로 포기하지 않고 한 번 더 확인한다(이슈 #226)', async () => {
-    // next-auth의 리프레시가 아직 안 끝나 첫 재조회(call 1)가 옛 토큰을 그대로 돌려주는 경합을
-    // 흉내 낸다. 재시도(call 2)에서야 새 토큰이 나온다.
-    //
-    // jwtDueInMs(수명 6초)를 그대로 두 번 돌려주면, 이 재시도 로직과 무관한 #181 근-만료
-    // 가드(SHORT_LIVED_TOKENS_BEFORE_REAUTH)가 먼저 걸려 강제 재로그인으로 빠진다 — 잔여
-    // 수명이 그 가드의 하한(lifespan × 0.3)보다 매번 작기 때문이다. 수명을 3초로 낮춰 하한을
-    // 0.9초로 내리면, 남은 수명(margin 1초 안팎)이 하한보다 커서 그 가드를 안 건드리고 이
-    // 재시도 로직만 순수하게 검증할 수 있다.
-    function jwtDueInMsShortLifespan(delayMs: number): string {
-      const nowMs = Date.now();
-      const lifespanMs = 3_000;
-      const expiresAtMs = nowMs + 1_000 + delayMs;
-      const issuedAtMs = expiresAtMs - lifespanMs;
-      const payload = btoa(
-        JSON.stringify({ iat: issuedAtMs / 1000, exp: expiresAtMs / 1000 }),
-      );
-      return `h.${payload}.s`;
-    }
-    const dueToken = jwtDueInMsShortLifespan(150);
+  it('갱신 시점에는 일반 조회가 아니라 서버에 갱신을 직접 요청한다(이슈 #382)', async () => {
     const healthy = jwtWithLife(300);
     const h = harness(
-      [
-        { accessToken: dueToken },
-        { accessToken: dueToken },
-        { accessToken: healthy },
-      ],
+      [{ accessToken: jwtDueInMs(150) }, { accessToken: healthy }],
       { rooms: () => [THREAD_ID] },
     );
 
     const first = await h.waitForSocket(1);
     first.open();
-
-    // 첫 재조회가 옛 토큰과 같아 재시도 대기 중인 동안에는 아직 새 소켓을 만들지 않는다.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(h.sockets).toHaveLength(1);
-
     const second = await h.waitForSocket(2);
-    expect(second.protocols).toEqual(['access_token', healthy]);
-    expect(first.closedWith).toBeNull();
 
-    second.open();
-    second.message(
-      JSON.stringify({
-        type: 'presence.snapshot',
-        threadId: THREAD_ID,
-        participants: [],
-      }),
-    );
-    await vi.waitFor(() => expect(first.closedWith).toBe(1000));
+    // 처음 연결은 일반 조회 한 번, 갱신은 직접 요청 한 번이다.
+    expect(h.getSession).toHaveBeenCalledTimes(1);
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(1);
+    expect(second.protocols).toEqual(['access_token', healthy]);
 
     h.connection.close();
+  });
+
+  it('갈아탄 새 소켓도 다음 만료 마진에서 다시 선제 갱신한다(이슈 #382)', async () => {
+    // 전에는 갈아탄 뒤 새 소켓이 끊길 때까지 기다리기만 해, 두 번째 만료는 서버의 4000으로 끝났다.
+    const second = jwtDueInMs(400);
+    const third = jwtWithLife(300);
+    const h = harness(
+      [
+        { accessToken: jwtDueInMs(150) },
+        { accessToken: second },
+        { accessToken: third },
+      ],
+      { rooms: () => [] },
+    );
+
+    const s1 = await h.waitForSocket(1);
+    s1.open();
+    const s2 = await h.waitForSocket(2);
+    s2.open();
+    await vi.waitFor(() => expect(s1.closedWith).toBe(1000));
+
+    // 새 소켓(s2)의 토큰도 곧 만료 마진에 들어오므로, 끊기기 전에 한 번 더 갈아탄다.
+    const s3 = await h.waitForSocket(3);
+    expect(s3.protocols).toEqual(['access_token', third]);
+    s3.open();
+    await vi.waitFor(() => expect(s2.closedWith).toBe(1000));
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
+    expect(h.getSession).toHaveBeenCalledTimes(1);
+
+    h.connection.close();
+  });
+
+  it('직접 요청한 갱신이 옛 토큰 그대로면 다시 묻지 않고 지금 연결을 유지한다(이슈 #382)', async () => {
+    // 허용 창 밖(브라우저·서버 시계 차가 큰 경우)이라 서버가 갱신하지 않은 상황이다. #226의 200ms 뒤
+    // 재시도는 없앴다 — 강제 갱신 뒤에는 "서버 갱신이 진행 중인 틈"이 없다.
+    const due = jwtDueInMs(150);
+    const h = harness([{ accessToken: due }, { accessToken: due }]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    await vi.waitFor(() =>
+      expect(h.forceRefreshSession).toHaveBeenCalledTimes(1),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(1);
+    expect(h.sockets).toHaveLength(1);
+    expect(first.closedWith).toBeNull();
+    expect(h.connection.send('still-alive')).toBe(true);
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    h.connection.close();
+  });
+
+  it.each([
+    [
+      '리프레시 실패(RefreshAccessTokenError)',
+      { accessToken: 'old', error: 'RefreshAccessTokenError' as const },
+    ],
+    ['요청 실패(null)', null],
+  ])(
+    '직접 요청한 갱신이 %s면 재로그인하지 않고 지금 연결을 유지한다(이슈 #382)',
+    async (_label, refreshed) => {
+      const h = harness([{ accessToken: jwtDueInMs(150) }, refreshed]);
+
+      const first = await h.waitForSocket(1);
+      first.open();
+      await vi.waitFor(() =>
+        expect(h.forceRefreshSession).toHaveBeenCalledTimes(1),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(h.signIn).not.toHaveBeenCalled();
+      expect(h.sockets).toHaveLength(1);
+      expect(first.closedWith).toBeNull();
+      expect(h.connection.send('still-alive')).toBe(true);
+
+      h.connection.close();
+    },
+  );
+
+  it('직접 요청한 갱신에 토큰이 없으면(세션 없음) 재로그인한다(이슈 #382)', async () => {
+    const h = harness([{ accessToken: jwtDueInMs(150) }, {}]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+
+    await vi.waitFor(() => expect(h.signIn).toHaveBeenCalledWith('keycloak'));
+  });
+
+  it('갱신 실패로 연결을 유지했다가 서버가 만료로 끊으면, 재연결의 일반 조회가 실패를 보고 재로그인한다(이슈 #382)', async () => {
+    const failed = {
+      accessToken: 'old',
+      error: 'RefreshAccessTokenError' as const,
+    };
+    const h = harness([{ accessToken: jwtDueInMs(150) }, failed, failed]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    await vi.waitFor(() =>
+      expect(h.forceRefreshSession).toHaveBeenCalledTimes(1),
+    );
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    first.serverClose(4000);
+
+    await vi.waitFor(() => expect(h.signIn).toHaveBeenCalledWith('keycloak'));
+    expect(h.getSession).toHaveBeenCalledTimes(2);
   });
 
   it('구독한 방이 여럿이면 방마다 답(스냅샷이든 거부든)이 다 와야 옛 소켓을 닫는다', async () => {
