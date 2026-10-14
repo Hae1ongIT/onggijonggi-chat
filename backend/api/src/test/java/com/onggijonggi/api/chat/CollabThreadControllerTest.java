@@ -305,6 +305,54 @@ class CollabThreadControllerTest {
 		assertThat(body).doesNotContain("\"커서 그 자체\"");
 	}
 
+	/**
+	* 끊긴 동안 온 것이 AI·시스템 메시지뿐이어도 따라잡는다(이슈 #381) — 답변 도중 끊겼다 돌아온 경우다.
+	* 사람 메시지가 없으면 작성자 조회 맵이 비어 있는데, 그때도 500이 아니라 그 메시지들을 돌려줘야 한다.
+	*/
+	@Test
+	void catchesUpWhenOnlyAgentAndSystemMessagesArrivedAfterTheCursor() {
+		UUID thrId = rooms.openRoom("agentonly-owner");
+		UUID ownerId = userIdentityService.resolveOrProvision("agentonly-owner").block();
+		ThrMbr ownerMembership = thrMbrRepository.findByThrIdAndUserIdAndStatus(thrId, ownerId, ThrMbrStatus.ACTIVE)
+				.orElseThrow();
+		msgRepository.save(Msg.human(UUID.randomUUID(), thrId, 0, ownerMembership.getId(), "@AI 요약해줘"));
+		msgRepository.save(Msg.completedAgent(UUID.randomUUID(), thrId, 1, "끊긴 동안 끝난 답변"));
+		msgRepository.save(Msg.system(thrId, 2, "끊긴 동안 온 시스템 알림"));
+
+		String body = restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/messages?afterSeq=0", thrId)
+				.header(HttpHeaders.AUTHORIZATION,
+						"Bearer " + TestJwtSupport.signedJwt("agentonly-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody(String.class)
+				.returnResult()
+				.getResponseBody();
+
+		assertThat(body).contains("\"끊긴 동안 끝난 답변\"").contains("\"끊긴 동안 온 시스템 알림\"");
+		assertThat(body).doesNotContain("\"@AI 요약해줘\"");
+	}
+
+	/** 메시지가 AI·시스템뿐인 방에 처음 들어갈 때(커서 없음)도 목록이 나온다(이슈 #381). */
+	@Test
+	void listsARoomWhoseMessagesAreOnlyFromAgentAndSystem() {
+		UUID thrId = rooms.openRoom("agentonly-entry-owner");
+		msgRepository.save(Msg.system(thrId, 0, "방이 만들어졌습니다"));
+		msgRepository.save(Msg.completedAgent(UUID.randomUUID(), thrId, 1, "AI만 남은 방"));
+
+		String body = restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/messages", thrId)
+				.header(HttpHeaders.AUTHORIZATION,
+						"Bearer " + TestJwtSupport.signedJwt("agentonly-entry-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody(String.class)
+				.returnResult()
+				.getResponseBody();
+
+		assertThat(body).contains("\"방이 만들어졌습니다\"").contains("\"AI만 남은 방\"");
+	}
+
 	/** 커서를 주지 않으면 전부 준다 — 방 진입 때 쓰는 모습이다(이슈 #190). */
 	@Test
 	void returnsEveryMessageWhenNoCursorIsGiven() {
