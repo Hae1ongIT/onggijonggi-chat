@@ -1304,10 +1304,41 @@ public class ThreadMessageDispatcher {
 			return terminalClaimed.compareAndSet(false, true);
 		}
 
+		/**
+		* 이 턴의 도구 실행 시작·끝을 방에 활동 프레임으로 알린다(이슈 #397). 이미 끝난 턴(완료·중지·오류)의 늦은
+		* 알림은 보내지 않는다 — 끝난 턴에서도 이미 요청된 도구는 끝까지 돌기 때문이다(#390). 진행 표시는 부가
+		* 기능이라 방송이 실패해도 턴을 깨지 않는다.
+		*/
+		private final class ActivityBroadcaster implements ToolExecutionListener {
+
+			@Override
+			public void started(String toolName, String input) {
+				ToolActivity.of(toolName, input, json).ifPresent(activity -> broadcast(activity, true));
+			}
+
+			@Override
+			public void finished(ToolExecution execution) {
+				ToolActivity.of(execution.toolName(), execution.input(), json)
+						.ifPresent(activity -> broadcast(activity, false));
+			}
+
+			private void broadcast(ToolActivity activity, boolean active) {
+				if (terminalClaimed.get()) return;
+				try {
+					roomSessionRegistry.broadcastIfCurrent(turn.threadId(), turn.roomGeneration(),
+							new ChatActivityFrame(turn.threadId(), msgId, turn.turnId(), activity.kind(),
+									activity.target(), active, turn.agent()));
+				} catch (RuntimeException error) {
+					log.debug("도구 활동 방송 실패 threadId={} traceId={}", turn.threadId(), turn.traceId(), error);
+				}
+			}
+		}
+
 		ActiveTurn(PendingTurn turn, SeqBlock seqBlock) {
 			this.turn = turn;
 			this.terminalPersisted = turn.terminalPersisted();
-			this.toolExecutions = new TurnToolExecutions(turn.threadId(), turn.traceId(), List.of());
+			this.toolExecutions = new TurnToolExecutions(turn.threadId(), turn.traceId(),
+					List.of(new ActivityBroadcaster()));
 			if (turn.reservedTurn() != null) {
 				// DIRECT — PENDING AGENT는 DirectChatTurnService가 이미 만들어뒀다(이슈 #162).
 				// 새로 만들지 않고 그 msgId·seq를 그대로 쓴다.

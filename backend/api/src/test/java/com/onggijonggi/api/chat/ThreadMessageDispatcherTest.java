@@ -25,6 +25,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.OngoingStubbing;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.DefaultToolDefinition;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -139,6 +142,59 @@ class ThreadMessageDispatcherTest {
 		verify(llm, timeout(1000)).streamChat(request.capture());
 		assertThat(request.getValue().messages()).extracting(ChatMessage::content)
 				.containsExactly("위험할 수 있는 발화가 감지되었습니다.", "요약해줘");
+	}
+
+	/**
+	* 도구가 실행되는 동안 방에 활동 프레임(시작 → 끝)이 가고, 현재 시각 도구는 알리지 않는다(이슈 #397).
+	* 턴이 끝난 뒤 늦게 끝난 도구는 알리지 않는다.
+	*/
+	@Test
+	void broadcastsToolActivityWhileTheTurnRuns() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		AtomicReference<ToolCallback> search = new AtomicReference<>();
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			search.set(toolExecutions.wrap(new ToolCallback[] { fakeTool("webSearch") })[0]);
+			search.get().call("{\"query\":\"서울 날씨\"}");
+			toolExecutions.wrap(new ToolCallback[] { fakeTool("currentDateTime") })[0].call("{}");
+			return Flux.just("답");
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 5);
+		List<ChatActivityFrame> activities = room.frames.stream()
+				.filter(ChatActivityFrame.class::isInstance).map(ChatActivityFrame.class::cast).toList();
+		assertThat(activities).extracting(ChatActivityFrame::kind, ChatActivityFrame::target, ChatActivityFrame::active)
+				.containsExactly(tuple("WEB_SEARCH", "서울 날씨", true), tuple("WEB_SEARCH", "서울 날씨", false));
+		ChatAnswerFrame done = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast).filter(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.findFirst().orElseThrow();
+		assertThat(activities.get(0).msgId()).isEqualTo(done.msgId());
+
+		awaitIdle(room.registry, room.threadId);
+		int before = room.frames.size();
+		search.get().call("{\"query\":\"늦은 검색\"}");
+		// 방 프레임은 대기열로 나가므로(이슈 #405) 다 빠질 때까지 기다린 뒤 본다.
+		awaitIdle(room.registry, room.threadId);
+		assertThat(room.frames).hasSize(before);
+	}
+
+	private static ToolCallback fakeTool(String name) {
+		return new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name(name)
+						.description(name).inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String toolInput) {
+				return "결과";
+			}
+		};
 	}
 
 	@Test

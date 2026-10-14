@@ -12,6 +12,7 @@ import {
   type RoomState,
   applyFrame,
   applyHistory,
+  clearActivity,
   clearRoomError,
   dismissNotice,
   initialRoomState,
@@ -891,5 +892,81 @@ describe('재접속 따라잡기 커서(#190)', () => {
     const caughtUp = applyHistory(entered, [item('b', 97, '둘')]);
     expect(chats(caughtUp).map((m) => m.seq)).toEqual([0, 97]);
     expect(caughtUp.lastSeq).toBe(97);
+  });
+});
+
+describe('applyFrame - chat.activity(이슈 #397)', () => {
+  function activity(
+    active: boolean,
+    kind = 'WEB_SEARCH',
+    target: string | null = '서울 날씨',
+    msgId = 'agent-msg-1',
+  ): WsFrame {
+    return {
+      type: 'chat.activity',
+      threadId: THREAD,
+      msgId,
+      turnId: null,
+      kind,
+      target,
+      active,
+      agent: null,
+    };
+  }
+
+  it('시작하면 들고, 끝나면 지운다', () => {
+    const started = fold([activity(true)]);
+    expect(started.activity).toEqual({
+      msgId: 'agent-msg-1',
+      kind: 'WEB_SEARCH',
+      target: '서울 날씨',
+      agent: null,
+    });
+    expect(fold([activity(false)], started).activity).toBeNull();
+  });
+
+  it('다음 도구가 시작하면 그 도구로 바뀐다 — 지금 도는 것만 둔다', () => {
+    const state = fold([
+      activity(true, 'DOCUMENT_SEARCH', '연장근로'),
+      activity(false, 'DOCUMENT_SEARCH', '연장근로'),
+      activity(true, 'DOCUMENT_REVISE', '규정.docx'),
+    ]);
+    expect(state.activity?.kind).toBe('DOCUMENT_REVISE');
+    expect(state.activity?.target).toBe('규정.docx');
+  });
+
+  it('다른 턴의 끝 알림은 무시한다', () => {
+    const state = fold([
+      activity(true),
+      activity(false, 'WEB_SEARCH', null, 'agent-msg-2'),
+    ]);
+    expect(state.activity?.msgId).toBe('agent-msg-1');
+  });
+
+  it('그 턴의 답변이 끝나면(완료·중지) 함께 지운다', () => {
+    expect(
+      fold([activity(true), answer('답', 'streaming')]).activity,
+    ).not.toBeNull();
+    expect(fold([activity(true), answer('', 'done')]).activity).toBeNull();
+    expect(fold([activity(true), answer('', 'cancelled')]).activity).toBeNull();
+  });
+
+  it('종결 오류는 답변 말풍선이 없어도 지운다', () => {
+    const state = fold([
+      activity(true),
+      {
+        type: 'error',
+        threadId: THREAD,
+        code: 'MODEL_UNAVAILABLE',
+        message: 'm',
+        traceId: 't',
+      },
+    ]);
+    expect(state.activity).toBeNull();
+  });
+
+  it('연결이 끊기면 clearActivity로 지운다', () => {
+    expect(clearActivity(fold([activity(true)])).activity).toBeNull();
+    expect(clearActivity(initialRoomState)).toBe(initialRoomState);
   });
 });

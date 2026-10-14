@@ -34,6 +34,7 @@ import {
   type ThreadMessageItem,
   fetchThreadMessages,
 } from '@/lib/api/thread-history';
+import { activityLabel } from '@/lib/chat/activity';
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
 import { type RoomMessage, isMembershipNotice } from '@/lib/chat/room-state';
 import { useRoom } from '@/lib/chat/use-room';
@@ -525,6 +526,14 @@ function ChatSession({
               failedMessageIds={failedMessageIds}
               onResendFailedMessage={handleResendFailedMessage}
               onAppendTurn={sendTurn}
+              activityLabel={
+                room.state.activity
+                  ? activityLabel(
+                      room.state.activity.kind,
+                      room.state.activity.target,
+                    )
+                  : null
+              }
             />
 
             {isInaccessible && (

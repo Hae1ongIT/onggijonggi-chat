@@ -15,7 +15,7 @@ import { memo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { MessageAttachments } from './attachments';
 import { CitationsPanel, type CitationsState } from './citations-panel';
-import { PencilEditIcon, SparklesIcon } from './icons';
+import { LoaderIcon, PencilEditIcon, SparklesIcon } from './icons';
 import { Markdown } from './markdown';
 import { MessageActions } from './message-actions';
 import { MessageEditor } from './message-editor';
@@ -196,7 +196,8 @@ export const PreviewMessage = memo(
   },
 );
 
-export const ThinkingMessage = () => {
+/** 답변 첫 조각을 기다리는 동안의 자리. AI가 도구를 실행 중이면 그 문구를 대신 보인다(이슈 #397). */
+export const ThinkingMessage = ({ label }: { label?: string | null }) => {
   const role = 'assistant';
 
   return (
@@ -220,10 +221,30 @@ export const ThinkingMessage = () => {
 
         <div className="flex flex-col gap-2 w-full">
           <div className="flex flex-col gap-4 text-muted-foreground">
-            Thinking...
+            {label ?? 'Thinking...'}
           </div>
         </div>
       </div>
     </motion.div>
   );
 };
+
+/** 흐르는 AI 답변 아래에 붙는 도구 실행 중 한 줄(이슈 #397). */
+export const ActivityLine = ({
+  label,
+  className = 'w-full mx-auto max-w-3xl px-4',
+}: {
+  label: string;
+  /** 자리 잡기. 1:1 목록 폭이 기본이고, 협업방처럼 말풍선 안에 넣을 때는 비운다. */
+  className?: string;
+}) => (
+  <div
+    className={`${className} flex items-center gap-2 text-sm text-muted-foreground`}
+    aria-live="polite"
+  >
+    <span className="animate-spin">
+      <LoaderIcon size={14} />
+    </span>
+    {label}
+  </div>
+);

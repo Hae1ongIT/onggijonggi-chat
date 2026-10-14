@@ -39,6 +39,8 @@ import { fetchCollabThreads } from '@/lib/api/collab';
 import type { RoomMessage, RoomMembershipNotice } from '@/lib/chat/room-state';
 import { isForbidden, isMembershipNotice } from '@/lib/chat/room-state';
 import { typingLabel } from '@/lib/chat/typing';
+import { activityLabel } from '@/lib/chat/activity';
+import { ActivityLine } from '@/components/message';
 import {
   type RoomConnection,
   useCollabRoom,
@@ -80,7 +82,14 @@ function agentLabel(agent: RoomMessage['agent']): string {
 
 /** 사람 메시지는 보낸 사람 이름을, AI 답변은 "AI" 또는 역할별 에이전트 이름을 머리에 달고
  * 배경으로 구분한다(이슈 #357). */
-function MessageRow({ message }: { message: RoomMessage }) {
+function MessageRow({
+  message,
+  activity = null,
+}: {
+  message: RoomMessage;
+  /** 이 답변의 턴이 지금 실행 중인 도구의 문구(이슈 #397). */
+  activity?: string | null;
+}) {
   const isAi = message.from === null;
   return (
     <div
@@ -109,6 +118,7 @@ function MessageRow({ message }: { message: RoomMessage }) {
               }}
             />
           )}
+          {activity && <ActivityLine label={activity} className="" />}
         </>
       ) : (
         <>
@@ -272,9 +282,38 @@ export function CollabRoom({ threadId }: { threadId: string }) {
                 isMembershipNotice(entry) ? (
                   <MembershipRow key={entry.id} notice={entry} />
                 ) : (
-                  <MessageRow key={entry.id} message={entry} />
+                  <MessageRow
+                    key={entry.id}
+                    message={entry}
+                    activity={
+                      state.activity?.msgId === entry.id
+                        ? activityLabel(
+                            state.activity.kind,
+                            state.activity.target,
+                          )
+                        : null
+                    }
+                  />
                 ),
               )}
+              {/* 답변 말풍선이 생기기 전에 도구가 돌면 AI 자리를 만들어 문구를 보인다(이슈 #397). */}
+              {state.activity &&
+                !state.messages.some(
+                  (entry) => entry.id === state.activity?.msgId,
+                ) && (
+                  <div className="flex flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      {agentLabel(state.activity.agent)}
+                    </span>
+                    <ActivityLine
+                      className=""
+                      label={activityLabel(
+                        state.activity.kind,
+                        state.activity.target,
+                      )}
+                    />
+                  </div>
+                )}
               <div ref={endRef} className="min-h-6 shrink-0" />
             </div>
 
