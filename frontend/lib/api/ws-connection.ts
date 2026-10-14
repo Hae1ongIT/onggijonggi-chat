@@ -41,7 +41,11 @@
 
 import type { Session } from 'next-auth';
 import { getCsrfToken, getSession, signIn } from 'next-auth/react';
-import { decodeJwtTimes, proactiveRefreshMarginMs } from '../auth/refresh-gate';
+import {
+  FORCED_REFRESH_REQUEST,
+  decodeJwtTimes,
+  proactiveRefreshMarginMs,
+} from '../auth/refresh-gate';
 import { WS_PATH, bffWsUrl } from './config';
 
 /** JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지. 파싱 불가·exp 없음이면 null.
@@ -134,26 +138,29 @@ interface WsConnectionDeps {
   sleep: (ms: number) => Promise<void>;
 }
 
+/** next-auth의 useSession().update()와 같은 요청(POST /api/auth/session, { csrfToken, data })을 훅 밖에서
+ * 보낸다 — 서버 jwt 콜백이 trigger "update"와 data의 갱신 요청 표시를 보고 갱신한다(auth.ts, 이슈 #382).
+ * 경로는 next-auth 기본값이다(next.config에 basePath 없음) — 앱을 하위 경로로 배포하면 함께 바꾼다.
+ * 실패(응답 오류·네트워크 오류)는 null. */
+export async function requestForcedRefresh(): Promise<Session | null> {
+  try {
+    const csrfToken = await getCsrfToken();
+    const response = await fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csrfToken, data: FORCED_REFRESH_REQUEST }),
+    });
+    return response.ok ? ((await response.json()) as Session) : null;
+  } catch {
+    return null;
+  }
+}
+
 const defaultDeps: WsConnectionDeps = {
   createSocket: (protocols, path) =>
     new WebSocket(bffWsUrl(path), protocols) as unknown as SocketLike,
   getSession,
-  /** next-auth의 useSession().update()와 같은 요청(POST /api/auth/session, { csrfToken, data })을 훅 밖에서
-   * 보낸다 — 서버 jwt 콜백이 trigger "update"와 data의 refreshAccessToken 표시를 보고 갱신한다(auth.ts).
-   * 경로는 next-auth 기본값이다(next.config에 basePath 없음) — 앱을 하위 경로로 배포하면 함께 바꾼다. */
-  forceRefreshSession: async () => {
-    try {
-      const csrfToken = await getCsrfToken();
-      const response = await fetch('/api/auth/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ csrfToken, data: { refreshAccessToken: true } }),
-      });
-      return response.ok ? ((await response.json()) as Session) : null;
-    } catch {
-      return null;
-    }
-  },
+  forceRefreshSession: requestForcedRefresh,
   signIn,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
@@ -404,9 +411,10 @@ export function openWsConnection(
 
   /** 선제 갱신 전용(이슈 #382). 서버에 갱신을 직접 요청한다 — 일반 조회는 서버의 마진 판정과 경계에서
    * 엇갈려 옛 토큰을 돌려주곤 했다. 갱신에 실패해도(RefreshAccessTokenError·요청 실패) 곧바로
-   * 재로그인하지 않고 지금 연결을 유지한다('keep') — 옛 토큰이 아직 유효하고, 만료 뒤 재연결의 일반
-   * 조회(freshToken)가 다시 갱신을 시도해 그때도 실패면 재로그인한다. Keycloak 재시작·순간 끊김 한 번에
-   * 화면이 새로고침되고 진행 중 AI 턴이 취소되지 않게 한다. 세션 자체가 없으면(토큰 없음) 재로그인한다. */
+   * 재로그인하지 않고 지금 연결을 유지한다('keep') — 옛 토큰이 아직 유효하고, 만료 전에 한 번 더
+   * 시도하며, 만료 뒤 재연결의 일반 조회(freshToken)가 다시 갱신을 시도해 그때도 실패면 재로그인한다.
+   * Keycloak 재시작·순간 끊김 한 번에 화면이 곧바로 새로고침되지 않게 한다. 세션 자체가 없으면(토큰
+   * 없음) 재로그인한다. */
   const proactiveToken = async (): Promise<
     { kind: 'token'; token: string } | { kind: 'keep' } | { kind: 'reauth' }
   > => {
@@ -429,8 +437,8 @@ export function openWsConnection(
    * presence.leave를 쏘지 않는다) — 겹치는 순간이 없으면 이 서버 쪽 판정을 그대로 못 써서
    * 매번 입퇴장 한 쌍이 뜬다.
    *
-   * 갱신에 실패하면(새 소켓이 핸드셰이크에서 거부되는 등) 지금 연결을 그대로 두고 다음 만료
-   * 시점에 다시 시도한다 — 이 실패를 지금 연결의 장애로 취급하지 않는다. 갈아타는 데 성공하면 새
+   * 갱신에 실패하면(새 소켓이 핸드셰이크에서 거부되는 등) 지금 연결을 그대로 두고 만료 전에 한 번
+   * 더 시도한다 — 이 실패를 지금 연결의 장애로 취급하지 않는다. 갈아타는 데 성공하면 새
    * 소켓에도 같은 선제 갱신을 이어 건다(이슈 #382).
    *
    * onTokenSwapped는 호출부(run 루프)의 token 변수를 갱신한다 — 다음 바깥 루프 반복이
@@ -454,6 +462,8 @@ export function openWsConnection(
 
     let currentToken = initialToken;
     let currentPending = pending;
+    // 지금 토큰으로 한 갱신이 실패해 다시 시도할 시각. null이면 아직 다시 시도하지 않았다.
+    let retryAtMs: number | null = null;
     for (;;) {
       const times = decodeJwtTimes(currentToken);
       if (!times) {
@@ -463,8 +473,18 @@ export function openWsConnection(
       }
       const refreshDelayMs = Math.max(
         0,
-        times.expiresAtMs - proactiveRefreshMarginMs(currentToken) - Date.now(),
+        (retryAtMs ??
+          times.expiresAtMs - proactiveRefreshMarginMs(currentToken)) -
+          Date.now(),
       );
+      /** 갱신이 실패했을 때 만료 전에 한 번 더 시도할 수 있으면 그 시각을 잡는다. 이미 한 번 다시
+       * 시도했거나 만료가 지났으면 false — 그때는 지금 연결로 버티다 만료 뒤 재연결에 맡긴다. */
+      const scheduleRetry = (): boolean => {
+        const remainingMs = times.expiresAtMs - Date.now();
+        if (retryAtMs !== null || remainingMs <= 0) return false;
+        retryAtMs = Date.now() + remainingMs / 2;
+        return true;
+      };
 
       const raced = await Promise.race([
         currentPending.then((result) => ({ kind: 'closed' as const, result })),
@@ -479,8 +499,9 @@ export function openWsConnection(
       // 여기부터는 갱신 시점이 됐다는 뜻이다. 아직 핸드셰이크 중이면(isOpen이 아직 false)
       // 포기하고 지금 연결의 원래 종료를 기다린다. 서버에 갱신을 직접 요청하고(이슈 #382), 갱신에
       // 실패하거나 같은 토큰이 오거나(허용 창 밖 — 브라우저·서버 시계 차가 큰 경우) 새 소켓이
-      // 거부되면 이 연결을 그대로 둔다. 만료 뒤 재연결이 다시 시도한다 — 계속 재시도하려고 여기서
-      // 실 타이머로 바쁘게 돌 필요는 없다.
+      // 거부되면 남은 시간의 절반 뒤에 한 번만 더 시도한다 — 옛 토큰이 만료되면 서버가 4000으로
+      // 끊고, 방에 혼자면 그때 진행 중인 AI 턴이 취소되기 때문이다. 그래도 안 되면 이 연결을 그대로
+      // 두고 만료 뒤 재연결에 맡긴다 — Keycloak이 죽어 있는 동안 계속 두드리지 않는다.
       if (!isOpen || closedByCaller) {
         return await currentPending;
       }
@@ -488,6 +509,7 @@ export function openWsConnection(
       if (refreshed.kind === 'reauth')
         return { opened: true, code: CLOSE_NORMAL };
       if (refreshed.kind === 'keep' || refreshed.token === currentToken) {
+        if (scheduleRetry()) continue;
         return await currentPending;
       }
       const newToken = refreshed.token;
@@ -524,6 +546,7 @@ export function openWsConnection(
 
       if (!swapJoined) {
         socket = oldSocket;
+        if (scheduleRetry()) continue;
         return await currentPending;
       }
 
@@ -534,6 +557,7 @@ export function openWsConnection(
       // 갱신이 정확히 한 번 걸러 하드 만료로 끝나던 원인이다.
       currentToken = newToken;
       currentPending = swapPending;
+      retryAtMs = null;
     }
   };
 

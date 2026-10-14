@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isForcedRefreshRequest } from '../auth/refresh-gate';
 import {
   CLOSE_TOKEN_EXPIRED,
   HEARTBEAT_INTERVAL_MS,
@@ -7,7 +8,15 @@ import {
   type WsConnectionOptions,
   openWsConnection,
   reconnectBackoffMs,
+  requestForcedRefresh,
 } from './ws-connection';
+
+// requestForcedRefresh가 CSRF 토큰을 받는 곳. 나머지 next-auth/react는 실물을 둔다 — 연결 테스트는
+// getSession·signIn을 deps로 끼워 넣어 쓰지 않는다.
+vi.mock('next-auth/react', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('next-auth/react')>()),
+  getCsrfToken: vi.fn(async () => 'csrf-1'),
+}));
 
 const THREAD_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_THREAD_ID = '22222222-2222-4222-8222-222222222222';
@@ -637,20 +646,21 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     h.connection.close();
   });
 
-  it('직접 요청한 갱신이 옛 토큰 그대로면 다시 묻지 않고 지금 연결을 유지한다(이슈 #382)', async () => {
+  it('직접 요청한 갱신이 옛 토큰 그대로면 만료 전에 한 번만 더 묻고 지금 연결을 유지한다(이슈 #382)', async () => {
     // 허용 창 밖(브라우저·서버 시계 차가 큰 경우)이라 서버가 갱신하지 않은 상황이다. #226의 200ms 뒤
-    // 재시도는 없앴다 — 강제 갱신 뒤에는 "서버 갱신이 진행 중인 틈"이 없다.
+    // 재시도는 없앴다 — 강제 갱신 뒤에는 "서버 갱신이 진행 중인 틈"이 없다. 다시 묻는 것은 남은
+    // 시간의 절반 뒤 한 번뿐이다.
     const due = jwtDueInMs(150);
     const h = harness([{ accessToken: due }, { accessToken: due }]);
 
     const first = await h.waitForSocket(1);
     first.open();
     await vi.waitFor(() =>
-      expect(h.forceRefreshSession).toHaveBeenCalledTimes(1),
+      expect(h.forceRefreshSession).toHaveBeenCalledTimes(2),
     );
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    expect(h.forceRefreshSession).toHaveBeenCalledTimes(1);
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
     expect(h.sockets).toHaveLength(1);
     expect(first.closedWith).toBeNull();
     expect(h.connection.send('still-alive')).toBe(true);
@@ -685,6 +695,29 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
       h.connection.close();
     },
   );
+
+  it('직접 요청한 갱신이 실패해도 만료 전에 한 번 더 시도해 성공하면 갈아탄다(이슈 #382)', async () => {
+    // Keycloak 순간 끊김. 다시 시도하지 않으면 옛 토큰 만료에 서버가 4000으로 끊고, 방에 혼자면
+    // 진행 중인 AI 턴이 취소된다.
+    const healthy = jwtWithLife(300);
+    const h = harness([
+      { accessToken: jwtDueInMs(150) },
+      null,
+      { accessToken: healthy },
+    ]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    const second = await h.waitForSocket(2);
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
+    expect(second.protocols).toEqual(['access_token', healthy]);
+    second.open();
+
+    await vi.waitFor(() => expect(first.closedWith).toBe(1000));
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    h.connection.close();
+  });
 
   it('직접 요청한 갱신에 토큰이 없으면(세션 없음) 재로그인한다(이슈 #382)', async () => {
     const h = harness([{ accessToken: jwtDueInMs(150) }, {}]);
@@ -787,6 +820,11 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     expect(first.closedWith).toBeNull();
     expect(h.connection.send('still-alive')).toBe(true);
 
+    // 만료 전에 한 번 더 갱신해 새 소켓을 연다(이슈 #382).
+    const third = await h.waitForSocket(3);
+    expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
+    expect(third.protocols[1]).toBe(second.protocols[1]);
+
     h.connection.close();
   });
 
@@ -853,5 +891,49 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     expect(h.sockets).toHaveLength(1);
 
     h.connection.close();
+  });
+});
+
+describe('requestForcedRefresh', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('next-auth 세션 update와 같은 POST를 보내고, 서버 jwt 콜백은 그 data를 갱신 요청으로 읽는다(이슈 #382)', async () => {
+    const session = { accessToken: 'new', expires: '' };
+    const fetchMock = vi.fn(async () => Response.json(session));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(requestForcedRefresh()).resolves.toEqual(session);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe('/api/auth/session');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string);
+    expect(body.csrfToken).toBe('csrf-1');
+    // 보내는 쪽과 auth.ts가 같은 판정을 쓴다 — 한쪽만 바뀌면 여기서 깨진다.
+    expect(isForcedRefreshRequest('update', body.data)).toBe(true);
+  });
+
+  it('응답이 실패면 null을 돌려준다', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 500 })),
+    );
+    await expect(requestForcedRefresh()).resolves.toBeNull();
+  });
+
+  it('네트워크 오류면 던지지 않고 null을 돌려준다', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('failed to fetch');
+      }),
+    );
+    await expect(requestForcedRefresh()).resolves.toBeNull();
   });
 });

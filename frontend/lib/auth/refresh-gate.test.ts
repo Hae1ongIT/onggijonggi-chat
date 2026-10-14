@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { allowsForcedRefresh, needsProactiveRefresh } from './refresh-gate';
+import {
+  FORCED_REFRESH_REQUEST,
+  allowsForcedRefresh,
+  isForcedRefreshRequest,
+  needsProactiveRefresh,
+} from './refresh-gate';
 
 const NOW = 1_700_000_000_000;
 
@@ -139,6 +144,33 @@ describe('allowsForcedRefresh', () => {
           needsProactiveRefresh(token, expiresAtMs, now),
         );
       }
+    }
+  });
+});
+
+describe('isForcedRefreshRequest', () => {
+  it('세션 update에 갱신 요청 표시가 있을 때만 참이다(이슈 #382)', () => {
+    expect(isForcedRefreshRequest('update', FORCED_REFRESH_REQUEST)).toBe(true);
+    expect(isForcedRefreshRequest('update', { refreshAccessToken: true })).toBe(
+      true,
+    );
+  });
+
+  it('update가 아니거나 다른 용도의 update면 갱신 요청으로 읽지 않는다', () => {
+    expect(isForcedRefreshRequest(undefined, FORCED_REFRESH_REQUEST)).toBe(
+      false,
+    );
+    expect(isForcedRefreshRequest('signIn', FORCED_REFRESH_REQUEST)).toBe(
+      false,
+    );
+    for (const data of [
+      undefined,
+      null,
+      'refreshAccessToken',
+      { name: '홍길동' },
+      { refreshAccessToken: 'true' },
+    ]) {
+      expect(isForcedRefreshRequest('update', data)).toBe(false);
     }
   });
 });

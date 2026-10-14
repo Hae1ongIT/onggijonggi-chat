@@ -74,6 +74,25 @@ export function needsProactiveRefresh(
   return now >= expiresAtMs - proactiveRefreshMarginMs(accessToken);
 }
 
+/** WS 선제 갱신이 POST /api/auth/session의 data로 보내는 갱신 요청 표시(이슈 #382). 보내는 쪽
+ * (ws-connection.ts)과 읽는 쪽(auth.ts의 jwt 콜백)이 이 값 하나를 함께 써서 서로 어긋나지 않게 한다. */
+export const FORCED_REFRESH_REQUEST = { refreshAccessToken: true } as const;
+
+/** jwt 콜백이 받은 요청이 WS 선제 갱신의 직접 요청인가. 다른 용도의 세션 update(data가 다른 것)는
+ * 갱신 요청으로 읽지 않는다. */
+export function isForcedRefreshRequest(
+  trigger: string | undefined,
+  data: unknown,
+): boolean {
+  return (
+    trigger === 'update' &&
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { refreshAccessToken?: unknown }).refreshAccessToken ===
+      FORCED_REFRESH_REQUEST.refreshAccessToken
+  );
+}
+
 /** WS 선제 갱신이 서버에 "지금 갱신해"를 직접 요청했을 때(이슈 #382) 갱신해도 되는가. 남은 수명이 토큰
  * 수명의 절반 이하일 때만 허용한다 — 브라우저·서버 시계 차를 넉넉히 흡수하면서, 반복 요청이 Keycloak을
  * 계속 부르지 못하게 한다. 기준은 accessTokenExpires가 아니라 토큰의 exp다 — WS가 갱신 시점을 정할 때

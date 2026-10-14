@@ -7,6 +7,7 @@
 
 import {
   allowsForcedRefresh,
+  isForcedRefreshRequest,
   needsProactiveRefresh,
 } from '@/lib/auth/refresh-gate';
 import NextAuth from 'next-auth';
@@ -109,7 +110,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // WS 선제 갱신이 직접 요청한 갱신(이슈 #382). 마진 판정 대신 허용 창(수명의 절반)만 본다 — 묻는
       // 시점(토큰 exp·브라우저 시계)과 마진 판정(accessTokenExpires·서버 시계)의 기준이 달라 경계에서
       // 옛 토큰을 돌려주던 문제를 없앤다. session 본문은 갱신 요청 표시로만 읽고 토큰에 합치지 않는다.
-      if (trigger === 'update' && session?.refreshAccessToken === true) {
+      if (isForcedRefreshRequest(trigger, session)) {
         return allowsForcedRefresh(token.accessToken, token.accessTokenExpires)
           ? refreshAccessToken(token)
           : token;
