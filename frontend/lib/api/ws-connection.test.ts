@@ -795,6 +795,65 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     h.connection.close();
   });
 
+  it('presence가 없는 방(DIRECT)은 room.subscribed를 구독 답으로 읽어 갈아탄다(이슈 #382)', async () => {
+    const h = harness(
+      [{ accessToken: jwtDueInMs(150) }, { accessToken: jwtWithLife(300) }],
+      { rooms: () => [THREAD_ID] },
+    );
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    const second = await h.waitForSocket(2);
+    second.open();
+
+    second.message(
+      JSON.stringify({ type: 'room.subscribed', threadId: THREAD_ID }),
+    );
+    await vi.waitFor(() => expect(first.closedWith).toBe(1000));
+    expect(h.connection.send('after-swap')).toBe(true);
+    expect(second.sent).toContain('after-swap');
+
+    h.connection.close();
+  });
+
+  it('새 소켓이 열린 뒤 승격 전에 바뀐 방 구독을 승격하면서 새 소켓에 맞춘다(이슈 #382)', async () => {
+    let rooms = [THREAD_ID];
+    const h = harness(
+      [{ accessToken: jwtDueInMs(150) }, { accessToken: jwtWithLife(300) }],
+      { rooms: () => rooms },
+    );
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    const second = await h.waitForSocket(2);
+    second.open();
+    expect(second.sent).toEqual([subscribeFrame(THREAD_ID)]);
+
+    // 승격 전에 화면이 THREAD_ID를 닫고 OTHER_THREAD_ID를 연다 — 이 프레임은 아직 옛 소켓으로 간다.
+    rooms = [OTHER_THREAD_ID];
+    h.connection.send(
+      JSON.stringify({ type: 'room.unsubscribe', threadId: THREAD_ID }),
+    );
+    h.connection.send(subscribeFrame(OTHER_THREAD_ID));
+    expect(first.sent).toContain(subscribeFrame(OTHER_THREAD_ID));
+
+    second.message(
+      JSON.stringify({
+        type: 'presence.snapshot',
+        threadId: THREAD_ID,
+        participants: [],
+      }),
+    );
+    await vi.waitFor(() => expect(first.closedWith).toBe(1000));
+    expect(second.sent).toEqual([
+      subscribeFrame(THREAD_ID),
+      subscribeFrame(OTHER_THREAD_ID),
+      JSON.stringify({ type: 'room.unsubscribe', threadId: THREAD_ID }),
+    ]);
+
+    h.connection.close();
+  });
+
   it('구독한 방이 없으면 새 소켓이 열리자마자 옛 소켓을 닫는다', async () => {
     const h = harness([
       { accessToken: jwtDueInMs(150) },

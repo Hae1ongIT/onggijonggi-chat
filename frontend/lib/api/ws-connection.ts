@@ -211,12 +211,17 @@ function realSleep(ms: number): Promise<void> {
 
 /** 방 구독의 답인지 — 답이면 그 방 threadId(connectOnce의 onJoined). 파싱은 이 계층의 일이 아니지만
  * 이 판정 하나만은 여기서 한다 — 선제 갱신에서만 쓰고, 구독 답이 올 때까지만 돈다. 구독이 걸리면
- * 서버가 그 방의 presence.snapshot을 가장 먼저 보내고, 거부되면 그 방 threadId를 단 error를 보낸다
- * (CollabWebSocketHandler.handleSubscribe). 어느 쪽이든 그 방에 대해서는 기다릴 것이 끝났다. */
+ * 서버가 그 방의 presence.snapshot(presence가 없는 DIRECT는 room.subscribed, 이슈 #382)을 가장 먼저
+ * 보내고, 거부되면 그 방 threadId를 단 error를 보낸다(ThreadWebSocketHandler.handleSubscribe). 어느
+ * 쪽이든 그 방에 대해서는 기다릴 것이 끝났다. */
 function subscriptionAnswerOf(data: string): string | null {
   try {
     const frame = JSON.parse(data) as { type?: unknown; threadId?: unknown };
-    if (frame.type !== 'presence.snapshot' && frame.type !== 'error') {
+    if (
+      frame.type !== 'presence.snapshot' &&
+      frame.type !== 'room.subscribed' &&
+      frame.type !== 'error'
+    ) {
       return null;
     }
     return typeof frame.threadId === 'string' ? frame.threadId : null;
@@ -237,7 +242,8 @@ function subscriptionAnswerOf(data: string): string | null {
  *
  * 그 시점은 'open'이 아니라 방마다의 구독 답(스냅샷 또는 거부)이 다 온 때다. 'open'에서 옛 소켓을
  * 닫으면 새 소켓의 구독이 걸리기 전에 방이 비어, 서버가 방 세대를 닫으며 흐르던 AI 답변을 취소하고
- * 대기 턴을 버린다. 구독할 방이 없으면 기다릴 것도 없어 'open'이 곧 그 시점이다.
+ * 대기 턴을 버린다. 구독할 방이 없으면 기다릴 것도 없어 'open'이 곧 그 시점이다. onJoined에는 open 때
+ * 구독한 방 목록을 넘긴다 — 그 뒤에 바뀐 구독을 호출부가 맞출 수 있게(이슈 #382).
  *
  * 하트비트도 소켓마다 여기서 돈다. 죽었다고 판정하면 close 이벤트를 기다리지 않고 곧바로 비정상
  * 종료(1006)로 끝낸다 — 죽은 소켓의 close는 브라우저가 한참 뒤에야 내거나 아예 안 낸다. */
@@ -247,7 +253,7 @@ function connectOnce(
   options: WsConnectionOptions,
   deps: WsConnectionDeps,
   onSocket: (socket: SocketLike) => void,
-  onJoined?: () => void,
+  onJoined?: (subscribed: readonly string[]) => void,
 ): Promise<{ opened: boolean; code: number }> {
   return new Promise((resolve) => {
     // 표준 WebSocket API는 핸드셰이크에 Authorization 헤더를 못 실으므로 서브프로토콜 두 값으로
@@ -258,6 +264,7 @@ function connectOnce(
     let opened = false;
     let settled = false;
     let pendingRooms: Set<string> | null = null;
+    let subscribedRooms: readonly string[] = [];
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     let receivedSincePing = true;
 
@@ -277,8 +284,9 @@ function connectOnce(
       for (const threadId of rooms) {
         socket.send(JSON.stringify({ type: 'room.subscribe', threadId }));
       }
+      subscribedRooms = rooms;
       pendingRooms = new Set(rooms);
-      if (pendingRooms.size === 0) onJoined?.();
+      if (pendingRooms.size === 0) onJoined?.(rooms);
       heartbeat = setInterval(() => {
         if (!receivedSincePing) {
           console.info('[#161][ws] heartbeat timed out — dropping the socket');
@@ -303,7 +311,7 @@ function connectOnce(
           pendingRooms.delete(answered) &&
           pendingRooms.size === 0
         ) {
-          onJoined();
+          onJoined(subscribedRooms);
         }
       }
       options.onMessage(event.data);
@@ -383,6 +391,31 @@ export function openWsConnection(
       },
     };
   }
+
+  /**
+   * 선제 갱신의 새 소켓을 승격하기 직전에, 열릴 때 구독한 방(subscribed)과 지금 rooms()의 차이를 그
+   * 소켓으로 보낸다(이슈 #382). 열림부터 승격까지는 send()가 옛 소켓으로 가므로, 그 사이 화면이 연
+   * 방의 room.subscribe와 닫은 방의 room.unsubscribe는 옛 소켓에만 걸린다 — 옛 소켓을 닫으면 연
+   * 방은 서버에서 빠지고, 닫은 방은 새 소켓에 계속 구독된 채 남는다.
+   */
+  const syncSwapRooms = (
+    swapSocket: SocketLike | null,
+    subscribed: readonly string[],
+  ) => {
+    if (swapSocket === null) return;
+    const current = new Set(options.rooms?.() ?? []);
+    const before = new Set(subscribed);
+    for (const threadId of current) {
+      if (!before.has(threadId)) {
+        swapSocket.send(JSON.stringify({ type: 'room.subscribe', threadId }));
+      }
+    }
+    for (const threadId of before) {
+      if (!current.has(threadId)) {
+        swapSocket.send(JSON.stringify({ type: 'room.unsubscribe', threadId }));
+      }
+    }
+  };
 
   const forceReauth = async () => {
     options.onForcedReauth?.();
@@ -553,8 +586,9 @@ export function openWsConnection(
           socket = s;
           swapRef.current = s;
         },
-        () => {
+        (subscribed) => {
           swapJoined = true;
+          syncSwapRooms(swapRef.current, subscribed);
           promoteSwap();
           signalSwapJoined?.();
         },
