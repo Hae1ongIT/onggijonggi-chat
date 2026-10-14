@@ -648,7 +648,8 @@ public class ThreadMessageDispatcher {
 					}
 					return withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
 							new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
-									prompt.messages(), activeTurn.turn.timeZone(), prompt.documentTool()))));
+									prompt.messages(), activeTurn.turn.timeZone(), prompt.documentTool(),
+									activeTurn.toolExecutions))));
 				})
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
@@ -1279,6 +1280,10 @@ public class ThreadMessageDispatcher {
 		/** 완료/실패 저장이 이 턴에 대해 이미 한 번 시도됐는지 — 두 번째 시도는 조용히 건너뛴다. */
 		private final AtomicBoolean terminalPersisted;
 
+		/** 이 턴의 도구 실행 기록(이슈 #390). 턴마다 새로 만들어 다른 턴과 섞이지 않는다 — 끝난 턴의 도구가 늦게
+		 * 끝나도 그 턴의 것에만 쌓인다. */
+		private final TurnToolExecutions toolExecutions;
+
 		boolean claimTerminal() {
 			return terminalClaimed.compareAndSet(false, true);
 		}
@@ -1286,6 +1291,7 @@ public class ThreadMessageDispatcher {
 		ActiveTurn(PendingTurn turn, SeqBlock seqBlock) {
 			this.turn = turn;
 			this.terminalPersisted = turn.terminalPersisted();
+			this.toolExecutions = new TurnToolExecutions(turn.threadId(), turn.traceId(), List.of());
 			if (turn.reservedTurn() != null) {
 				// DIRECT — PENDING AGENT는 DirectChatTurnService가 이미 만들어뒀다(이슈 #162).
 				// 새로 만들지 않고 그 msgId·seq를 그대로 쓴다.

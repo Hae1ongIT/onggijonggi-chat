@@ -10,6 +10,8 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
@@ -27,7 +29,8 @@ import reactor.core.publisher.Flux;
 /**
  * Class Name : LlmChatStreamServiceTest.java
  * Description : LlmChatStreamService가 모델에 넘기는 Prompt에 현재 시각 도구와 발화자의 시간대(toolContext)가 실리는지 검증한다.
- *               도구 실행은 모델 구현(ToolCallingManager)이 맡으므로, 여기서는 실린 도구를 직접 불러 결과를 본다.
+ *               도구 실행은 Spring AI 도구 루프가 맡으므로 실린 도구를 직접 불러 결과를 보고, 도구를 부르는 모델로는 루프 안에서
+ *               도구가 턴의 공통 지점(TurnToolExecutions)을 지나는지 본다(이슈 #390).
  */
 class LlmChatStreamServiceTest {
 
@@ -106,5 +109,90 @@ class LlmChatStreamServiceTest {
 		service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model", messages, null)).blockLast();
 		assertThat(((ToolCallingChatOptions) received.get().getOptions()).getToolCallbacks())
 				.extracting(candidate -> candidate.getToolDefinition().name()).doesNotContain(ThreadDocumentTool.NAME, ThreadDocumentTool.REVISE_NAME);
+	}
+
+	/**
+	* 모델이 도구를 부르면 Spring AI 도구 루프(ToolCallingAdvisor) 안에서 이 턴의 공통 지점을 지나 실행되고(이슈 #390),
+	* 결과를 받은 모델의 다음 답이 그대로 스트림으로 나온다.
+	*/
+	@Test
+	void toolCallsGoThroughTheTurnExecutionPointInsideTheLoop() {
+		List<String> events = new CopyOnWriteArrayList<>();
+		TurnToolExecutions toolExecutions = new TurnToolExecutions(UUID.randomUUID(), "trace",
+				List.of(new ToolExecutionListener() {
+					@Override
+					public void started(String toolName, String input) {
+						events.add("started:" + toolName);
+					}
+
+					@Override
+					public void finished(ToolExecution execution) {
+						events.add("finished:" + execution.toolName());
+					}
+				}));
+		CurrentTimeTool tool = new CurrentTimeTool(Clock.fixed(Instant.parse("2026-10-07T06:00:00Z"), ZoneOffset.UTC),
+				ZoneId.of("Asia/Seoul"));
+		LlmChatStreamService service = new LlmChatStreamService(
+				ChatClient.builder(toolCallingModel("currentDateTime", "{}")), tool, mock(WebTools.class));
+
+		List<String> answer = service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model",
+				List.of(new ChatMessage("user", "지금 몇 시야")), "Asia/Seoul", null, toolExecutions)).collectList().block();
+
+		assertThat(String.join("", answer)).isEqualTo("답");
+		assertThat(events).containsExactly("started:currentDateTime", "finished:currentDateTime");
+		assertThat(toolExecutions.executions()).singleElement().satisfies(execution -> {
+			assertThat(execution.succeeded()).isTrue();
+			assertThat(execution.input()).isEqualTo("{}");
+			assertThat(execution.output()).contains("2026-10-07T15:00");
+		});
+	}
+
+	/** 도구가 실패해도 지금처럼 오류 문장이 모델에 돌아가 답이 이어지고, 공통 지점에는 실패로 기록된다(이슈 #390). */
+	@Test
+	void failingToolIsRecordedAndTheLoopContinuesAsBefore() {
+		TurnToolExecutions toolExecutions = new TurnToolExecutions(UUID.randomUUID(), "trace", List.of());
+		LlmChatStreamService service = new LlmChatStreamService(
+				ChatClient.builder(toolCallingModel(ThreadDocumentTool.NAME, "{\"query\":\"연차\"}")),
+				new CurrentTimeTool("Asia/Seoul"), mock(WebTools.class));
+
+		List<String> answer = service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model",
+				List.of(new ChatMessage("user", "연차 규정")), null, new ThreadDocumentTool(query -> {
+					throw new IllegalStateException("검색 장애");
+				}, (fileName, edits) -> "등록함"), toolExecutions)).collectList().block();
+
+		assertThat(String.join("", answer)).isEqualTo("답");
+		assertThat(toolExecutions.executions()).singleElement().satisfies(execution -> {
+			assertThat(execution.toolName()).isEqualTo(ThreadDocumentTool.NAME);
+			assertThat(execution.succeeded()).isFalse();
+			assertThat(execution.output()).isNull();
+		});
+	}
+
+	/** 첫 호출에는 도구 호출을, 도구 결과를 받은 다음 호출에는 "답"을 돌려주는 모델. */
+	private static ChatModel toolCallingModel(String toolName, String arguments) {
+		return new ChatModel() {
+
+			private final AtomicInteger calls = new AtomicInteger();
+
+			@Override
+			public ChatOptions getOptions() {
+				return ToolCallingChatOptions.builder().build();
+			}
+
+			@Override
+			public ChatResponse call(Prompt prompt) {
+				AssistantMessage message = calls.getAndIncrement() == 0
+						? AssistantMessage.builder().content("")
+								.toolCalls(List.of(new AssistantMessage.ToolCall("c1", "function", toolName, arguments)))
+								.build()
+						: new AssistantMessage("답");
+				return new ChatResponse(List.of(new Generation(message)));
+			}
+
+			@Override
+			public Flux<ChatResponse> stream(Prompt prompt) {
+				return Flux.just(call(prompt));
+			}
+		};
 	}
 }
