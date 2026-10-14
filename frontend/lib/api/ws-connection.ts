@@ -348,21 +348,31 @@ export function openWsConnection(
    * 닫히는 쪽은 자신이 여전히 authoritativeSocket일 때만 반영한다.** 새 소켓이 열리는 순간
    * authoritativeSocket이 새 소켓으로 바뀌므로, 그 뒤에 도착하는 옛 소켓의 close는 자동으로
    * 무시된다 — 그 소켓은 더 이상 "지금의 연결"이 아니기 때문이다.
+   *
+   * 다만 선제 갱신의 새 소켓(promoteOnOpen=false)은 열릴 때가 아니라 구독 답이 다 온 뒤 promote()로
+   * 승격한다(이슈 #382). 그 전까지 서버에 방이 등록된 연결은 옛 소켓이라 send()도 옛 소켓으로 가야
+   * 하고, 열렸다가 구독 전에 끊긴 새 소켓이 isOpen을 false로 만들거나 close()가 옛 소켓을 놓치면
+   * 안 되기 때문이다.
    */
-  function scopedOptions(): {
+  function scopedOptions(promoteOnOpen = true): {
     options: WsConnectionOptions;
     ref: { current: SocketLike | null };
+    promote: () => void;
   } {
     const ref: { current: SocketLike | null } = { current: null };
+    const promote = () => {
+      authoritativeSocket = ref.current;
+      isOpen = true;
+      options.onOpenChange?.(true);
+    };
     return {
       ref,
+      promote,
       options: {
         ...options,
         onOpenChange: (open) => {
           if (open) {
-            authoritativeSocket = ref.current;
-            isOpen = true;
-            options.onOpenChange?.(true);
+            if (promoteOnOpen) promote();
             return;
           }
           if (ref.current !== authoritativeSocket) return;
@@ -414,7 +424,8 @@ export function openWsConnection(
    * 재로그인하지 않고 지금 연결을 유지한다('keep') — 옛 토큰이 아직 유효하고, 만료 전에 한 번 더
    * 시도하며, 만료 뒤 재연결의 일반 조회(freshToken)가 다시 갱신을 시도해 그때도 실패면 재로그인한다.
    * Keycloak 재시작·순간 끊김 한 번에 화면이 곧바로 새로고침되지 않게 한다. 세션 자체가 없으면(토큰
-   * 없음) 재로그인한다. */
+   * 없음) 재로그인한다. 다만 응답 본문이 null(세션 쿠키가 없거나 만료)이면 요청 실패와 구분하지 않고
+   * 'keep'으로 둔다 — 만료 뒤 재연결의 일반 조회가 세션 없음을 보고 재로그인시킨다. */
   const proactiveToken = async (): Promise<
     { kind: 'token'; token: string } | { kind: 'keep' } | { kind: 'reauth' }
   > => {
@@ -506,6 +517,9 @@ export function openWsConnection(
         return await currentPending;
       }
       const refreshed = await proactiveToken();
+      // 갱신 요청을 기다리는 사이 close()가 불렸으면 새 소켓을 열지 않는다 — 열면 아무도 닫지 않아
+      // 서버가 만료로 끊을 때까지 방에 남는다.
+      if (closedByCaller) return await currentPending;
       if (refreshed.kind === 'reauth')
         return { opened: true, code: CLOSE_NORMAL };
       if (refreshed.kind === 'keep' || refreshed.token === currentToken) {
@@ -523,8 +537,13 @@ export function openWsConnection(
       // 새 소켓을 먼저 열어 옛 소켓과 겹친다(RoomSessionRegistry.add()가 "이미 다른 연결이
       // 있다"로 보고 presence.join을 쏘지 않게 하려는 것 — 위 connectAndProactivelyRefresh
       // 설명 참고). scopedOptions()로 별도 options를 받는 이유는 그 함수 설명 참고 — 옛 소켓의
-      // 뒤늦은 close가 이 소켓이 이미 연 isOpen을 되돌리지 못하게 한다.
-      const { options: swapOptions, ref: swapRef } = scopedOptions();
+      // 뒤늦은 close가 이 소켓이 이미 연 isOpen을 되돌리지 못하게 한다. 새 소켓은 열릴 때가 아니라
+      // 구독 답이 다 온 순간(onJoined) 승격한다 — 그 전까지는 옛 소켓이 "지금의 연결"이다.
+      const {
+        options: swapOptions,
+        ref: swapRef,
+        promote: promoteSwap,
+      } = scopedOptions(false);
       const swapPending = connectOnce(
         newToken,
         path,
@@ -536,6 +555,7 @@ export function openWsConnection(
         },
         () => {
           swapJoined = true;
+          promoteSwap();
           signalSwapJoined?.();
         },
       );
@@ -544,6 +564,11 @@ export function openWsConnection(
       // 등록 전인 때 옛 소켓을 닫으면 방이 비는 순간이 생긴다(connectOnce의 onJoined 설명).
       await Promise.race([swapJoinedSignal, swapPending.then(() => undefined)]);
 
+      // close()가 새 소켓이 승격된 뒤에 불렸으면 옛 소켓은 아직 열려 있다 — 여기서 함께 닫는다.
+      if (closedByCaller) {
+        oldSocket?.close(CLOSE_NORMAL);
+        return await currentPending;
+      }
       if (!swapJoined) {
         socket = oldSocket;
         if (scheduleRetry()) continue;

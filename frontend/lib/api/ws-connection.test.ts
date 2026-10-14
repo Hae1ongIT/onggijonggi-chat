@@ -122,6 +122,8 @@ function harness(
     error?: 'RefreshAccessTokenError';
   } | null)[],
   extraOptions: Omit<WsConnectionOptions, 'onMessage'> = {},
+  /** 선제 갱신의 직접 요청을 세션 큐 대신 직접 제어할 때(응답 시점을 늦추는 테스트). */
+  forceRefreshOverride?: () => Promise<unknown>,
 ): Harness {
   const sockets: FakeSocket[] = [];
   // 준비한 세션을 순서대로 하나씩 내주고, 다 떨어지면 마지막 것을 계속 돌려준다. 일반 조회(getSession)와
@@ -134,7 +136,7 @@ function harness(
     return session;
   };
   const getSession = vi.fn(nextSession);
-  const forceRefreshSession = vi.fn(nextSession);
+  const forceRefreshSession = vi.fn(forceRefreshOverride ?? nextSession);
   const signIn = vi.fn(async () => undefined);
   const sleep = vi.fn(async () => undefined);
   const onMessage = vi.fn();
@@ -540,6 +542,10 @@ describe('openWsConnection - [#161] 사용자당 커넥션 하나', () => {
 });
 
 describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
+  /** 만료 전 재시도(이슈 #382)는 실제 시간으로 약 650ms 뒤에 일어난다 — vi.waitFor 기본 한도
+   * 1000ms는 부하가 큰 CI에서 빠듯하다. */
+  const RETRY_WAIT = { timeout: 5_000 };
+
   /** 선제 갱신이 delayMs 뒤에 걸리도록 exp를 ms 단위로 정확히 역산한다. 공유 헬퍼
    * jwtWithTimes()는 초 단위로 내림해 최대 1초까지 오차가 생겨(이 테스트가 필요한 수백 ms
    * 지연에는 너무 크다), 여기서는 직접 ms로 계산한다. margin이 고정 하한(1000ms)에 걸리도록
@@ -655,8 +661,9 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
 
     const first = await h.waitForSocket(1);
     first.open();
-    await vi.waitFor(() =>
-      expect(h.forceRefreshSession).toHaveBeenCalledTimes(2),
+    await vi.waitFor(
+      () => expect(h.forceRefreshSession).toHaveBeenCalledTimes(2),
+      RETRY_WAIT,
     );
     await new Promise((resolve) => setTimeout(resolve, 300));
 
@@ -708,7 +715,11 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
 
     const first = await h.waitForSocket(1);
     first.open();
-    const second = await h.waitForSocket(2);
+    const second = await vi.waitFor(() => {
+      const socket = h.sockets[1];
+      if (!socket) throw new Error('2번째 소켓이 아직 없다');
+      return socket;
+    }, RETRY_WAIT);
     expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
     expect(second.protocols).toEqual(['access_token', healthy]);
     second.open();
@@ -821,7 +832,11 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
     expect(h.connection.send('still-alive')).toBe(true);
 
     // 만료 전에 한 번 더 갱신해 새 소켓을 연다(이슈 #382).
-    const third = await h.waitForSocket(3);
+    const third = await vi.waitFor(() => {
+      const socket = h.sockets[2];
+      if (!socket) throw new Error('3번째 소켓이 아직 없다');
+      return socket;
+    }, RETRY_WAIT);
     expect(h.forceRefreshSession).toHaveBeenCalledTimes(2);
     expect(third.protocols[1]).toBe(second.protocols[1]);
 
@@ -831,9 +846,10 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
   it('새 소켓이 열렸지만 구독이 걸리기 전에 끊기면 옛 소켓을 닫지 않는다', async () => {
     // 'open'에서 옛 소켓을 닫던 때는 서버가 방에 등록하기 전에 방이 비어, 흐르던 AI 답변이
     // 취소되고 대기 턴이 버려졌다. 구독 답 없이 끝나는 새 소켓은 등록된 적이 없으니 더더욱 닫으면 안 된다.
+    const onOpenChange = vi.fn();
     const h = harness(
       [{ accessToken: jwtDueInMs(150) }, { accessToken: jwtWithLife(300) }],
-      { rooms: () => [THREAD_ID] },
+      { rooms: () => [THREAD_ID], onOpenChange },
     );
 
     const first = await h.waitForSocket(1);
@@ -855,8 +871,62 @@ describe('openWsConnection - [#188] 선제 토큰 갱신', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(first.closedWith).toBeNull();
+    // 옛 소켓이 여전히 지금의 연결이다 — 새 소켓이 열렸다 끊겼다고 끊김으로 보이면 안 된다(이슈 #382).
+    expect(h.connection.send('still-alive')).toBe(true);
+    expect(first.sent).toContain('still-alive');
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    // 끊김으로 보지 않으니 만료 전 재시도도 그대로 일어난다.
+    await vi.waitFor(() => {
+      if (!h.sockets[2]) throw new Error('3번째 소켓이 아직 없다');
+    }, RETRY_WAIT);
 
     h.connection.close();
+  });
+
+  it('새 소켓이 열렸지만 구독이 걸리기 전에 close()하면 옛 소켓도 함께 닫는다(이슈 #382)', async () => {
+    const h = harness(
+      [{ accessToken: jwtDueInMs(150) }, { accessToken: jwtWithLife(300) }],
+      { rooms: () => [THREAD_ID] },
+    );
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    const second = await h.waitForSocket(2);
+    second.open();
+    // 구독이 걸리기 전 send()는 옛 소켓으로 간다 — 서버에 방이 등록된 연결은 아직 옛 소켓이다.
+    expect(h.connection.send('before-join')).toBe(true);
+    expect(first.sent).toContain('before-join');
+
+    h.connection.close();
+
+    expect(second.closedWith).toBe(1000);
+    expect(first.closedWith).toBe(1000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.sockets).toHaveLength(2);
+  });
+
+  it('갱신 요청을 기다리는 사이 close()하면 새 소켓을 열지 않는다(이슈 #382)', async () => {
+    let answer: ((session: unknown) => void) | undefined;
+    const h = harness(
+      [{ accessToken: jwtDueInMs(150) }],
+      {},
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    await vi.waitFor(() => expect(answer).toBeDefined());
+
+    h.connection.close();
+    answer?.({ accessToken: jwtWithLife(300) });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.sockets).toHaveLength(1);
+    expect(first.closedWith).toBe(1000);
   });
 
   it('스왑이 진행 중일 때 close()를 부르면 새 소켓뿐 아니라 아직 살아있는 옛 소켓도 닫는다', async () => {

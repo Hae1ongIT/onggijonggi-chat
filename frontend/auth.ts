@@ -37,7 +37,9 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
         }),
       },
     );
-    const refreshed = await response.json();
+    // 앞단 프록시가 HTML 오류 페이지를 주면 파싱 오류 메시지에 본문이 섞이고 상태 코드도 잃는다 —
+    // 빈 본문으로 보고 아래 실패 처리로 넘긴다.
+    const refreshed = await response.json().catch(() => ({}));
     // 성공 응답인데 access_token이 없으면 실패로 간주한다 — "error 없이 토큰만 사라지는" 상태를 막는다.
     if (!response.ok || !refreshed.access_token) {
       throw { status: response.status, error: refreshed.error };
