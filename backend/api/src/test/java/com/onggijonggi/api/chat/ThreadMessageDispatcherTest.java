@@ -326,7 +326,7 @@ class ThreadMessageDispatcherTest {
 		assertThat(cancelled).isTrue();
 		assertThat(room.frames).anySatisfy(frame -> {
 			assertThat(frame).isInstanceOf(ErrorFrame.class);
-			assertThat(((ErrorFrame) frame).code()).isEqualTo("MODEL_UNAVAILABLE");
+			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
 		});
 		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").contains(
 				answer(room, "next", ChatAnswerStatus.STREAMING),

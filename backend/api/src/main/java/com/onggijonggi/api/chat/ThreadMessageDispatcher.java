@@ -861,9 +861,18 @@ public class ThreadMessageDispatcher {
 		}
 		if (!activeTurn.claimTerminal()) return;
 
-		String code = error instanceof OpenAIServiceException || error instanceof TurnTimeoutException
-				|| error instanceof EmptyLlmOutputException ? "MODEL_UNAVAILABLE" : "INTERNAL_ERROR";
-		String message = "MODEL_UNAVAILABLE".equals(code) ? "모델을 호출할 수 없습니다." : "AI 응답 처리 중 오류가 발생했습니다.";
+		// 턴 제한 초과는 모델 오류와 문구를 가른다(이슈 #389) — MODEL_UNAVAILABLE이면 화면이 API 키 안내를 띄운다.
+		String code = error instanceof TurnTimeoutException ? "AI_TURN_TIMEOUT"
+				: error instanceof OpenAIServiceException || error instanceof EmptyLlmOutputException
+						? "MODEL_UNAVAILABLE" : "INTERNAL_ERROR";
+		String message = switch (code) {
+			case "AI_TURN_TIMEOUT" -> "응답 시간 제한을 넘었습니다.";
+			case "MODEL_UNAVAILABLE" -> "모델을 호출할 수 없습니다.";
+			default -> "AI 응답 처리 중 오류가 발생했습니다.";
+		};
+		// 이 경로는 원래 로그가 없다 — 턴 제한 초과는 어디에도 남지 않아 화면의 traceId로 찾을 수 없었다(이슈 #389).
+		log.warn("AI 턴 실패 threadId={} traceId={} code={} cause={}", activeTurn.turn.threadId(),
+				activeTurn.turn.traceId(), code, error.getClass().getSimpleName());
 		try {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ErrorFrame(activeTurn.turn.threadId(), code, message, activeTurn.turn.traceId()))) {

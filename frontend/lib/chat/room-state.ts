@@ -44,6 +44,7 @@ const FORBIDDEN_CODE = 'FORBIDDEN';
 const TERMINAL_AI_ERROR_CODES = new Set([
   'MODEL_UNAVAILABLE',
   'INTERNAL_ERROR',
+  'AI_TURN_TIMEOUT',
 ]);
 
 /** 메시지 하나. 사람과 AI를 role이 아니라 보낸 사람 유무로 가른다 — 협업방에는 보낸 사람이 여럿이다. */
