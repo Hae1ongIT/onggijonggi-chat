@@ -63,7 +63,8 @@ class WsFrameGoldenTest {
 		PresenceParticipant participant = new PresenceParticipant("kc-1", "주성민");
 		Map<String, WsFrame> samples = new LinkedHashMap<>();
 		samples.put("chat.answer", new ChatAnswerFrame(THREAD_ID, MSG_ID, TURN_ID, "gemini-3.6-flash", 7L, "안녕",
-				List.of(new Citation("doc-001", "제목", "발췌", 0.91)), false, ChatAnswerStatus.STREAMING));
+				List.of(new Citation("doc-001", "제목", "발췌", 0.91, "chunk-001", "page=1")), false,
+				ChatAnswerStatus.STREAMING, GroundingNotice.NO_EVIDENCE, Agent.FIN));
 		samples.put("chat.message", new ChatMessageFrame(THREAD_ID, MSG_ID, CLIENT_MSG_ID, TURN_ID, 3L,
 				participant.subject(), participant.displayName(), "@AI 요약해줘",
 				List.of(new MsgFileView(FILE_ID, "보고서.pdf"))));
@@ -79,6 +80,8 @@ class WsFrameGoldenTest {
 				"kc-2", "이한결"));
 		samples.put("chat.queued", new ChatQueuedFrame(THREAD_ID, TURN_ID, ChatQueuedStatus.QUEUED));
 		samples.put("pong", new PongFrame());
+		samples.put("chat.typing", new ChatTypingFrame(THREAD_ID, participant.subject(), participant.displayName(),
+				true));
 		return samples;
 	}
 
@@ -86,11 +89,12 @@ class WsFrameGoldenTest {
 	private static Map<String, InboundFrame> inboundSamples() {
 		Map<String, InboundFrame> samples = new LinkedHashMap<>();
 		samples.put("chat.message", new InboundChatMessage(THREAD_ID, "@AI 요약해줘", "gemini-3.6-flash", CLIENT_MSG_ID,
-				TURN_ID, List.of(FILE_ID)));
+				TURN_ID, List.of(FILE_ID), "Asia/Seoul"));
 		samples.put("chat.cancel", new InboundChatCancel(THREAD_ID, TURN_ID));
 		samples.put("room.subscribe", new InboundRoomSubscribe(THREAD_ID));
 		samples.put("room.unsubscribe", new InboundRoomUnsubscribe(THREAD_ID));
 		samples.put("ping", new InboundPing());
+		samples.put("chat.typing", new InboundChatTyping(THREAD_ID, true));
 		return samples;
 	}
 

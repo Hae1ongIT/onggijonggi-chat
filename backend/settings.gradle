@@ -2,3 +2,5 @@ rootProject.name = 'onggijonggi-backend'
 
 include 'common'
 include 'api'
+// 06·DOCUMENT — 방 문서 인제스천 ETL 워커(#340). BFF와 다른 프로세스로 돈다.
+include 'etl'

@@ -1,5 +1,7 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.api.rag.SearchResult;
+import com.onggijonggi.api.rag.ThreadDocumentSearch;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
 import com.onggijonggi.common.chat.domain.MsgStatus;
@@ -22,8 +24,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.test.scheduler.VirtualTimeScheduler;
+import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,6 +37,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -90,6 +95,23 @@ class ThreadMessageDispatcherTest {
 		assertThat(((ChatMessageFrame) room.frames.get(0)).seq()).isEqualTo(0L);
 	}
 
+	/** 턴을 부른 발화의 브라우저 시간대가 LLM 요청까지 간다 — 현재 시각 도구가 그 시간대로 답한다. */
+	@Test
+	void passesTheSendersTimeZoneToTheLlm() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
+				room.participant.subject(), room.participant.displayName(), "@AI 지금 몇 시야", List.of(), null,
+				"America/New_York", null, null, room.connectionId, "trace", null), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().timeZone()).isEqualTo("America/New_York");
+	}
+
 	@Test
 	void broadcastsOrdinaryMessagesWithoutCallingTheLlm() {
 		TestRoom room = new TestRoom();
@@ -145,6 +167,92 @@ class ThreadMessageDispatcherTest {
 		awaitFrameCount(room.frames, 1);
 		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(message(room, "@AI   "));
 		verify(llm, times(0)).streamChat(any());
+	}
+
+	/** 역할별 에이전트(이슈 #357)는 페르소나 system 메시지를 대화 이력보다 앞에 끼워 보낸다. */
+	@Test
+	void sendsTheMentionedAgentsPersonaBeforeHistory() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@FIN 비용 관점에서 검토해줘"), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().messages().get(0).role()).isEqualTo("system");
+		assertThat(request.getValue().messages().get(0).content()).isEqualTo(Agent.FIN.systemPrompt());
+		assertThat(request.getValue().messages().get(1).content()).isEqualTo("비용 관점에서 검토해줘");
+	}
+
+	/**
+	 * 역할별 에이전트도 방 문서 검색 결과별 웹 규칙(이슈 #368)을 그대로 받는다 — 페르소나는 근거만 말하고 "문서만"이라고
+	 * 하지 않아 그 규칙과 부딪히지 않는다.
+	 */
+	@Test
+	void roleAgentsGetTheSameWebRulesAsAi() {
+		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
+				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "출장 일비는 하루 4만 원이다.", 0.9, null)));
+
+		List<ChatMessage> messages = promptFor(Mono.just(found), true, "@FIN 출장 일비를 웹에서 찾은 기준과 비교해줘");
+		assertThat(messages.get(0).content()).isEqualTo(Agent.FIN.systemPrompt());
+		assertThat(systemBeforeLastUser(messages)).contains(ThreadMessageDispatcher.FOUND_WEB_RULE);
+		for (Agent agent : Agent.values()) {
+			assertThat(agent.systemPrompt()).as(agent.name()).doesNotContain("문서만").doesNotContain("웹");
+		}
+	}
+
+	/** `@AI`는 역할 구분이 없어 페르소나 system 메시지를 끼우지 않는다(이슈 #357) — 기존 동작 그대로다. */
+	@Test
+	void plainAiMentionHasNoPersonaMessage() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 알려줘"), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().messages()).hasSize(1);
+		assertThat(request.getValue().messages().get(0).role()).isEqualTo("user");
+	}
+
+	/** 한 메시지에 서로 다른 에이전트를 멘션하면 이번 범위는 거절한다(이슈 #357 "확인이 필요한 것" 1번). */
+	@Test
+	void rejectsMultipleDistinctAgentMentionsWithoutCallingTheLlm() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		ErrorFrame error = dispatcher.dispatch(command(room, "@FIN @LAW 같이 검토해줘"), room.membership.generation())
+				.orElseThrow();
+
+		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
+		verify(llm, times(0)).streamChat(any());
+	}
+
+	/** 답변이 어느 에이전트의 것인지가 스트리밍·완료 프레임과 저장에 함께 실린다(이슈 #357). */
+	@Test
+	void persistsAndBroadcastsTheMentionedAgentOnCompletion() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1L);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@LAW 유의할 점은?"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 3);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).agent())
+				.containsOnly(Agent.LAW);
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(eq(pending.getId()), eq("답"), isNull(),
+				eq("{\"agent\":\"law\"}"));
 	}
 
 	@Test
@@ -526,7 +634,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(command(room, "@AI hi"), room.membership.generation());
 
-		verify(msgPersistenceService, timeout(1000)).completeBlocking(pending.getId(), "hello world");
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(pending.getId(), "hello world", null, null);
 	}
 
 	@Test
@@ -575,7 +683,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
 				room.participant.subject(), room.participant.displayName(), "@AI 요약해줘", List.of(currentFile), null,
-				null, null, room.connectionId, "trace", null), room.membership.generation());
+				null, null, null, room.connectionId, "trace", null), room.membership.generation());
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -603,7 +711,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.DIRECT, room.userId,
-				room.participant.subject(), room.participant.displayName(), "요약해줘", List.of(file), null, null, null,
+				room.participant.subject(), room.participant.displayName(), "요약해줘", List.of(file), null, null, null, null,
 				room.connectionId, "trace", reserved), room.membership.generation());
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
@@ -611,6 +719,220 @@ class ThreadMessageDispatcherTest {
 		assertThat(request.getValue().messages()).containsExactly(
 				new ChatMessage("user", MsgFileService.withFiles("요약해줘", List.of(file))),
 				new ChatMessage("user", "요약해줘"));
+	}
+
+	/**
+	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹 검색을 요청받았으면 근거가 있어도 먼저 webSearch를 부르고, 요청하지 않았으면
+	 * 웹을 쓰지도 제안하지도 않음, 도구 결과가 없으면 웹에서 찾았다고 말하지 않음"을 한 system 메시지로 지시한다(이슈 #368).
+	 */
+	@Test
+	void aFoundTurnPrefersTheDocumentsAndUsesTheWebOnlyWhenAsked() {
+		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
+				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "최저임금은 시간당 1만 원이다.", 0.9, null)));
+
+		List<ChatMessage> messages = promptFor(Mono.just(found), true);
+		assertThat(messages).filteredOn(message -> message.role().equals("system")).as("지시는 system 메시지 하나").hasSize(1);
+		String withWeb = systemBeforeLastUser(messages);
+		assertThat(withWeb).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
+				.contains(ThreadMessageDispatcher.FOUND_WEB_RULE).doesNotContain(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
+		assertThat(ThreadMessageDispatcher.FOUND_WEB_RULE).contains("먼저 webSearch 도구를 호출")
+				.contains("웹 검색을 먼저 제안하지도 마세요").contains("웹 검색을 하지 못했다고 말하세요");
+		assertThat(withWeb.indexOf(ThreadMessageDispatcher.FOUND_WEB_RULE)).as("웹 규칙은 근거 목록 뒤에 둔다")
+				.isGreaterThan(withWeb.indexOf("최저임금은 시간당 1만 원이다."));
+
+		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
+				.contains("문서 근거를 우선").doesNotContain("웹");
+	}
+
+	/** 근거가 없으면(고정 문서 없음·맞는 내용 없음) 지시를 넣지 않는다 — 웹을 쓸지는 모델이 판단한다(이슈 #368). */
+	@Test
+	void aNoEvidenceTurnAddsNoInstruction() {
+		for (SearchResult.Reason reason : List.of(SearchResult.Reason.NO_PINNED_DOCUMENTS, SearchResult.Reason.NO_MATCH)) {
+			List<ChatMessage> messages = promptFor(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, reason, "q", false, List.of())), true);
+			assertThat(messages).as(reason.name()).noneSatisfy(message -> assertThat(message.role()).isEqualTo("system"));
+		}
+	}
+
+	/**
+	 * 문서 검색을 하지 못하면(UNAVAILABLE·검색 호출 예외) 알리게 하고, 웹은 쓰지 말고 웹 검색 여부를 묻게 한다. 답변은 계속된다.
+	 * 고장 원인은 지시에 넣지 않고, 웹이 꺼진 배포에서는 웹을 제안하지 않는다(이슈 #368).
+	 */
+	@Test
+	void anUnavailableSearchIsToldToTheModelAndOffersTheWebOnlyWhenAvailable() {
+		for (SearchResult.Reason reason : List.of(SearchResult.Reason.BACKEND_ERROR, SearchResult.Reason.MODEL_MISMATCH,
+				SearchResult.Reason.NOT_CONFIGURED, SearchResult.Reason.OVERLOADED)) {
+			String prompt = systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, reason, "q", false,
+					List.of())), true));
+			assertThat(prompt).as(reason.name()).contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지 물어보세요")
+					.contains("앞선 제안에 응했으면").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY).doesNotContain(reason.name()).doesNotContain("Elasticsearch");
+		}
+		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), true)))
+				.as("검색 호출 예외도 같은 지시").contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지").doesNotContain("끊김");
+		assertThat(systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE,
+				SearchResult.Reason.BACKEND_ERROR, "q", false, List.of())), false)))
+				.as("웹이 꺼진 배포").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
+		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), false)))
+				.as("웹이 꺼진 배포의 검색 호출 예외").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
+	}
+
+	/** 검색 결과를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
+	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled) {
+		return promptFor(search, webEnabled, "@AI 올해 최저임금 얼마야?");
+	}
+
+	/** 검색 결과와 발화를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
+	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled, String content) {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(search);
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled);
+
+		dispatcher.dispatch(command(room, content), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		return request.getValue().messages();
+	}
+
+	/** 이번 발화(맨 끝 user) 바로 앞의 system 지시. */
+	private static String systemBeforeLastUser(List<ChatMessage> messages) {
+		assertThat(messages.get(messages.size() - 1).role()).isEqualTo("user");
+		ChatMessage instruction = messages.get(messages.size() - 2);
+		assertThat(instruction.role()).isEqualTo("system");
+		return instruction.content();
+	}
+
+	/** 방 문서 검색(#344)이 FOUND면 근거가 프롬프트에 끼워 들어가고, 완료 프레임·저장 둘 다에
+	 * citations가 채워진다(이슈 #347). */
+	@Test
+	void includesDocumentSearchCitationsWhenFound() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		UUID docId = UUID.randomUUID();
+		SearchResult.Chunk chunk = new SearchResult.Chunk("doc:1:0", docId, "규정.pdf", 1, 0, "page=1",
+				"연차는 사흘 전에 신청한다.", 0.9, null);
+		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "first", false, List.of(chunk));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(Mono.just(found));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
+				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
+				VirtualTimeScheduler.create());
+
+		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().messages()).anySatisfy(message -> {
+			assertThat(message.role()).isEqualTo("system");
+			assertThat(message.content()).contains("규정.pdf").contains("연차는 사흘 전에 신청한다.");
+		});
+
+		awaitFrameCount(room.frames, 2);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast)
+				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.extracting(frame -> frame.citations())
+				.first()
+				.satisfies(citations -> assertThat((List<Citation>) citations).containsExactly(
+						new Citation(docId.toString(), "규정.pdf", "연차는 사흘 전에 신청한다.", 0.9, "doc:1:0", "page=1")));
+
+		ArgumentCaptor<String> citationsJson = ArgumentCaptor.forClass(String.class);
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(eq(pending.getId()), eq("답"),
+				citationsJson.capture(), isNull());
+		assertThat(citationsJson.getValue()).contains(docId.toString()).contains("규정.pdf");
+	}
+
+	/** 고정 문서는 있지만 이번 질문과 맞는 근거가 없을 때(NO_MATCH) 사용자에게 안내를 보낸다
+	 * (이슈 #353) — 근거 없이도 일반 답변은 그대로 허용한다. */
+	@Test
+	void sendsNoEvidenceNoticeWhenSearchFindsNoMatchingChunks() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		SearchResult noMatch = new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_MATCH,
+				"first", false, List.of());
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(Mono.just(noMatch));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
+				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
+				VirtualTimeScheduler.create());
+
+		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 2);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast)
+				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.first()
+				.satisfies(frame -> {
+					assertThat(frame.groundingNotice()).isEqualTo(GroundingNotice.NO_EVIDENCE);
+					assertThat(frame.citations()).isEmpty();
+				});
+	}
+
+	/** 방 문서 검색 자체가 실패하면(UNAVAILABLE) 근거 없이 평소처럼 답하면서도 사용자에게는
+	 * "검색을 하지 못했다"는 안내를 보낸다(이슈 #353) — #347의 "로그만 남긴다" 방침을 확장한다. */
+	@Test
+	void sendsUnavailableNoticeWhenDocumentSearchFails() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(eq(room.threadId), any(), any(), any(), any()))
+				.thenReturn(Mono.error(new IllegalStateException("elasticsearch down")));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
+				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
+				VirtualTimeScheduler.create());
+
+		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 2);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast)
+				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.first()
+				.satisfies(frame -> assertThat(frame.groundingNotice()).isEqualTo(GroundingNotice.UNAVAILABLE));
+	}
+
+	/** 고정 문서가 없는 방(NO_PINNED_DOCUMENTS)은 검색을 안 부른 것과 같다 — 안내도 나오지
+	 * 않는다(이슈 #353). dispatcher()의 기본 noOpDocumentSearch가 이 사유를 쓴다. */
+	@Test
+	void sendsNoNoticeWhenRoomHasNoPinnedDocuments() {
+		TestRoom room = new TestRoom();
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 0);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 2);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast)
+				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.first()
+				.satisfies(frame -> assertThat(frame.groundingNotice()).isNull());
 	}
 
 	@Test
@@ -675,7 +997,7 @@ class ThreadMessageDispatcherTest {
 		// 오가는 경로라 스케줄링 편차가 누적되는데, 같은 JVM에서 클래스 전체를 연달아 돌리는 CI에서는
 		// 1초 창이 빠듯해 10회 중 1~2회 간헐 실패했다. 프로덕션 순서·로직 결함이 아니라는 것은
 		// 이슈에서 반복 측정으로 확인됐다(#207, Refs #197).
-		verify(msgPersistenceService, timeout(5000)).completeBlocking(pending.getId(), "answer");
+		verify(msgPersistenceService, timeout(5000)).completeBlocking(pending.getId(), "answer", null, null);
 		verify(msgPersistenceService, never()).cancelBlocking(eq(pending.getId()), any());
 	}
 
@@ -1207,18 +1529,20 @@ class ThreadMessageDispatcherTest {
 		VirtualTimeScheduler scheduler = VirtualTimeScheduler.create();
 
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		ThreadDocumentSearch documents = noOpDocumentSearch();
+		ObjectMapper json = new ObjectMapper();
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, " ",
-						Duration.ofSeconds(1), 0, 20, scheduler));
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, documents, json,
+						" ", Duration.ofSeconds(1), 0, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
-						Duration.ZERO, 0, 20, scheduler));
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, documents, json,
+						"model", Duration.ZERO, 0, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
-						Duration.ofSeconds(1), -1, 20, scheduler));
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, documents, json,
+						"model", Duration.ofSeconds(1), -1, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
-						Duration.ofSeconds(1), 0, -1, scheduler));
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, documents, json,
+						"model", Duration.ofSeconds(1), 0, -1, scheduler));
 	}
 
 	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm) {
@@ -1227,8 +1551,18 @@ class ThreadMessageDispatcherTest {
 
 	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
 			Duration timeout, int maxPending, VirtualTimeScheduler scheduler) {
-		return new ThreadMessageDispatcher(registry, llm, mock(MsgPersistenceService.class), "test-model", timeout,
-				maxPending, 20, scheduler);
+		return new ThreadMessageDispatcher(registry, llm, mock(MsgPersistenceService.class), noOpDocumentSearch(),
+				new ObjectMapper(), "test-model", timeout, maxPending, 20, scheduler);
+	}
+
+	/** 이 파일의 테스트는 RAG 검색을 다루지 않는다 — 항상 근거 없음으로 답해서 messages를 안
+	 * 건드리게 한다(이슈 #347 도입분). */
+	private static ThreadDocumentSearch noOpDocumentSearch() {
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.search(any(), any(), any(), any(), any())).thenReturn(Mono.just(
+				new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_PINNED_DOCUMENTS, "", false,
+						List.of())));
+		return documents;
 	}
 
 	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
@@ -1238,8 +1572,9 @@ class ThreadMessageDispatcherTest {
 
 	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
 			MsgPersistenceService msgPersistenceService, int maxPending) {
-		return new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "test-model",
-				Duration.ofSeconds(120), maxPending, 20, VirtualTimeScheduler.create());
+		return new ThreadMessageDispatcher(registry, llm, msgPersistenceService, noOpDocumentSearch(),
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), maxPending, 20,
+				VirtualTimeScheduler.create());
 	}
 
 	/** DIRECT 전용 — bootstrap 또는 비동기 저장이 미리 예약해뒀다고 가정하는 HUMAN·AGENT 자리. */
@@ -1251,8 +1586,8 @@ class ThreadMessageDispatcherTest {
 	private static ChatMessageCommand directCommand(TestRoom room, String content, UUID turnId,
 			ChatMessageCommand.ReservedTurn reserved) {
 		return new ChatMessageCommand(room.threadId, ThrKind.DIRECT, room.userId, room.participant.subject(),
-				room.participant.displayName(), content, List.of(), null, null, turnId, room.connectionId, "trace",
-				reserved);
+				room.participant.displayName(), content, List.of(), null, null, null, turnId, room.connectionId,
+				"trace", reserved);
 	}
 
 	private static ChatMessageCommand command(TestRoom room, String content) {
@@ -1267,8 +1602,8 @@ class ThreadMessageDispatcherTest {
 	private static ChatMessageCommand command(TestRoom room, String content, String clientMsgId, UUID turnId,
 			String model) {
 		return new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId, room.participant.subject(),
-				room.participant.displayName(), content, List.of(), model, clientMsgId, turnId, room.connectionId,
-				"trace", null);
+				room.participant.displayName(), content, List.of(), model, null, clientMsgId, turnId,
+				room.connectionId, "trace", null);
 	}
 
 	/**
@@ -1283,7 +1618,8 @@ class ThreadMessageDispatcherTest {
 	}
 
 	private static ChatAnswerFrame answer(TestRoom room, String delta, ChatAnswerStatus status) {
-		return new ChatAnswerFrame(room.threadId, null, null, "test-model", 0L, delta, List.of(), false, status);
+		return new ChatAnswerFrame(room.threadId, null, null, "test-model", 0L, delta, List.of(), false, status, null,
+				null);
 	}
 
 	private static void awaitAttemptedDelta(FailingRoomSessionRegistry registry, String delta) {

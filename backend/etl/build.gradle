@@ -1,0 +1,25 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot'
+	id 'io.spring.dependency-management'
+}
+
+// 06·DOCUMENT — 방 문서 인제스천 ETL 워커(#340). 웹 서버 없이 PostgreSQL의 처리 회차(thr_doc_run)를 가져가
+// 원본 추출 → 청킹 → 임베딩 → Elasticsearch 적재를 한다. 스키마는 BFF(api)의 Flyway가 소유하므로 여기서는 돌리지 않는다.
+dependencies {
+	implementation project(':common')
+
+	implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+	runtimeOnly 'org.postgresql:postgresql'
+	// 추출: DOCX는 Tika, PDF는 페이지 단위 리더(출처 위치=페이지). txt·md·csv는 UTF-8로 그대로 읽는다.
+	implementation 'org.springframework.ai:spring-ai-tika-document-reader'
+	implementation 'org.springframework.ai:spring-ai-pdf-document-reader'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testImplementation 'org.testcontainers:junit-jupiter:1.20.6'
+	testImplementation 'org.testcontainers:postgresql:1.20.6'
+	// 통합 테스트만 Flyway로 빈 PostgreSQL에 실제 스키마를 만든다(운영 ETL은 마이그레이션을 돌리지 않는다).
+	testImplementation 'org.flywaydb:flyway-core'
+	testRuntimeOnly 'org.flywaydb:flyway-database-postgresql'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}

@@ -141,6 +141,12 @@ export function parseInboundMessage(raw: string): InboundParseResult {
       return { kind: 'ignore' };
     }
     if (value.type === 'ping') return { kind: 'ping' };
+    // 목업은 사람이 한 명뿐이라 입력 중 알림을 받아 줄 상대가 없다 — 형식만 보고 흘린다.
+    if (value.type === 'chat.typing') {
+      return threadIdValue(value.threadId) && typeof value.active === 'boolean'
+        ? { kind: 'ignore' }
+        : { kind: 'malformed' };
+    }
     if (value.type === 'chat.cancel') {
       return threadIdValue(value.threadId) && nonEmptyString(value.turnId)
         ? { kind: 'cancel', threadId: value.threadId, turnId: value.turnId }
@@ -214,6 +220,8 @@ export function answerFrame(
   status: 'streaming' | 'done',
   citations: Citation[] = [],
   restrictedResultsOmitted = false,
+  groundingNotice: ChatAnswerFrame['groundingNotice'] = null,
+  agent: ChatAnswerFrame['agent'] = null,
 ): ChatAnswerFrame {
   return {
     type: 'chat.answer',
@@ -226,6 +234,8 @@ export function answerFrame(
     citations,
     restrictedResultsOmitted,
     status,
+    groundingNotice,
+    agent,
   };
 }
 

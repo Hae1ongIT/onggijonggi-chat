@@ -108,8 +108,8 @@ docs: 빠른 시작 누락 단계 보완
 
 `dev`로 보낸다. 저장소 기본 브랜치가 `dev`라 PR을 열면 대상이 자동으로 잡힌다 — `main`으로
 바뀌어 있으면 되돌린다. **PR 제목도 커밋과 같은 `타입(scope): 요약` 규칙으로 쓴다** — squash
-머지라 제목이 그대로 `dev`의 커밋 메시지가 된다. 그 제목이 릴리스 버전을 정하므로(아래
-"릴리스") 타입을 정확히 쓴다.
+머지라 제목이 그대로 `dev`의 커밋 메시지가 된다. 타입은 커밋 이력을 읽기 쉽게 하려는 것이고,
+릴리스 버전은 타입이 아니라 아래 "릴리스"의 규칙으로 정해진다.
 
 본문의 `Closes #`에 이슈 번호를 적으면 머지될 때 이슈가 함께 닫힌다. 이슈를 닫는 PR이 아니면
 `Refs #`로 바꾼다.
@@ -123,6 +123,7 @@ PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불�
 `flyway-postgres`는 빈 PostgreSQL 16에 전체 migration을 실제 적용한다. Hibernate 매핑과 SQL 제약의 의미는 별도 절차로 확인한다.
 
 승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `dev`에 커밋 하나로 남는다.
+(릴리스 PR과 역머지 PR만 예외로 merge commit이다. 아래 "릴리스" 참고.)
 리뷰가 오래 조용하면 PR에 댓글로 깨워주면 된다.
 
 ## 릴리스
@@ -131,9 +132,31 @@ PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불�
 머지해 릴리스한다.
 
 태깅은 자동이다. `main`에 푸시되면 `release-tag.yml`이 `scripts/compute-next-version.mjs`로
-다음 버전을 계산해 태그와 GitHub Release를 만든다 — 계산 근거가 커밋 제목의 conventional
-commit 타입이라 규칙을 지키지 않으면 버전이 틀어진다. `dev`에 푸시되면
+다음 버전을 계산해 태그와 GitHub Release를 만든다. `dev`에 푸시되면
 `dev-prerelease-tag.yml`이 `vX.Y.Z-dev.N` 형태의 prerelease 태그를 붙인다.
+
+버전은 `feat`·`fix` 구분 없이 마지막 정식 태그에서 **patch만** 올라간다. minor는 한 차수를
+마치고 정식 배포할 때만 올리며, 그때 저장소 루트의 `release-as` 파일에 올릴 버전(예: `v0.4.0`)을
+적어 `dev`에 넣는다. 그 버전이 마지막 정식 태그보다 클 때만 쓰이고, 릴리스된 뒤에는 지우지
+않아도 저절로 무시된다. 형식이 `vX.Y.Z`가 아니면 계산이 실패한다. 그래서 `vN.0.0`처럼 minor가
+오른 릴리스는 한 차수를 마친 정식 배포다.
+
+### 릴리스 PR과 역머지 PR
+
+- 릴리스 PR(`dev`→`main`)과 `main`→`dev` 역머지 PR은 **Create a merge commit**으로 머지한다.
+  squash는 `dev`행 PR과 hotfix PR(`main`행)에만 쓴다. 릴리스 PR을 squash로 머지하면 `dev`의 커밋이 `main`의
+  조상이 되지 않아 `compute-next-version.mjs`가 정식 태그를 찾지 못하고, 이미 나간 번호를 다시
+  계산해 릴리스가 실패한다.
+- 한 차수의 중간 시점으로 릴리스해야 하면(`dev`에 다음 차수 작업이 이미 섞인 경우) 그 시점
+  커밋에서 `<이슈번호>-release-vX.Y.Z` 브랜치를 따서 `main`으로 PR을 연다.
+- 역머지 PR의 `Update branch`는 "Update with merge commit"으로 한다. rebase는 이력을 다시 써서
+  정식 태그가 도달하는 관계를 깨뜨릴 수 있다.
+- 릴리스·역머지가 끝나기 전에는 `dev`에 다른 PR을 머지하지 않는다. dev 태그 번호가 기존 태그
+  개수에 1을 더해 정해져서, 거의 동시에 머지되면 같은 번호를 만들려다 한쪽이 실패할 수 있다.
+- 정식 태그(`vX.Y.Z`)는 지우거나 옮기지 않는다. dev 태그 이름을 정리해야 하면 새 이름을 먼저
+  만들어 확인한 뒤 옛 태그를 지우고, 팀원은 `git fetch --prune --prune-tags upstream`으로
+  정리한다.
+- Releases 목록에는 정식 릴리스만 보이고, dev 태그는 Tags(Code → Tags)에서만 보인다.
 
 ### 긴급 수정(hotfix)
 
@@ -148,7 +171,7 @@ git checkout -b 57-token-audience-npe upstream/main   # dev가 아니라 main에
 PR을 열 때 **대상 브랜치를 `main`으로 직접 바꾼다.** 기본 브랜치가 `dev`라 그대로 두면 `dev`로
 올라가고, 그러면 긴급 수정이 아니라 평범한 PR이 된다.
 
-머지되면 `release-tag.yml`이 patch 버전을 자동 태깅한다(`fix:`는 patch bump).
+머지되면 `release-tag.yml`이 patch 버전을 자동 태깅한다(`feat`·`fix` 모두 patch).
 
 **머지 뒤 메인테이너가 `main`을 `dev`로 역머지한다.** 이걸 빼먹으면 `dev`에서는 그 태그가
 도달 불가라, `compute-next-version.mjs`가 이미 나간 버전을 다음 버전으로 다시 계산한다 —
@@ -322,6 +345,21 @@ PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다
 `app.rbac.workspace-setup-path`를 `infra/config/workspace-setup.default.yml`의 절대경로로 주면 BFF가 뜰 때 만든다.
 주지 않으면 새 대화 생성이 503이다. 대화가 이미 있는 옛 로컬 DB는 `--spring.flyway.target=20260929055051721`으로
 한 번 띄워 고객사를 만든 뒤 target 없이 다시 띄운다(INSTALL.md「v0.2에서 올릴 때」).
+
+방 문서 등록·원본 열람은 문서 워커를 쓴다. 루트 compose의 워커는 호스트에 포트를 열지 않으므로, 호스트 `bootRun`에서는
+`worker/doc`에 `INTERNAL_API_KEY=<임의 값>` 한 줄짜리 `.env`를 만들고 `docker compose up -d --build`로 워커를 따로 띄운
+뒤(`127.0.0.1:8100`), 같은 값을 `application-local.properties`의 `app.document.internal-api-key`에 넣는다. 비우면 문서
+요청이 503이다(채팅은 영향 없음). 이 compose는 루트 스택과 컨테이너 이름이 같아 루트 스택의 워커와 동시에 띄울 수 없다.
+
+방 문서 ETL 워커(`backend/etl`)는 BFF와 따로 띄운다. 스키마는 BFF의 Flyway가 만드므로 BFF를 한 번 띄운 DB를 쓴다. Elasticsearch(`infra/`에서 `docker compose --profile elasticsearch up -d elasticsearch`)와 위 문서 워커, 임베딩 서버가 필요하다.
+
+```powershell
+.\gradlew.bat :etl:bootRun --args="--spring.datasource.password=<DB 비밀번호> --app.etl.worker.api-key=<문서 워커 key> --app.etl.embedding.url=http://<임베딩 서버>"
+```
+
+`app.etl.embedding.url`을 비우면 문서를 처리하지 않고 경고만 남긴다. 테스트(`.\gradlew.bat :etl:test`)는 Docker로 PostgreSQL과 nori를 넣은 Elasticsearch를 띄우고 문서 워커·임베딩 서버는 가짜로 대신한다(처음엔 Elasticsearch 이미지 빌드로 몇 분 걸린다).
+
+방 문서 검색(BFF, #344)을 로컬에서 확인하려면 `application-local.properties`에 ETL과 같은 `app.rag.embedding.url`을 넣는다. 비우면 검색 결과가 `UNAVAILABLE`이다. Elasticsearch는 기본 `localhost:9200`을 본다. 검색 기준 수치를 바꿀 때는 평가 세트를 실제 임베딩으로 돌려 비교한다(`.\gradlew.bat :api:ragEval` — 필요한 환경변수는 테스트 클래스 `RagEvaluationTest` 주석에 있다).
 
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 

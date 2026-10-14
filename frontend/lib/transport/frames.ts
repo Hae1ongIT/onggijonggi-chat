@@ -49,6 +49,13 @@ export interface ChatAnswerFrame {
   restrictedResultsOmitted: boolean;
   /** cancelled·denied는 DIRECT 전용이다(이슈 #162) — COLLAB은 지금처럼 streaming·done만 쓴다. */
   status: 'streaming' | 'done' | 'cancelled' | 'denied';
+  /** 방 문서 검색(#344)이 FOUND가 아니었을 때만 채워진다(이슈 #353). 재접속 복원 대상이
+   * 아니라 그 턴에만 실려 오는 일시적 안내다. */
+  groundingNotice: 'no_evidence' | 'unavailable' | null;
+  /** 협업방에서 `@SOL`·`@FIN`·`@LAW`로 멘션해 역할별 페르소나로 답했을 때만 채워진다(이슈
+   * #357). `@AI`로 답했거나 1:1 방이면 null이다. groundingNotice와 달리 메시지에 저장돼
+   * 재접속 후에도 복원된다. */
+  agent: 'sol' | 'fin' | 'law' | null;
 }
 
 /**
@@ -221,6 +228,19 @@ export interface PongFrame {
   type: 'pong';
 }
 
+/**
+ * 같은 방의 다른 사람이 입력 중이거나 멈췄음을 알린다. 서버는 저장하지 않고, 입력한 본인(같은 사람의
+ * 다른 탭 포함)에게는 보내지 않는다. active=false가 유실될 수 있어 받는 쪽은 갱신이 끊기면 스스로
+ * 지운다(lib/chat/typing.ts).
+ */
+export interface ChatTypingFrame {
+  type: 'chat.typing';
+  threadId: string;
+  subject: string;
+  displayName: string;
+  active: boolean;
+}
+
 /** 서버 WsFrame과 대응하는 전체 유니온. 새 타입이 추가되면 여기 한 곳만 넓히면 되고,
  * frame-router.ts의 exhaustive switch가 미처리 케이스를 컴파일 타임에 잡아준다. */
 export type WsFrame =
@@ -233,7 +253,8 @@ export type WsFrame =
   | SystemNoticeFrame
   | WsErrorFrame
   | ChatQueuedFrame
-  | PongFrame;
+  | PongFrame
+  | ChatTypingFrame;
 
 /** WsFrame 서브타입의 type 태그 리터럴만 뽑은 유니온. parse-frame.ts의 태그 검증에 쓴다. */
 export type WsFrameType = WsFrame['type'];
@@ -257,6 +278,8 @@ export type WsFrameType = WsFrame['type'];
  * attachmentIds는 POST /api/attachments로 미리 올린 첨부다 — 본인이 올렸고 아직 다른 발화에 실리지
  * 않은 것만 받는다. 첨부가 있으면 content가 비어도 된다.
  * threadId는 말할 방이다(이슈 #161) — 이 커넥션이 구독한 방이어야 하고, 아니면 NOT_SUBSCRIBED가 온다.
+ * timeZone은 브라우저의 시간대(IANA 이름, 예: Asia/Seoul)다. 이 발화가 부른 AI 턴이 현재 시각을 답할 때
+ * 쓰고, 생략하거나 서버가 해석하지 못하면 서버 기본 시간대를 쓴다.
  */
 export interface ClientChatMessageFrame {
   type: 'chat.message';
@@ -266,6 +289,7 @@ export interface ClientChatMessageFrame {
   clientMsgId?: string;
   turnId?: string;
   attachmentIds?: string[];
+  timeZone?: string;
 }
 
 /** 진행 중이거나 기다리는 @AI 턴을 멈춘다. 그 턴을 부른 발화의 turnId로 가리킨다. 서버는 이
@@ -295,10 +319,19 @@ export interface ClientPingFrame {
   type: 'ping';
 }
 
+/** 협업방에서 지금 입력 중인지 알린다. 누구인지는 서버가 커넥션으로 채운다. 1:1 방이나 구독하지 않은
+ * 방이면 서버가 조용히 버린다. */
+export interface ClientChatTypingFrame {
+  type: 'chat.typing';
+  threadId: string;
+  active: boolean;
+}
+
 /** 서버 InboundFrame과 대응하는 전체 유니온. */
 export type ClientFrame =
   | ClientChatMessageFrame
   | ClientChatCancelFrame
   | ClientRoomSubscribeFrame
   | ClientRoomUnsubscribeFrame
-  | ClientPingFrame;
+  | ClientPingFrame
+  | ClientChatTypingFrame;

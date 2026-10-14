@@ -1,5 +1,9 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.api.auth.CurrentActor;
+import com.onggijonggi.api.rag.SearchResult;
+import com.onggijonggi.api.rag.ThreadDocumentSearch;
+import com.onggijonggi.api.web.WebTools;
 import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
@@ -33,6 +37,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Class Name : ThreadMessageDispatcher.java
@@ -49,6 +54,10 @@ public class ThreadMessageDispatcher {
 
 	private final MsgPersistenceService msgPersistenceService;
 
+	private final ThreadDocumentSearch threadDocumentSearch;
+
+	private final ObjectMapper json;
+
 	private final String modelId;
 
 	private final Duration turnTimeout;
@@ -58,6 +67,9 @@ public class ThreadMessageDispatcher {
 	private final int maxContextMessages;
 
 	private final Scheduler deadlineScheduler;
+
+	/** 답변에 웹 검색·웹 읽기 도구가 붙는지(app.web.enabled). 꺼져 있으면 지시에서 웹을 말하지 않는다 — 쓸 수 없는 도구를 제안하지 않게. */
+	private final boolean webEnabled;
 
 	/**
 	* 방 하나가 워커 앞에 쌓아둘 수 있는 메시지 수. 초과하면 그 자리에서 RATE_LIMITED로 거절한다
@@ -74,23 +86,53 @@ public class ThreadMessageDispatcher {
 	*/
 	private static final int SEQ_BLOCK_SIZE = 100;
 
+	/**
+	* 웹이 켜진 배포의 UNAVAILABLE 지시에 붙는 규칙 — 요청받고도 도구를 부르지 않거나, 부르지 않고 웹에서 찾은 것처럼
+	* 말하는 경우가 실제로 있었다(이슈 #368). 지시는 모델 재량을 좁힐 뿐 강제하지 못한다.
+	*/
+	static final String WEB_TOOL_HONESTY = "웹 검색을 요청받으면 반드시 웹 검색 도구를 호출해 결과를 확인한 뒤 답하세요. "
+			+ "이번 답변에서 웹 검색 도구를 호출하지 않았다면 웹에서 찾았다고 말하지 마세요.";
+
+	/**
+	* 웹이 켜진 배포의 FOUND 웹 규칙. 근거가 이미 프롬프트에 있으면 모델이 웹 요청을 받고도 도구를 건너뛰고 웹을 쓴 척하는
+	* 경우가 잦아(이슈 #368, 같은 질문 40회 중 호출 20회·쓴 척 13회), "요청했을 때만"이 아니라 요청받았을 때 할 일을
+	* 의무형으로 쓰고 도구 이름·피할 표현·예시를 준다(같은 조건 60회 중 호출 60회·쓴 척 0회, 요청 없는 질문은 웹 0회).
+	*/
+	static final String FOUND_WEB_RULE = "사용자가 이번 대화에서 웹 검색을 요청했다면, 위 문서 근거가 있더라도 먼저 webSearch 도구를 호출해 결과를 확인한 뒤 답하세요. "
+			+ "웹 검색을 요청하지 않았다면 웹을 쓰지 말고 웹 검색을 먼저 제안하지도 마세요. "
+			+ "이번 답변에서 webSearch 도구의 결과를 받지 않았다면 \"웹 검색 결과\", \"웹에서 찾은\" 같은 표현을 쓰지 말고 웹 검색을 하지 못했다고 말하세요. "
+			+ "예: \"웹에서 찾아서 우리 규정과 비교해줘\" → webSearch를 먼저 호출하고, 그 결과와 문서 근거를 함께 비교한다.";
+
 	private final ConcurrentMap<RoomKey, RoomAiState> states = new ConcurrentHashMap<>();
 
 	@Autowired
 	public ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry,
 			LlmChatStreamService llmChatStreamService,
 			MsgPersistenceService msgPersistenceService,
+			ThreadDocumentSearch threadDocumentSearch,
+			WebTools webTools,
+			ObjectMapper json,
 			@Value("${app.thread.ai.model:${spring.ai.openai.chat.options.model}}") String modelId,
 			@Value("${app.thread.ai.turn-timeout:120s}") Duration turnTimeout,
 			@Value("${app.thread.ai.max-pending-per-room:20}") int maxPendingPerRoom,
 			@Value("${app.thread.ai.max-context-messages:20}") int maxContextMessages) {
-		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, modelId, turnTimeout,
-				maxPendingPerRoom, maxContextMessages, Schedulers.parallel());
+		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
+				turnTimeout, maxPendingPerRoom, maxContextMessages, Schedulers.parallel(), webTools.enabled());
+	}
+
+	/** 웹 도구가 켜진 배포(기본값)로 만든다. */
+	ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry, LlmChatStreamService llmChatStreamService,
+			MsgPersistenceService msgPersistenceService, ThreadDocumentSearch threadDocumentSearch, ObjectMapper json,
+			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
+			Scheduler deadlineScheduler) {
+		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
+				turnTimeout, maxPendingPerRoom, maxContextMessages, deadlineScheduler, true);
 	}
 
 	ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry, LlmChatStreamService llmChatStreamService,
-			MsgPersistenceService msgPersistenceService, String modelId, Duration turnTimeout,
-			int maxPendingPerRoom, int maxContextMessages, Scheduler deadlineScheduler) {
+			MsgPersistenceService msgPersistenceService, ThreadDocumentSearch threadDocumentSearch, ObjectMapper json,
+			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
+			Scheduler deadlineScheduler, boolean webEnabled) {
 		if (modelId == null || modelId.isBlank()) {
 			throw new IllegalArgumentException("app.thread.ai.model must not be blank");
 		}
@@ -106,10 +148,13 @@ public class ThreadMessageDispatcher {
 		this.roomSessionRegistry = roomSessionRegistry;
 		this.llmChatStreamService = llmChatStreamService;
 		this.msgPersistenceService = msgPersistenceService;
+		this.threadDocumentSearch = threadDocumentSearch;
+		this.json = json;
 		this.modelId = modelId;
 		this.turnTimeout = turnTimeout;
 		this.maxPendingPerRoom = maxPendingPerRoom;
 		this.maxContextMessages = maxContextMessages;
+		this.webEnabled = webEnabled;
 		this.deadlineScheduler = deadlineScheduler;
 	}
 
@@ -126,18 +171,25 @@ public class ThreadMessageDispatcher {
 	public Optional<ErrorFrame> dispatch(ChatMessageCommand command, UUID roomGeneration) {
 		ErrorFrame malformed;
 		String prompt;
+		Agent agent;
 		if (command.kind() == ThrKind.DIRECT) {
 			// DIRECT는 멘션 여부와 무관하게 모든 정상 발화를 AI에 전달한다 — 파서를 아예 타지 않는다.
+			// 역할별 에이전트(이슈 #357)는 협업방 전용이라 DIRECT는 agent가 항상 null이다.
 			malformed = null;
 			prompt = command.content();
+			agent = null;
 		} else {
 			AiMentionParser.MentionResult mention = AiMentionParser.parse(command.content());
-			malformed = mention.mentioned() && mention.prompt().isBlank()
+			malformed = mention.ambiguous()
 					? new ErrorFrame(command.threadId(), "MALFORMED_REQUEST",
-							"@AI 뒤에 요청 내용을 입력해 주세요.", command.traceId())
-					: null;
+							"한 메시지에는 에이전트를 하나만 멘션해 주세요.", command.traceId())
+					: mention.mentioned() && mention.prompt().isBlank()
+							? new ErrorFrame(command.threadId(), "MALFORMED_REQUEST",
+									"멘션 뒤에 요청 내용을 입력해 주세요.", command.traceId())
+							: null;
 			// prompt가 null이면 워커는 방송·저장만 하고 AI 턴을 만들지 않는다 — 일반 발화이거나 빈 프롬프트다.
 			prompt = malformed == null && mention.mentioned() ? mention.prompt() : null;
+			agent = malformed == null && mention.mentioned() ? mention.agent() : null;
 		}
 
 		RoomKey key = new RoomKey(command.threadId(), roomGeneration);
@@ -153,7 +205,7 @@ public class ThreadMessageDispatcher {
 				}
 				// 워커가 꺼내기 전에 도착한 취소도 받을 수 있게 큐에 넣는 순간 등록한다(cancel 주석).
 				// 인바운드는 연결마다 순서대로 처리되므로, 같은 연결의 chat.cancel은 이 등록 뒤에 온다.
-				QueuedMessage queued = new QueuedMessage(command, prompt, new AtomicBoolean());
+				QueuedMessage queued = new QueuedMessage(command, prompt, agent, new AtomicBoolean());
 				TurnRef ref = prompt == null ? null : TurnRef.of(command.turnId(), command.connectionId());
 				if (ref != null) {
 					state.inFlight.put(ref, new InFlightTurn(queued, false));
@@ -216,9 +268,9 @@ public class ThreadMessageDispatcher {
 				? fetchContextOnlyBlocking(command.threadId())
 				: persistHumanMessageAndFetchContext(msgId, seq, command);
 		PendingTurn pendingTurn = new PendingTurn(command.threadId(), key.roomGeneration(), queued.prompt(),
-				msgId, command.files(), command.traceId(), command.fromSubject(),
-				TurnRef.of(command.turnId(), command.connectionId()), command.model(), context,
-				direct ? reserved : null, queued.terminalPersisted());
+				msgId, command.files(), command.traceId(), command.from(), command.fromSubject(),
+				command.fromDisplayName(), TurnRef.of(command.turnId(), command.connectionId()), command.model(),
+				command.timeZone(), context, direct ? reserved : null, queued.terminalPersisted(), queued.agent());
 		ActiveTurn turnToStart = null;
 		boolean admitted = false;
 		// 등록 해제와 대기열 추가를 한 락 안에서 한다 — 사이가 벌어지면 그 틈에 온 취소가 어디서도
@@ -295,7 +347,7 @@ public class ThreadMessageDispatcher {
 		ChatMessageCommand.ReservedTurn reserved = turn.reservedTurn();
 		persistDirectReservedAgentTerminal(reserved, turn.terminalPersisted(), terminalStatus);
 		broadcastQuietly(key, new ChatAnswerFrame(key.threadId(), reserved.agentMsgId(), turn.turnId(),
-				modelIdFor(turn), reserved.agentSeq(), "", List.of(), false, answerStatus));
+				modelIdFor(turn), reserved.agentSeq(), "", List.of(), false, answerStatus, null, null));
 	}
 
 	/** 예약된 DIRECT AGENT의 terminal 전이는 큐·대기·활성 어느 경로에서도 한 번만 실행한다. */
@@ -462,7 +514,7 @@ public class ThreadMessageDispatcher {
 		persistAgentCancellation(activeTurn);
 		broadcastQuietly(key, new ChatAnswerFrame(threadId, activeTurn.msgId, activeTurn.turn.turnId(),
 				modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false,
-				direct ? ChatAnswerStatus.CANCELLED : ChatAnswerStatus.DONE));
+				direct ? ChatAnswerStatus.CANCELLED : ChatAnswerStatus.DONE, null, activeTurn.turn.agent()));
 		advance(key, state, activeTurn);
 	}
 
@@ -505,7 +557,8 @@ public class ThreadMessageDispatcher {
 				activeTurn.subscription.dispose();
 				persistAgentCancellation(activeTurn);
 				broadcastQuietly(key, new ChatAnswerFrame(key.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
-						modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false, ChatAnswerStatus.DONE));
+						modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false, ChatAnswerStatus.DONE, null,
+						activeTurn.turn.agent()));
 				advance(key, state, activeTurn);
 			}
 		}
@@ -550,13 +603,14 @@ public class ThreadMessageDispatcher {
 
 		Disposable subscription = activeTurn.turn.context()
 				.flatMap(context -> promptMessages(activeTurn.turn, context))
+				.flatMap(messages -> augmentWithDocumentSearch(activeTurn, messages))
 				.flatMapMany(messages -> {
 					if (abandoned(activeTurn)) {
 						return Flux.<String>never();
 					}
 					return withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
 							new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
-									messages))));
+									messages, activeTurn.turn.timeZone()))));
 				})
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
@@ -613,13 +667,111 @@ public class ThreadMessageDispatcher {
 	}
 
 	/**
+	* 방에 고정·READY 문서가 있으면 방 문서 검색(#344)을 불러 근거를 프롬프트 맨 끝(이번 발화 바로
+	* 앞)에 system 메시지로 끼워 넣고, 실제로 쓰인 청크를 activeTurn.citations에 채운다(이슈 #347).
+	* buildPromptMessages가 항상 맨 끝에 이번 발화 하나만 user로 붙이므로, 그 앞까지가 "이번 발화
+	* 이전의 대화 history"다.
+	*
+	* 검색 결과마다 웹 검색 사용 규칙을 다르게 지시한다(이슈 #368). 웹 도구 자체는 늘 붙는다 — 빼면 사용자가 원해도
+	* 웹으로 답할 길이 없어진다(LlmChatStreamService).
+	* - FOUND: 근거와 함께 "문서 근거를 우선하고, 사용자가 웹 검색을 요청했으면 먼저 웹 검색 도구를 부르고, 요청하지 않았으면
+	*   웹을 쓰지도 제안하지도 않는다"를 지시한다(FOUND_WEB_RULE).
+	* - NO_EVIDENCE(고정 문서 없음·맞는 내용 없음): 지시를 넣지 않는다 — 웹을 쓸지는 모델이 판단한다.
+	* - UNAVAILABLE·검색 호출 예외: 문서를 확인하지 못했다고 알리게 한다. 답변은 막지 않는다 — 일반 질문은 그대로
+	*   답하고, 문서가 필요한 질문이면 확인할 수 없다고 알린 뒤 웹 검색 여부를 묻는다(그 안내는 저장돼 다음 턴 문맥에
+	*   남아, 사용자가 응하면 모델이 웹으로 답한다). 장애를 조용히 넘기지 않는다. 고장 원인은 지시에 넣지 않는다.
+	* 웹이 켜진 배포의 UNAVAILABLE 지시에는 "요청받으면 웹 검색 도구를 반드시 부르고, 부르지 않았으면 웹에서 찾았다고
+	* 말하지 않는다"(WEB_TOOL_HONESTY)를 붙인다(FOUND는 FOUND_WEB_RULE이 같은 규칙을 담는다). NO_EVIDENCE는 지시를 넣지 않으므로 같은 규칙을 웹 검색 도구 설명(WebTools)에 둔다.
+	* 웹이 꺼진 배포에서는 웹을 말하는 문장을 빼고 지시한다.
+	*
+	* 지시와 별개로 화면 안내(GroundingNotice)를 activeTurn에 남긴다(이슈 #353) — NO_MATCH는 NO_EVIDENCE, UNAVAILABLE·
+	* 검색 호출 예외는 UNAVAILABLE. 고정 문서 자체가 없는 방(NO_PINNED_DOCUMENTS)은 원래부터 안내 대상이 아니다.
+	*/
+	private Mono<List<ChatMessage>> augmentWithDocumentSearch(ActiveTurn activeTurn, List<ChatMessage> messages) {
+		PendingTurn turn = activeTurn.turn;
+		List<ChatMessage> history = messages.subList(0, messages.size() - 1);
+		CurrentActor actor = new CurrentActor(turn.fromUserId(), turn.fromSubject(), turn.fromDisplayName());
+		return threadDocumentSearch.search(turn.threadId(), actor, turn.prompt(), history, modelIdFor(turn))
+				.map(result -> switch (result.status()) {
+					case FOUND -> {
+						activeTurn.citations = result.chunks().stream().map(this::toCitation).toList();
+						yield withSystem(messages, groundingPrompt(result, webEnabled));
+					}
+					case UNAVAILABLE -> {
+						activeTurn.groundingNotice = GroundingNotice.UNAVAILABLE;
+						log.warn("방 문서 검색을 끝내지 못해 근거 없이 답변하고 안내를 보낸다 threadId={} traceId={} reason={}",
+								turn.threadId(), turn.traceId(), result.reason());
+						yield withSystem(messages, unavailablePrompt(webEnabled));
+					}
+					case NO_EVIDENCE -> {
+						if (result.reason() != SearchResult.Reason.NO_PINNED_DOCUMENTS) {
+							activeTurn.groundingNotice = GroundingNotice.NO_EVIDENCE;
+							log.info("방 문서 근거를 못 찾아 안내를 보낸다 threadId={} traceId={} reason={}",
+									turn.threadId(), turn.traceId(), result.reason());
+						}
+						yield messages;
+					}
+				})
+				.onErrorResume(error -> {
+					activeTurn.groundingNotice = GroundingNotice.UNAVAILABLE;
+					log.error("방 문서 검색 호출 실패로 안내를 보낸다 threadId={} traceId={}", turn.threadId(), turn.traceId(), error);
+					return Mono.just(withSystem(messages, unavailablePrompt(webEnabled)));
+				});
+	}
+
+	/** 이번 발화(맨 끝 user) 바로 앞에 system 지시를 끼운다. */
+	private static List<ChatMessage> withSystem(List<ChatMessage> messages, String prompt) {
+		List<ChatMessage> withPrompt = new ArrayList<>(messages);
+		withPrompt.add(messages.size() - 1, new ChatMessage("system", prompt));
+		return withPrompt;
+	}
+
+	/** 문서 검색을 하지 못한 턴의 지시. 고장 원인(검색 엔진·모델 불일치·설정)은 넣지 않는다. */
+	private static String unavailablePrompt(boolean webEnabled) {
+		String prompt = "이번 질문에 대해 방에 고정된 문서를 검색하지 못했습니다. 문서 없이 답할 수 있는 일반 질문이면 그대로 답하세요. "
+				+ "고정 문서의 내용이 필요한 질문이면 지금 문서를 확인할 수 없다고 알리세요.";
+		if (!webEnabled) {
+			return prompt;
+		}
+		return prompt + " 이때 웹 검색은 하지 말고, 답변 끝에 웹 검색으로 답변해 드릴지 물어보세요. "
+				+ "사용자가 웹 검색을 요청했거나 앞선 제안에 응했으면 웹 검색으로 답하세요. " + WEB_TOOL_HONESTY;
+	}
+
+	/** 찾은 근거와, 근거를 우선하라는 지시. 웹은 사용자가 요청했을 때만 쓰고 먼저 제안하지 않게 한다(웹이 켜진 배포). */
+	private static String groundingPrompt(SearchResult result, boolean webEnabled) {
+		StringBuilder prompt = new StringBuilder(
+				"다음은 이 방에 고정된 문서에서 찾은 근거입니다. 답변에 참고하되, 근거에 없는 내용은 추측하지 마세요. 답변은 이 문서 근거를 우선합니다.\n");
+		for (SearchResult.Chunk chunk : result.chunks()) {
+			prompt.append("- [").append(chunk.fileName()).append(' ').append(chunk.loc()).append("] ")
+					.append(chunk.content()).append('\n');
+		}
+		// 웹 규칙은 근거 목록 뒤(이번 발화 바로 앞)에 둔다 — 근거 앞에 두면 근거에 묻혀, 요청받고도 도구를 부르지 않고
+		// 웹에서 찾은 것처럼 답하는 경우가 있었다(이슈 #368).
+		if (webEnabled) {
+			prompt.append(FOUND_WEB_RULE);
+		}
+		return prompt.toString();
+	}
+
+	/** 화면·재접속 복구가 쓸 citations 형태로 좁힌다 — 점수는 통과한 채널 것(둘 다 있으면 벡터)을 쓴다. */
+	private Citation toCitation(SearchResult.Chunk chunk) {
+		Double score = chunk.vectorScore() != null ? chunk.vectorScore() : chunk.keywordScore();
+		return new Citation(chunk.documentId().toString(), chunk.fileName(), chunk.content(),
+				score == null ? 0.0 : score, chunk.chunkId(), chunk.loc());
+	}
+
+	/**
 	* 이번 발화의 첨부는 turn.files()에서 붙인다 — COLLAB은 문맥을 이번 메시지 저장 전에 읽어(이슈 #100)
 	* 문맥에 이번 메시지가 없다. DIRECT는 이미 저장된 이번 메시지가 문맥에 들어 있어 그쪽에서 첨부가
 	* 붙으므로, 같은 파일을 두 번 싣지 않도록 여기서는 뺀다.
 	*/
 	private static List<ChatMessage> buildPromptMessages(List<Msg> context, Map<UUID, List<MsgFile>> files,
 			PendingTurn turn) {
-		List<ChatMessage> messages = new ArrayList<>(context.size() + 1);
+		List<ChatMessage> messages = new ArrayList<>(context.size() + 2);
+		// 역할별 페르소나(이슈 #357)는 대화 이력보다 앞에 둬 전체 발화를 그 역할의 관점으로 보게 한다.
+		if (turn.agent() != null) {
+			messages.add(new ChatMessage("system", turn.agent().systemPrompt()));
+		}
 		boolean humanInContext = false;
 		for (Msg msg : context) {
 			String role = msg.getAthKind() == AthKind.HUMAN ? "user"
@@ -661,7 +813,7 @@ public class ThreadMessageDispatcher {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
 							modelIdFor(activeTurn.turn), activeTurn.seq, delta, List.of(), false,
-							ChatAnswerStatus.STREAMING))) {
+							ChatAnswerStatus.STREAMING, activeTurn.groundingNotice, activeTurn.turn.agent()))) {
 				throw new StaleGenerationException();
 			}
 		} catch (StaleGenerationException error) {
@@ -682,7 +834,8 @@ public class ThreadMessageDispatcher {
 		try {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
-							modelIdFor(activeTurn.turn), activeTurn.seq, "", List.of(), false, ChatAnswerStatus.DONE))) {
+							modelIdFor(activeTurn.turn), activeTurn.seq, "", activeTurn.citations, false,
+							ChatAnswerStatus.DONE, activeTurn.groundingNotice, activeTurn.turn.agent()))) {
 				persistAgentCompletion(activeTurn, content);
 				closeGeneration(key, state);
 				return;
@@ -853,12 +1006,26 @@ public class ThreadMessageDispatcher {
 		if (!activeTurn.terminalPersisted.compareAndSet(false, true)) {
 			return;
 		}
+		String citationsJson = citationsJson(activeTurn.citations);
+		String agentJson = Agent.toPylJson(json, activeTurn.turn.agent());
 		activeTurn.pendingMsgId
-				.flatMap(msgId -> Mono.fromRunnable(() -> msgPersistenceService.completeBlocking(msgId, content))
+				.flatMap(msgId -> Mono
+						.fromRunnable(() -> msgPersistenceService.completeBlocking(msgId, content, citationsJson, agentJson))
 						.subscribeOn(Schedulers.boundedElastic())
 						.doOnError(e -> log.error("agent 메시지 완료 저장 실패 msgId={}", msgId, e)))
 				.onErrorComplete()
 				.subscribe();
+	}
+
+	/** 비어 있으면 null — 재접속 복구(ThreadWebSocketHandler)가 null을 "출처 없음"으로 본다. */
+	private String citationsJson(List<Citation> citations) {
+		if (citations.isEmpty()) return null;
+		try {
+			return json.writeValueAsString(citations);
+		} catch (RuntimeException e) {
+			log.error("citations 직렬화 실패", e);
+			return null;
+		}
 	}
 
 	private void persistAgentFailure(ActiveTurn activeTurn, MsgStatus terminalStatus) {
@@ -930,7 +1097,8 @@ public class ThreadMessageDispatcher {
 	}
 
 	/** 워커가 꺼내 처리할 한 건. prompt가 null이면 AI 턴을 만들지 않는다(일반 발화·빈 프롬프트). */
-	private record QueuedMessage(ChatMessageCommand command, String prompt, AtomicBoolean terminalPersisted) {
+	private record QueuedMessage(ChatMessageCommand command, String prompt, Agent agent,
+			AtomicBoolean terminalPersisted) {
 	}
 
 	/** inbox에 들어간 예약 DIRECT 턴은 worker가 꺼내기 전에도 terminal 상태를 공유해야 한다. */
@@ -944,12 +1112,14 @@ public class ThreadMessageDispatcher {
 	/**
 	* ref는 취소 지목 키다(이슈 #160). model이 null이면 서버 기본값을 쓴다. reservedTurn은 DIRECT만
 	* 채운다 — `DirectChatTurnService`가 이미 만든 PENDING AGENT를 가리킨다(이슈 #162). humanMsgId·files는
-	* 이 턴을 부른 발화의 msg id와 첨부다 — 프롬프트에 첨부를 붙일 때 쓴다.
+	* 이 턴을 부른 발화의 msg id와 첨부다 — 프롬프트에 첨부를 붙일 때 쓴다. timeZone은 그 발화자의 브라우저
+	* 시간대다 — 협업방에서도 턴을 부른 사람 기준으로 현재 시각 도구가 답한다. agent는 `@SOL`·`@FIN`·
+	* `@LAW`로 멘션됐을 때만 채워진다(이슈 #357) — `@AI`거나 DIRECT면 null이다.
 	*/
 	private record PendingTurn(UUID threadId, UUID roomGeneration, String prompt, UUID humanMsgId,
-			List<MsgFile> files, String traceId, String fromSubject, TurnRef ref,
-			String model, Mono<List<Msg>> context, ChatMessageCommand.ReservedTurn reservedTurn,
-			AtomicBoolean terminalPersisted) {
+			List<MsgFile> files, String traceId, UUID fromUserId, String fromSubject, String fromDisplayName,
+			TurnRef ref, String model, String timeZone, Mono<List<Msg>> context,
+			ChatMessageCommand.ReservedTurn reservedTurn, AtomicBoolean terminalPersisted, Agent agent) {
 
 		UUID turnId() {
 			return ref == null ? null : ref.turnId();
@@ -970,6 +1140,14 @@ public class ThreadMessageDispatcher {
 
 		/** 지금까지 생성된 답변. 스트림 스레드가 쓰고 취소하는 스레드가 읽어서 StringBuffer다(이슈 #160). */
 		private final StringBuffer content = new StringBuffer();
+
+		/** 방 문서 검색(FOUND)으로 찾은 근거. LLM 호출 전에 한 번만 채워지고 그 뒤 완료 프레임이
+		 * 읽기만 하므로 volatile로 충분하다(이슈 #347). */
+		private volatile List<Citation> citations = List.of();
+
+		/** 방 문서 검색이 FOUND가 아니었을 때 STREAMING·DONE 프레임에 함께 실을 안내 — LLM 호출
+		 * 전에 결정되므로 스트리밍 시작부터 실린다. citations와 같은 이유로 volatile이다(이슈 #353). */
+		private volatile GroundingNotice groundingNotice;
 
 		/**
 		* PENDING 행 생성 결과(성공 시 msgId, 실패 시 empty)를 캐시해 여러 번 구독해도 한 번만

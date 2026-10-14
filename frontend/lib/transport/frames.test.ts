@@ -15,6 +15,8 @@ describe('WsFrame 유니온', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'streaming',
+      groundingNotice: null,
+      agent: null,
     };
     expect(frame.type).toBe('chat.answer');
   });

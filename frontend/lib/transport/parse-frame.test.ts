@@ -14,6 +14,8 @@ describe('parseFrame', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'streaming',
+      groundingNotice: null,
+      agent: null,
     });
     expect(frame).toEqual({
       type: 'chat.answer',
@@ -26,6 +28,8 @@ describe('parseFrame', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'streaming',
+      groundingNotice: null,
+      agent: null,
     });
   });
 
@@ -41,6 +45,8 @@ describe('parseFrame', () => {
       citations: [{ docId: 'd1', title: '제목', snippet: '발췌', score: 0.9 }],
       restrictedResultsOmitted: false,
       status: 'streaming',
+      groundingNotice: null,
+      agent: null,
     });
     expect(frame?.type).toBe('chat.answer');
     if (frame?.type === 'chat.answer') {
@@ -61,12 +67,54 @@ describe('parseFrame', () => {
       citations: [],
       restrictedResultsOmitted: true,
       status: 'streaming',
+      groundingNotice: null,
+      agent: null,
     });
     expect(frame?.type).toBe('chat.answer');
     if (frame?.type === 'chat.answer') {
       expect(frame.citations).toEqual([]);
       expect(frame.restrictedResultsOmitted).toBe(true);
     }
+  });
+
+  it('groundingNotice가 no_evidence·unavailable이면 그대로 파싱한다(이슈 #353)', () => {
+    const base = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'streaming',
+      agent: null,
+    };
+    expect(
+      parseFrame({ ...base, groundingNotice: 'no_evidence' })?.type,
+    ).toBe('chat.answer');
+    expect(
+      parseFrame({ ...base, groundingNotice: 'unavailable' })?.type,
+    ).toBe('chat.answer');
+  });
+
+  it('groundingNotice가 빠지거나 모르는 값이면 null(필수 필드)', () => {
+    const base = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'streaming',
+      agent: null,
+    };
+    expect(parseFrame(base)).toBeNull();
+    expect(parseFrame({ ...base, groundingNotice: 'something_else' })).toBeNull();
   });
 
   it('chat.answer의 status:"done"을 파싱한다', () => {
@@ -81,6 +129,8 @@ describe('parseFrame', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'done',
+      groundingNotice: null,
+      agent: null,
     });
     expect(frame).toEqual({
       type: 'chat.answer',
@@ -93,7 +143,46 @@ describe('parseFrame', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'done',
+      groundingNotice: null,
+      agent: null,
     });
+  });
+
+  it('agent가 sol·fin·law면 그대로 파싱한다(이슈 #357)', () => {
+    const base = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'streaming',
+      groundingNotice: null,
+    };
+    expect(parseFrame({ ...base, agent: 'sol' })?.type).toBe('chat.answer');
+    expect(parseFrame({ ...base, agent: 'fin' })?.type).toBe('chat.answer');
+    expect(parseFrame({ ...base, agent: 'law' })?.type).toBe('chat.answer');
+  });
+
+  it('agent가 빠지거나 모르는 값이면 null(필수 필드)', () => {
+    const base = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'streaming',
+      groundingNotice: null,
+    };
+    expect(parseFrame(base)).toBeNull();
+    expect(parseFrame({ ...base, agent: 'sol_fin' })).toBeNull();
   });
 
   it('status가 streaming/done이 아니면 null', () => {
@@ -289,7 +378,7 @@ describe('parseFrame', () => {
 describe('parseFrameFromText', () => {
   it('유효한 JSON 문자열을 파싱한다', () => {
     const frame = parseFrameFromText(
-      '{"type":"chat.answer","threadId":"s1","msgId":"msg-1","turnId":null,"model":"m","seq":1,"delta":"","citations":[],"restrictedResultsOmitted":false,"status":"done"}',
+      '{"type":"chat.answer","threadId":"s1","msgId":"msg-1","turnId":null,"model":"m","seq":1,"delta":"","citations":[],"restrictedResultsOmitted":false,"status":"done","groundingNotice":null,"agent":null}',
     );
     expect(frame).toEqual({
       type: 'chat.answer',
@@ -302,6 +391,8 @@ describe('parseFrameFromText', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'done',
+      groundingNotice: null,
+      agent: null,
     });
   });
 
@@ -465,6 +556,8 @@ describe('parseFrame — system.notice(#29)', () => {
       citations: [],
       restrictedResultsOmitted: false,
       status: 'done',
+      groundingNotice: null,
+      agent: null,
     };
     expect(parseFrame(answer)).toBeNull();
     expect(parseFrame({ ...answer, model: 'm' })).toEqual({

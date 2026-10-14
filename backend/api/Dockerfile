@@ -10,6 +10,8 @@ COPY gradlew settings.gradle build.gradle gradle.properties ./
 COPY gradle ./gradle
 COPY common/build.gradle ./common/
 COPY api/build.gradle ./api/
+# settings.gradle이 etl 모듈도 포함한다. 빌드하지 않아도 모듈 디렉터리는 있어야 Gradle이 설정 단계를 통과한다.
+COPY etl/build.gradle ./etl/
 
 # .gitattributes(eol=lf) 도입 전에 체크아웃한 Windows 워킹트리에는 gradlew가 CRLF로 남아 있다.
 # 그 경우 셔뱅이 `#!/bin/sh\r`이 되어 커널이 인터프리터를 못 찾고 "./gradlew: not found"로 실패한다.
