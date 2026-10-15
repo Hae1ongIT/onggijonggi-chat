@@ -57,6 +57,8 @@ public class ThreadMessageDispatcher {
 	private final MsgPersistenceService msgPersistenceService;
 
 	private final ThreadDocumentSearch threadDocumentSearch;
+	/** 개정본 만들기 도구의 실행. 개정을 다루지 않는 테스트용 생성자는 null을 넣고, 그때 도구는 만들지 못했다고 답한다. */
+	private final ThreadDocumentRevision documentRevision;
 
 	private final ObjectMapper json;
 
@@ -118,6 +120,7 @@ public class ThreadMessageDispatcher {
 			LlmChatStreamService llmChatStreamService,
 			MsgPersistenceService msgPersistenceService,
 			ThreadDocumentSearch threadDocumentSearch,
+			ThreadDocumentRevision documentRevision,
 			WebTools webTools,
 			ObjectMapper json,
 			@Value("${app.thread.ai.model:${spring.ai.openai.chat.options.model}}") String modelId,
@@ -125,7 +128,7 @@ public class ThreadMessageDispatcher {
 			@Value("${app.thread.ai.max-pending-per-room:20}") int maxPendingPerRoom,
 			@Value("${app.thread.ai.max-context-messages:20}") int maxContextMessages) {
 		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
-				turnTimeout, maxPendingPerRoom, maxContextMessages, Schedulers.parallel(), webTools.enabled());
+				turnTimeout, maxPendingPerRoom, maxContextMessages, Schedulers.parallel(), webTools.enabled(), documentRevision);
 	}
 
 	/** 웹 도구가 켜진 배포(기본값)로 만든다. */
@@ -134,13 +137,13 @@ public class ThreadMessageDispatcher {
 			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
 			Scheduler deadlineScheduler) {
 		this(roomSessionRegistry, llmChatStreamService, msgPersistenceService, threadDocumentSearch, json, modelId,
-				turnTimeout, maxPendingPerRoom, maxContextMessages, deadlineScheduler, true);
+				turnTimeout, maxPendingPerRoom, maxContextMessages, deadlineScheduler, true, null);
 	}
 
 	ThreadMessageDispatcher(RoomSessionRegistry roomSessionRegistry, LlmChatStreamService llmChatStreamService,
 			MsgPersistenceService msgPersistenceService, ThreadDocumentSearch threadDocumentSearch, ObjectMapper json,
 			String modelId, Duration turnTimeout, int maxPendingPerRoom, int maxContextMessages,
-			Scheduler deadlineScheduler, boolean webEnabled) {
+			Scheduler deadlineScheduler, boolean webEnabled, ThreadDocumentRevision documentRevision) {
 		if (modelId == null || modelId.isBlank()) {
 			throw new IllegalArgumentException("app.thread.ai.model must not be blank");
 		}
@@ -164,6 +167,7 @@ public class ThreadMessageDispatcher {
 		this.maxContextMessages = maxContextMessages;
 		this.webEnabled = webEnabled;
 		this.deadlineScheduler = deadlineScheduler;
+		this.documentRevision = documentRevision;
 	}
 
 	/**
@@ -690,7 +694,8 @@ public class ThreadMessageDispatcher {
 				.map(documents -> documents.isEmpty()
 						? new TurnPrompt(messages, null)
 						: new TurnPrompt(withSystem(messages, documentsPrompt(documents)),
-								new ThreadDocumentTool(query -> searchDocuments(activeTurn, query))))
+								new ThreadDocumentTool(query -> searchDocuments(activeTurn, query),
+										(fileName, edits) -> reviseDocument(activeTurn, fileName, edits))))
 				.onErrorResume(error -> {
 					activeTurn.groundingNotice = GroundingNotice.UNAVAILABLE;
 					log.error("방 문서 목록 조회 실패로 안내를 보낸다 threadId={} traceId={}", turn.threadId(), turn.traceId(), error);
@@ -745,6 +750,14 @@ public class ThreadMessageDispatcher {
 			}
 			return unavailable ? unavailablePrompt(webEnabled) : NO_EVIDENCE_RESULT;
 		}
+	}
+
+	/** 모델이 부른 개정본 만들기. 도구 실행 스레드(boundedElastic)에서 불린다. 결과는 모델에 돌려줄 문장이다. */
+	private String reviseDocument(ActiveTurn activeTurn, String fileName, List<ThreadDocumentTool.Edit> edits) {
+		if (documentRevision == null) return ThreadDocumentRevision.FAILED + "이 배포에서는 개정본을 만들 수 없습니다.";
+		PendingTurn turn = activeTurn.turn;
+		log.info("개정본 만들기 threadId={} traceId={} edits={}", turn.threadId(), turn.traceId(), edits == null ? 0 : edits.size());
+		return documentRevision.revise(turn.threadId(), actorOf(turn), fileName, edits);
 	}
 
 	private static CurrentActor actorOf(PendingTurn turn) {
