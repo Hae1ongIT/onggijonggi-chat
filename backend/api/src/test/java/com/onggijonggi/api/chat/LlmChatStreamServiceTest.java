@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -113,7 +114,8 @@ class LlmChatStreamServiceTest {
 
 	/**
 	* 모델이 도구를 부르면 Spring AI 도구 루프(ToolCallingAdvisor) 안에서 이 턴의 공통 지점을 지나 실행되고(이슈 #390),
-	* 결과를 받은 모델의 다음 답이 그대로 스트림으로 나온다.
+	* 결과를 받은 모델의 다음 답이 그대로 스트림으로 나온다. 발화자 시간대(toolContext)도 공통 지점을 지나 도구까지 간다 —
+	* 도구 기본 시간대(서울)와 다른 값으로 요청해, 컨텍스트가 빠지면 시각이 달라지게 한다.
 	*/
 	@Test
 	void toolCallsGoThroughTheTurnExecutionPointInsideTheLoop() {
@@ -136,14 +138,14 @@ class LlmChatStreamServiceTest {
 				ChatClient.builder(toolCallingModel("currentDateTime", "{}")), tool, mock(WebTools.class));
 
 		List<String> answer = service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model",
-				List.of(new ChatMessage("user", "지금 몇 시야")), "Asia/Seoul", null, toolExecutions)).collectList().block();
+				List.of(new ChatMessage("user", "지금 몇 시야")), "America/New_York", null, toolExecutions)).collectList().block();
 
 		assertThat(String.join("", answer)).isEqualTo("답");
 		assertThat(events).containsExactly("started:currentDateTime", "finished:currentDateTime");
 		assertThat(toolExecutions.executions()).singleElement().satisfies(execution -> {
 			assertThat(execution.succeeded()).isTrue();
 			assertThat(execution.input()).isEqualTo("{}");
-			assertThat(execution.output()).contains("2026-10-07T15:00");
+			assertThat(execution.output()).contains("2026-10-07T02:00");
 		});
 	}
 
@@ -151,8 +153,9 @@ class LlmChatStreamServiceTest {
 	@Test
 	void failingToolIsRecordedAndTheLoopContinuesAsBefore() {
 		TurnToolExecutions toolExecutions = new TurnToolExecutions(UUID.randomUUID(), "trace", List.of());
+		List<Prompt> prompts = new CopyOnWriteArrayList<>();
 		LlmChatStreamService service = new LlmChatStreamService(
-				ChatClient.builder(toolCallingModel(ThreadDocumentTool.NAME, "{\"query\":\"연차\"}")),
+				ChatClient.builder(toolCallingModel(ThreadDocumentTool.NAME, "{\"query\":\"연차\"}", prompts)),
 				new CurrentTimeTool("Asia/Seoul"), mock(WebTools.class));
 
 		List<String> answer = service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model",
@@ -165,11 +168,24 @@ class LlmChatStreamServiceTest {
 			assertThat(execution.toolName()).isEqualTo(ThreadDocumentTool.NAME);
 			assertThat(execution.succeeded()).isFalse();
 			assertThat(execution.output()).isNull();
+			// 실패는 예외 종류 이름만 남는다 — 예외 메시지(사내 내용이 섞일 수 있음)는 기록에 넣지 않는다.
+			assertThat(execution.failure()).isEqualTo("ToolExecutionException");
+			assertThat(execution.elapsed().isNegative()).isFalse();
 		});
+		// 오류 문장은 지금처럼 Spring AI가 도구 응답으로 바꿔 모델에 돌려준다 — 공통 지점이 예외를 삼키거나 바꾸지 않는다.
+		assertThat(prompts).hasSize(2);
+		assertThat(prompts.get(1).getInstructions()).last().isInstanceOfSatisfying(ToolResponseMessage.class,
+				message -> assertThat(message.getResponses()).singleElement()
+						.satisfies(response -> assertThat(response.responseData()).contains("검색 장애")));
 	}
 
 	/** 첫 호출에는 도구 호출을, 도구 결과를 받은 다음 호출에는 "답"을 돌려주는 모델. */
 	private static ChatModel toolCallingModel(String toolName, String arguments) {
+		return toolCallingModel(toolName, arguments, new CopyOnWriteArrayList<>());
+	}
+
+	/** 위와 같고, 받은 Prompt를 차례로 prompts에 담는다. */
+	private static ChatModel toolCallingModel(String toolName, String arguments, List<Prompt> prompts) {
 		return new ChatModel() {
 
 			private final AtomicInteger calls = new AtomicInteger();
@@ -181,6 +197,7 @@ class LlmChatStreamServiceTest {
 
 			@Override
 			public ChatResponse call(Prompt prompt) {
+				prompts.add(prompt);
 				AssistantMessage message = calls.getAndIncrement() == 0
 						? AssistantMessage.builder().content("")
 								.toolCalls(List.of(new AssistantMessage.ToolCall("c1", "function", toolName, arguments)))

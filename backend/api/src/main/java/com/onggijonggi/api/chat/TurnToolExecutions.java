@@ -18,7 +18,7 @@ import org.springframework.ai.tool.metadata.ToolMetadata;
  *               한 곳에서 본다. 도구 루프(Spring AI ToolCallingAdvisor)와 스트림은 그대로 두고 도구 하나(ToolCallback)만
  *               감싼다 — 감싸도 모델이 보는 도구 정의(이름·설명·인자)는 원본 그대로다.
  *               턴마다 새로 만든다. 다른 턴의 실행이 섞이지 않고, 끝난 턴의 도구가 늦게 끝나도 그 턴의 기록에만 쌓인다.
- *               방 문서 도구의 출처·안내는 지금처럼 도구 안에서 쌓는다 — 출처를 여기로 모으는 일은 웹 출처 작업에서 한다.
+ *               방 문서 도구의 출처·안내는 지금처럼 도구 안에서 쌓는다. 진행 표시(#397)가 리스너를 붙여 쓴다.
  */
 public final class TurnToolExecutions {
 
@@ -101,16 +101,19 @@ public final class TurnToolExecutions {
 			// 실행 직전 자리 — 권한 재확인·승인·끝난 턴의 도구 막기가 들어올 곳이다. 지금은 모두 통과시킨다.
 			notifyStarted(toolName, toolInput);
 			long started = System.nanoTime();
+			String output;
 			try {
-				String output = toolContext == null ? delegate.call(toolInput) : delegate.call(toolInput, toolContext);
-				finish(new ToolExecution(toolName, toolInput, output, null, Duration.ofNanos(System.nanoTime() - started)));
-				return output;
-			} catch (RuntimeException error) {
+				output = toolContext == null ? delegate.call(toolInput) : delegate.call(toolInput, toolContext);
+			} catch (RuntimeException | Error error) {
+				// 시작·끝 알림을 짝으로 쓰는 리스너(진행 표시)가 끝나지 않은 채 남지 않게 Error도 기록한다.
+				// 예외를 모델에 돌려줄 문장으로 바꾸는 일은 지금처럼 Spring AI가 한다.
 				finish(new ToolExecution(toolName, toolInput, null, error.getClass().getSimpleName(),
 						Duration.ofNanos(System.nanoTime() - started)));
-				// 예외 처리(ToolExecutionException을 모델에 돌려줄 문장으로 바꾸기)는 지금처럼 Spring AI가 한다.
 				throw error;
 			}
+			// 성공 기록은 try 밖에서 한다 — 끝 알림 쪽 고장이 같은 호출을 실패로 한 번 더 기록하지 않게.
+			finish(new ToolExecution(toolName, toolInput, output, null, Duration.ofNanos(System.nanoTime() - started)));
+			return output;
 		}
 	}
 }
