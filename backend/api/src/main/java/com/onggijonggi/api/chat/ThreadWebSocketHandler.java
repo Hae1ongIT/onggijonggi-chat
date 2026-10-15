@@ -471,7 +471,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 			case DENIED -> Mono.<WsFrame>just(new ChatAnswerFrame(threadId, stored.agentMessageId(),
 					inbound.turnId(), threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "",
 					List.of(), false, ChatAnswerStatus.DENIED, null, null));
-			case FAILED -> Mono.<WsFrame>just(new ErrorFrame(threadId, "MODEL_UNAVAILABLE",
+			// 실패 원인을 저장하지 않아 여기서는 모델 오류인지 턴 제한 초과인지 모른다 — MODEL_UNAVAILABLE이면
+			// 화면이 API 키 안내를 띄우므로 원인을 단정하지 않는 INTERNAL_ERROR로 알린다(이슈 #389).
+			case FAILED -> Mono.<WsFrame>just(new ErrorFrame(threadId, "INTERNAL_ERROR",
 					"이전 시도에서 응답을 만들지 못했습니다.", traceId));
 			case PENDING -> recoverOrphanedDirect(threadId, roomGeneration, connection, actor, inbound, files,
 					traceId, stored);
