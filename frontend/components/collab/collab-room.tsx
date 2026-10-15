@@ -36,8 +36,8 @@ import { NoticeBanner } from '@/components/notice-banner';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
 import { fetchCollabThreads } from '@/lib/api/collab';
-import type { RoomMessage, RoomPresenceNotice } from '@/lib/chat/room-state';
-import { isForbidden, isPresenceNotice } from '@/lib/chat/room-state';
+import type { RoomMessage, RoomMembershipNotice } from '@/lib/chat/room-state';
+import { isForbidden, isMembershipNotice } from '@/lib/chat/room-state';
 import { typingLabel } from '@/lib/chat/typing';
 import {
   type RoomConnection,
@@ -59,9 +59,9 @@ const CONNECTION_LABEL: Record<RoomConnection, string> = {
   stalled: '연결하지 못했습니다',
 };
 
-/** 입퇴장 시스템 라인(#111). 말풍선도 작성자 머리글도 없이 흐름 가운데에 옅게 남긴다 —
+/** 참가자가 되거나 빠진 입퇴장 줄. 말풍선도 작성자 머리글도 없이 흐름 가운데에 옅게 남긴다 —
  * 사람이 한 말이 아니기 때문이다. */
-function PresenceRow({ notice }: { notice: RoomPresenceNotice }) {
+function MembershipRow({ notice }: { notice: RoomMembershipNotice }) {
   return (
     <p
       title={notice.participant.subject}
@@ -175,7 +175,7 @@ export function CollabRoom({ threadId }: { threadId: string }) {
   const senderNames = useMemo(() => {
     const names = new Map<string, string>();
     for (const entry of state.messages) {
-      if (!isPresenceNotice(entry) && entry.from) {
+      if (!isMembershipNotice(entry) && entry.from) {
         names.set(entry.from.subject, entry.from.displayName);
       }
     }
@@ -205,7 +205,7 @@ export function CollabRoom({ threadId }: { threadId: string }) {
       threadId={threadId}
       attachmentCount={state.messages.reduce(
         (count, entry) =>
-          isPresenceNotice(entry) ? count : count + entry.attachments.length,
+          isMembershipNotice(entry) ? count : count + entry.attachments.length,
         0,
       )}
       senderNames={senderNames}
@@ -269,8 +269,8 @@ export function CollabRoom({ threadId }: { threadId: string }) {
                 </p>
               )}
               {state.messages.map((entry) =>
-                isPresenceNotice(entry) ? (
-                  <PresenceRow key={entry.id} notice={entry} />
+                isMembershipNotice(entry) ? (
+                  <MembershipRow key={entry.id} notice={entry} />
                 ) : (
                   <MessageRow key={entry.id} message={entry} />
                 ),
