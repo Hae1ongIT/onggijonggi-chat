@@ -500,6 +500,51 @@ describe('applyFrame - chat.answer', () => {
   });
 });
 
+describe('applyFrame - chat.answer 근거 합치기(이슈 #401)', () => {
+  it('같은 문서의 청크 여러 개를 모두 남긴다', () => {
+    const chunk = (chunkId: string): Citation => ({
+      docId: 'd1',
+      title: '규정.pdf',
+      snippet: chunkId,
+      score: 0.8,
+      chunkId,
+    });
+
+    const state = fold([
+      answer('답', 'streaming'),
+      answer('', 'done', { citations: [chunk('d1:1:0'), chunk('d1:2:0')] }),
+    ]);
+
+    expect(chats(state)[0].citations.map((c) => c.chunkId)).toEqual([
+      'd1:1:0',
+      'd1:2:0',
+    ]);
+  });
+
+  it('docId가 없는 웹 출처는 주소로 가린다', () => {
+    const web = (url: string): Citation => ({
+      kind: 'WEB',
+      docId: null,
+      title: url,
+      snippet: '',
+      score: 0,
+      url,
+    });
+
+    const state = fold([
+      answer('답', 'streaming'),
+      answer('', 'done', {
+        citations: [web('https://a.com/'), web('https://b.com/')],
+      }),
+    ]);
+
+    expect(chats(state)[0].citations.map((c) => c.url)).toEqual([
+      'https://a.com/',
+      'https://b.com/',
+    ]);
+  });
+});
+
 describe('applyFrame - chat.answer의 중지·거부(이슈 #162, §3.2)', () => {
   it('취소는 흐름을 끝내고 사유를 남긴다', () => {
     const state = fold([
@@ -799,6 +844,35 @@ describe('applyHistory - 방 진입 시 과거 대화(#190)', () => {
       'cancelled',
       'denied',
     ]);
+  });
+
+  it('저장된 근거(방 문서·웹 출처)를 복원하고, 없으면 빈 배열이다(이슈 #401)', () => {
+    const document: Citation = {
+      kind: 'DOCUMENT',
+      docId: 'd1',
+      title: '규정.pdf',
+      snippet: '발췌',
+      score: 0.9,
+      chunkId: 'd1:1:0',
+    };
+    const web: Citation = {
+      kind: 'WEB',
+      docId: null,
+      title: 'Guides',
+      snippet: '요약',
+      score: 0,
+      url: 'https://spring.io/guides',
+      query: '스프링',
+      read: true,
+    };
+    const state = applyHistory(initialRoomState, [
+      historyItem('a', 1, '답', {
+        athKind: 'AGENT',
+        citations: [document, web],
+      }),
+      historyItem('b', 2, '질문'),
+    ]);
+    expect(chats(state).map((m) => m.citations)).toEqual([[document, web], []]);
   });
 
   it('FAILED는 사유로 남기지 않는다 — 사용자가 고른 결말이 아니다', () => {

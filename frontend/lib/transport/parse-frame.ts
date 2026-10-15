@@ -9,16 +9,23 @@
 import { z } from 'zod';
 import type { WsFrame } from './frames';
 
+/** 방 문서 근거와 웹 출처(이슈 #401)를 함께 받는다. 웹 출처는 docId·chunkId·loc가 null이고, kind가 없던
+ * 과거 근거도 통과해야 한다 — 하나라도 어긋나면 chat.answer 프레임 전체가 버려진다. zod는 모르는 키를
+ * 버리므로 새 필드는 여기 적어야 화면까지 간다. */
 const citationSchema = z.object({
-  docId: z.string(),
+  kind: z.string().optional(),
+  docId: z.string().nullable().optional(),
   title: z.string(),
   snippet: z.string(),
   score: z.number(),
   /** 같은 문서에서 청크 여러 개가 근거로 쓰이면 docId가 같아지므로, 화면이 항목을 구분하는
    * 키로 쓴다. 위치가 없던 과거 메시지의 citations에는 없을 수 있다(이슈 #352). */
-  chunkId: z.string().optional(),
+  chunkId: z.string().nullable().optional(),
   /** 위치가 없던 과거 메시지의 citations에는 없을 수 있다(이슈 #352). */
-  loc: z.string().optional(),
+  loc: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+  query: z.string().nullable().optional(),
+  read: z.boolean().optional(),
 });
 
 /** 이슈 #10 코멘트에서 확정된 통합 답변 패킷 — chat.token/chat.done/(제안했던)chat.citation을

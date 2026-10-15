@@ -55,6 +55,40 @@ describe('parseFrame', () => {
     }
   });
 
+  it('chat.answer의 웹 출처(docId·chunkId·loc null)와 kind 없는 과거 근거를 함께 받는다(이슈 #401)', () => {
+    const web = {
+      kind: 'WEB',
+      docId: null,
+      title: 'Guides',
+      snippet: '요약',
+      score: 0,
+      chunkId: null,
+      loc: null,
+      url: 'https://spring.io/guides',
+      query: '스프링',
+      read: true,
+    };
+    const legacy = { docId: 'd1', title: '제목', snippet: '발췌', score: 0.9 };
+    const frame = parseFrame({
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [legacy, web],
+      restrictedResultsOmitted: false,
+      status: 'done',
+      groundingNotice: null,
+      agent: null,
+    });
+    expect(frame?.type).toBe('chat.answer');
+    if (frame?.type === 'chat.answer') {
+      expect(frame.citations).toEqual([legacy, web]);
+    }
+  });
+
   it('citations가 빈 배열이어도 restrictedResultsOmitted가 true일 수 있다(전부 걸러진 경우)', () => {
     const frame = parseFrame({
       type: 'chat.answer',

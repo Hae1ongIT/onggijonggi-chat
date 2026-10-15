@@ -5,6 +5,7 @@
  *********************************************************/
 
 import type { MessageAttachment } from '@/lib/transport/frames';
+import type { Citation } from './chat';
 import { bffUrl, threadMessagesPath } from './config';
 import { authFetch } from './http';
 
@@ -51,6 +52,9 @@ export interface ThreadMessageItem {
     targetSubject: string;
     targetDisplayName: string;
   } | null;
+  /** AGENT 답변에 저장된 근거(방 문서·웹 출처) — 실시간 chat.answer DONE 프레임과 같은 값이다(이슈 #401).
+   * 근거 없이 답했거나 HUMAN·SYSTEM이면 빈 배열이다. 목업·과거 응답 호환을 위해 optional이다. */
+  citations?: Citation[];
 }
 
 export async function fetchThreadMessages(

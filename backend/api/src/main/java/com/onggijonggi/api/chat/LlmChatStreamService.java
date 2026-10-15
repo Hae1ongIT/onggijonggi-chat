@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.api.web.WebSources;
 import com.onggijonggi.api.web.WebTools;
 import com.openai.errors.OpenAIServiceException;
 import org.springframework.ai.chat.client.ChatClient;
@@ -47,14 +48,14 @@ public class LlmChatStreamService {
 				.map(this::toSpringAiMessage)
 				.toList();
 
-		// toolContext는 요청마다 새로 만든다 — 웹 읽기 허락 목록이 이 턴에만 쌓인다.
+		// toolContext는 요청마다 새로 만든다 — 웹 읽기 허락 목록·웹 출처(이슈 #401)가 이 턴에만 쌓인다.
 		Map<String, Object> toolContext = new HashMap<>(currentTimeTool.context(request.timeZone()));
 		List<Object> tools = new ArrayList<>(List.of(currentTimeTool));
 		if (webTools.enabled()) {
 			toolContext.putAll(webTools.context(request.messages().stream()
 					.filter(message -> isUser(message.role()))
 					.map(ChatMessage::content)
-					.toList()));
+					.toList(), request.webSources() != null ? request.webSources() : new WebSources()));
 			tools.add(webTools);
 		}
 		if (request.documentTool() != null) {

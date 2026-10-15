@@ -7,18 +7,45 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * Class Name : Citation.java
- * Description : 근거 인용 문서 한 건. ChatAnswerFrame.citations의 원소 타입이다. 프론트엔드
+ * Description : 근거 인용 한 건. ChatAnswerFrame.citations의 원소 타입이다. 프론트엔드
  *               CitationsResponse 타입(frontend/lib/api/chat.ts)의 citation 항목과 필드
- *               구성이 같다.
+ *               구성이 같다. 방 문서 근거와 웹 출처(이슈 #401)를 kind로 나눠 한 배열에 담는다.
+ * @param kind 근거 종류 — DOCUMENT(방 문서) 또는 WEB(웹 출처). 이 필드가 없던 과거 메시지는 DOCUMENT로 읽는다
+ * @param docId 방 문서 id. 웹 출처는 null이다
+ * @param score 방 문서 검색 점수. 웹 출처는 0이고 화면에 보이지 않는다
  * @param chunkId 이 근거가 나온 청크의 식별자(이슈 #352). 같은 문서에서 청크 여러 개가 근거로
  *        쓰이면 docId가 같아지므로, 화면이 항목을 구분하는 키로 쓴다. 위치 필드가 없던 과거
- *        메시지의 역직렬화 호환을 위해 null을 허용한다.
+ *        메시지의 역직렬화 호환을 위해 null을 허용한다. 웹 출처는 null이다.
  * @param loc 그 청크의 문서 내 위치(PDF는 "page=N", 그 외는 "para=N", 이슈 #352). 위치 필드가
- *        없던 과거 메시지의 역직렬화 호환을 위해 null을 허용한다.
+ *        없던 과거 메시지의 역직렬화 호환을 위해 null을 허용한다. 웹 출처는 null이다.
+ * @param url 웹 출처 주소. 방 문서 근거는 null이다
+ * @param query 웹 출처를 처음 찾은 검색어. 검색 없이 읽은 주소와 방 문서 근거는 null이다
+ * @param read 웹 출처의 본문을 웹 읽기로 실제로 읽었는지. 방 문서 근거는 false다. 이 필드가 없던 과거 메시지를
+ *        읽을 수 있게 boolean이 아니라 Boolean으로 받는다 — Jackson 3는 없는 primitive 필드를 거부한다
+ *        (FAIL_ON_NULL_FOR_PRIMITIVES 기본 켬).
  */
-public record Citation(String docId, String title, String snippet, double score, String chunkId, String loc) {
+public record Citation(String kind, String docId, String title, String snippet, double score, String chunkId,
+		String loc, String url, String query, Boolean read) {
+
+	public static final String DOCUMENT = "DOCUMENT";
+	public static final String WEB = "WEB";
 
 	private static final Logger log = LoggerFactory.getLogger(Citation.class);
+
+	public Citation {
+		if (kind == null) kind = DOCUMENT;
+		if (read == null) read = false;
+	}
+
+	/** 방 문서 근거. */
+	public Citation(String docId, String title, String snippet, double score, String chunkId, String loc) {
+		this(DOCUMENT, docId, title, snippet, score, chunkId, loc, null, null, false);
+	}
+
+	/** 웹 출처(이슈 #401). */
+	static Citation web(String url, String title, String snippet, String query, boolean read) {
+		return new Citation(WEB, null, title, snippet, 0.0, null, null, url, query, read);
+	}
 
 	/**
 	* Msg.srcJson(이슈 #347)을 역직렬화한다. 실시간 스트리밍 때 저장한 것과 같은 값을 이력 조회·

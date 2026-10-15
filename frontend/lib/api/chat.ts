@@ -22,19 +22,30 @@ export async function fetchChatSessions(): Promise<ChatSessionSummary[]> {
 }
 
 /** 와이어 메시지 모양. */
-/** 인용 응답. */
+/** 인용 응답. 방 문서 근거와 웹 출처(이슈 #401)를 kind로 나눠 한 배열에 담는다. */
 export interface Citation {
-  docId: string;
+  /** 근거 종류 — 'DOCUMENT'(방 문서) 또는 'WEB'(웹 출처). 이 필드가 없던 과거 메시지는 DOCUMENT로
+   * 본다(lib/chat/citations.ts citationKind). 나중에 종류가 늘 수 있어 string으로 둔다. */
+  kind?: string;
+  /** 방 문서 id. 웹 출처는 null이다. */
+  docId?: string | null;
   title: string;
   snippet: string;
+  /** 방 문서 검색 점수. 웹 출처는 0이고 화면에 보이지 않는다. */
   score: number;
   /** 이 근거가 나온 청크의 식별자(이슈 #352). 같은 문서에서 청크 여러 개가 근거로 쓰이면
    * docId가 같아지므로, 화면이 항목을 구분하는 키로 쓴다. 위치 필드가 없던 과거 메시지의
-   * citations에는 없을 수 있다. */
-  chunkId?: string;
+   * citations에는 없거나 null일 수 있다. 웹 출처는 null이다. */
+  chunkId?: string | null;
   /** 문서 내 위치(PDF는 "page=N", 그 외는 "para=N", 이슈 #352). 위치 필드가 없던 과거
-   * 메시지의 citations에는 없을 수 있다. */
-  loc?: string;
+   * 메시지의 citations에는 없거나 null일 수 있다. 웹 출처는 null이다. */
+  loc?: string | null;
+  /** 웹 출처 주소(이슈 #401). 방 문서 근거는 null이다. */
+  url?: string | null;
+  /** 웹 출처를 처음 찾은 검색어. 검색 없이 읽은 주소와 방 문서 근거는 null이다. */
+  query?: string | null;
+  /** 웹 출처의 본문을 웹 읽기로 실제로 읽었는지. */
+  read?: boolean;
 }
 
 export interface CitationsResponse {

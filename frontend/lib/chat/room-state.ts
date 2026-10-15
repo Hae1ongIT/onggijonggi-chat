@@ -23,6 +23,7 @@
 import type { Citation } from '@/lib/api/chat';
 import { friendlyMessageForCode } from '@/lib/api/errors';
 import type { ThreadMessageItem } from '@/lib/api/thread-history';
+import { citationKey } from '@/lib/chat/citations';
 import type {
   ChatAnswerFrame,
   MessageAttachment,
@@ -474,7 +475,8 @@ function toRoomMessage(item: ThreadMessageItem): RoomMessage {
     streaming: false,
     terminalStatus: terminalStatusOf(item.status),
     turnId: null,
-    citations: [],
+    // 저장된 근거(방 문서·웹 출처)를 이력에서도 복원한다(이슈 #401). 안내(groundingNotice)·권한 제외는 저장되지 않는다.
+    citations: item.citations ?? [],
     restrictedResultsOmitted: false,
     groundingNotice: null,
     agent: item.agent ?? null,
@@ -531,15 +533,20 @@ function insertNotice(state: RoomState, notice: RoomNotice): RoomState {
   };
 }
 
+/** 같은 근거는 citationKey로 가린다 — 방 문서는 청크, 웹은 주소(이슈 #401). 예전엔 docId로 가려 같은 문서의
+ * 청크 여러 개가 하나로 뭉쳤다. 키가 없는 근거는 합치지 않고 그대로 더한다. */
 function mergeCitations(current: Citation[], incoming: Citation[]): Citation[] {
   const merged = [...current];
-  const indexes = new Map(
-    merged.map((citation, index) => [citation.docId, index]),
-  );
+  const indexes = new Map<string, number>();
+  merged.forEach((citation, index) => {
+    const key = citationKey(citation);
+    if (key !== null) indexes.set(key, index);
+  });
   for (const citation of incoming) {
-    const index = indexes.get(citation.docId);
+    const key = citationKey(citation);
+    const index = key === null ? undefined : indexes.get(key);
     if (index === undefined) {
-      indexes.set(citation.docId, merged.length);
+      if (key !== null) indexes.set(key, merged.length);
       merged.push(citation);
     } else {
       merged[index] = citation;
