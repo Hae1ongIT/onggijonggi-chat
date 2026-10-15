@@ -57,7 +57,9 @@ class TurnToolExecutionsTest {
 		assertThat(wrapped.getToolDefinition()).isSameAs(DEFINITION);
 		assertThat(wrapped.call("{}", new ToolContext(Map.of("k", "v")))).isEqualTo("echo:{}:v");
 		assertThat(wrapped.call("{}")).isEqualTo("echo:{}");
-		assertThat(executions.executions()).extracting(ToolExecution::output).containsExactly("echo:{}:v", "echo:{}");
+		// 결과는 전문 대신 길이만 남는다.
+		assertThat(executions.executions()).extracting(ToolExecution::outputLength)
+				.containsExactly("echo:{}:v".length(), "echo:{}".length());
 	}
 
 	@Test
@@ -151,10 +153,22 @@ class TurnToolExecutionsTest {
 						}
 					}));
 			executions.wrap(new ToolCallback[] { tool(input -> "비밀결과") })[0].call("{\"q\":\"비밀규정\"}");
+			assertThatThrownBy(() -> executions.wrap(new ToolCallback[] { tool(input -> {
+				throw new IllegalStateException("비밀사유 " + input);
+			}) })[0].call("{\"q\":\"비밀규정\"}")).isInstanceOf(IllegalStateException.class);
 
-			assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
-					.anySatisfy(message -> assertThat(message).contains("tool=echo").contains("result=ok"))
-					.allSatisfy(message -> assertThat(message).doesNotContain("비밀규정").doesNotContain("비밀결과"));
+			// 성공은 debug, 예외로 끝난 호출은 운영에서도 보이게 warn — 어느 쪽에도 인자·결과·예외 메시지는 없다.
+			assertThat(appender.list)
+					.anySatisfy(event -> {
+						assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
+						assertThat(event.getFormattedMessage()).contains("tool=echo").contains("result=ok");
+					})
+					.anySatisfy(event -> {
+						assertThat(event.getLevel()).isEqualTo(Level.WARN);
+						assertThat(event.getFormattedMessage()).contains("result=failed:IllegalStateException");
+					})
+					.allSatisfy(event -> assertThat(event.getFormattedMessage())
+							.doesNotContain("비밀규정").doesNotContain("비밀결과").doesNotContain("비밀사유"));
 		} finally {
 			logger.detachAppender(appender);
 			logger.setLevel(previous);

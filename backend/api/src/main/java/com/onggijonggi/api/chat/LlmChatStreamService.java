@@ -68,7 +68,8 @@ public class LlmChatStreamService {
 		return chatClient.prompt()
 				.messages(messages)
 				.options(ChatOptions.builder().model(request.modelId()))
-				.toolCallbacks(toolExecutions.wrap(ToolCallbacks.from(tools.toArray())))
+				// toolCallbacks(…)는 Spring AI 2.0에서 제거 예정이라 tools(…)로 넘긴다 — 감싼 ToolCallback은 그대로 담긴다.
+				.tools((Object[]) toolExecutions.wrap(ToolCallbacks.from(tools.toArray())))
 				.toolContext(toolContext)
 				.advisors()
 				.stream()

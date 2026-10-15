@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -134,8 +135,9 @@ class LlmChatStreamServiceTest {
 				}));
 		CurrentTimeTool tool = new CurrentTimeTool(Clock.fixed(Instant.parse("2026-10-07T06:00:00Z"), ZoneOffset.UTC),
 				ZoneId.of("Asia/Seoul"));
+		List<Prompt> prompts = new CopyOnWriteArrayList<>();
 		LlmChatStreamService service = new LlmChatStreamService(
-				ChatClient.builder(toolCallingModel("currentDateTime", "{}")), tool, mock(WebTools.class));
+				ChatClient.builder(toolCallingModel("currentDateTime", "{}", prompts)), tool, mock(WebTools.class));
 
 		List<String> answer = service.streamChat(new ChatStreamRequest(UUID.randomUUID(), "test-model",
 				List.of(new ChatMessage("user", "지금 몇 시야")), "America/New_York", null, toolExecutions)).collectList().block();
@@ -145,8 +147,10 @@ class LlmChatStreamServiceTest {
 		assertThat(toolExecutions.executions()).singleElement().satisfies(execution -> {
 			assertThat(execution.succeeded()).isTrue();
 			assertThat(execution.input()).isEqualTo("{}");
-			assertThat(execution.output()).contains("2026-10-07T02:00");
+			assertThat(execution.outputLength()).isPositive();
 		});
+		// 도구가 발화자 시간대로 계산한 결과가 다음 호출에 도구 응답으로 실린다.
+		assertThat(toolResponse(prompts.get(1))).contains("2026-10-07T02:00");
 	}
 
 	/** 도구가 실패해도 지금처럼 오류 문장이 모델에 돌아가 답이 이어지고, 공통 지점에는 실패로 기록된다(이슈 #390). */
@@ -167,16 +171,23 @@ class LlmChatStreamServiceTest {
 		assertThat(toolExecutions.executions()).singleElement().satisfies(execution -> {
 			assertThat(execution.toolName()).isEqualTo(ThreadDocumentTool.NAME);
 			assertThat(execution.succeeded()).isFalse();
-			assertThat(execution.output()).isNull();
+			assertThat(execution.outputLength()).isNull();
 			// 실패는 예외 종류 이름만 남는다 — 예외 메시지(사내 내용이 섞일 수 있음)는 기록에 넣지 않는다.
 			assertThat(execution.failure()).isEqualTo("ToolExecutionException");
 			assertThat(execution.elapsed().isNegative()).isFalse();
 		});
 		// 오류 문장은 지금처럼 Spring AI가 도구 응답으로 바꿔 모델에 돌려준다 — 공통 지점이 예외를 삼키거나 바꾸지 않는다.
 		assertThat(prompts).hasSize(2);
-		assertThat(prompts.get(1).getInstructions()).last().isInstanceOfSatisfying(ToolResponseMessage.class,
-				message -> assertThat(message.getResponses()).singleElement()
-						.satisfies(response -> assertThat(response.responseData()).contains("검색 장애")));
+		assertThat(toolResponse(prompts.get(1))).contains("검색 장애");
+	}
+
+	/** 도구 결과를 받은 모델 호출의 마지막 메시지(도구 응답 하나)의 내용. */
+	private static String toolResponse(Prompt prompt) {
+		assertThat(prompt.getInstructions()).last().isInstanceOf(ToolResponseMessage.class);
+		List<Message> instructions = prompt.getInstructions();
+		ToolResponseMessage message = (ToolResponseMessage) instructions.get(instructions.size() - 1);
+		assertThat(message.getResponses()).hasSize(1);
+		return message.getResponses().get(0).responseData();
 	}
 
 	/** 첫 호출에는 도구 호출을, 도구 결과를 받은 다음 호출에는 "답"을 돌려주는 모델. */

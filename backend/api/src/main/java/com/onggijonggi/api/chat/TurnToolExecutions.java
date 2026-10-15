@@ -58,10 +58,15 @@ public final class TurnToolExecutions {
 
 	private void finish(ToolExecution execution) {
 		executions.add(execution);
-		// 인자·결과는 남기지 않는다 — 사내 내용이 섞인 웹 검색어·규정 본문이 들어갈 수 있다.
-		log.debug("도구 실행 threadId={} traceId={} tool={} elapsedMs={} result={}", threadId, traceId,
-				execution.toolName(), execution.elapsed().toMillis(),
-				execution.succeeded() ? "ok" : "failed:" + execution.failure());
+		// 인자·결과·예외 메시지는 남기지 않는다 — 사내 내용이 섞인 웹 검색어·규정 본문이 들어갈 수 있다.
+		// 예외로 끝난 호출은 운영(debug 꺼짐)에서도 보이게 warn으로 남긴다.
+		if (execution.succeeded()) {
+			log.debug("도구 실행 threadId={} traceId={} tool={} elapsedMs={} result=ok", threadId, traceId,
+					execution.toolName(), execution.elapsed().toMillis());
+		} else {
+			log.warn("도구 실행 threadId={} traceId={} tool={} elapsedMs={} result=failed:{}", threadId, traceId,
+					execution.toolName(), execution.elapsed().toMillis(), execution.failure());
+		}
 		for (ToolExecutionListener listener : listeners) {
 			try {
 				listener.finished(execution);
@@ -112,7 +117,8 @@ public final class TurnToolExecutions {
 				throw error;
 			}
 			// 성공 기록은 try 밖에서 한다 — 끝 알림 쪽 고장이 같은 호출을 실패로 한 번 더 기록하지 않게.
-			finish(new ToolExecution(toolName, toolInput, output, null, Duration.ofNanos(System.nanoTime() - started)));
+			finish(new ToolExecution(toolName, toolInput, output == null ? 0 : output.length(), null,
+					Duration.ofNanos(System.nanoTime() - started)));
 			return output;
 		}
 	}
