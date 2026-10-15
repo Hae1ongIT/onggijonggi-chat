@@ -15,12 +15,19 @@ import java.util.UUID;
  * @param timeZone 턴을 부른 발화자의 브라우저 시간대(IANA 이름). null이거나 틀리면 현재 시각 도구가
  *                 서버 기본값을 쓴다(CurrentTimeTool 참조)
  * @param documentTool 이 턴의 방 문서 검색 도구. 검색할 고정 문서가 없는 방이면 null이고 도구를 붙이지 않는다
+ * @param toolExecutions 이 턴의 도구 실행 공통 지점(이슈 #390). null이면 LlmChatStreamService가 리스너 없는 것을 만든다
  */
 public record ChatStreamRequest(UUID sessionId, String modelId, List<ChatMessage> messages, String timeZone,
-		ThreadDocumentTool documentTool) {
+		ThreadDocumentTool documentTool, TurnToolExecutions toolExecutions) {
 
 	/** 방 문서 검색 도구 없이 만든다. */
 	public ChatStreamRequest(UUID sessionId, String modelId, List<ChatMessage> messages, String timeZone) {
-		this(sessionId, modelId, messages, timeZone, null);
+		this(sessionId, modelId, messages, timeZone, null, null);
+	}
+
+	/** 도구 실행 공통 지점은 LlmChatStreamService가 만들게 둔다. */
+	public ChatStreamRequest(UUID sessionId, String modelId, List<ChatMessage> messages, String timeZone,
+			ThreadDocumentTool documentTool) {
+		this(sessionId, modelId, messages, timeZone, documentTool, null);
 	}
 }

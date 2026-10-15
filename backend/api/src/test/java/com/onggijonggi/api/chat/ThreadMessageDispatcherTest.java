@@ -113,6 +113,8 @@ class ThreadMessageDispatcherTest {
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
 		assertThat(request.getValue().timeZone()).isEqualTo("America/New_York");
+		// 도구는 이 턴의 공통 지점을 지난다(이슈 #390).
+		assertThat(request.getValue().toolExecutions()).isNotNull();
 	}
 
 	/** 입퇴장 줄은 대화가 아니라 모델 문맥에 넣지 않는다. 같은 SYSTEM이라도 위험 알림처럼 본문이 있는 줄은 그대로 간다. */
@@ -167,6 +169,9 @@ class ThreadMessageDispatcherTest {
 		verify(llm, timeout(1000).times(2)).streamChat(requests.capture());
 		assertThat(requests.getAllValues()).extracting(request -> request.messages().get(0).content())
 				.containsExactly("one", "two");
+		// 턴마다 도구 실행 기록이 따로라 앞 턴의 도구가 뒤 턴에 섞이지 않는다(이슈 #390).
+		assertThat(requests.getAllValues().get(0).toolExecutions())
+				.isNotSameAs(requests.getAllValues().get(1).toolExecutions());
 		awaitFrameCount(room.frames, 7);
 		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq")
 				.containsExactly(

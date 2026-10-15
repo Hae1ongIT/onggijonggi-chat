@@ -8,6 +8,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.ChatOptions;
+import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
@@ -21,6 +22,7 @@ import java.util.Map;
  * Description : ChatClient.prompt().advisors().stream() 오케스트레이션을 거쳐 실제 LLM(vLLM 등
  *               OpenAI 호환 엔드포인트) 응답을 텍스트 청크 스트림으로 생성하는 구현체. RAG Advisor
  *               Chain은 아직 없어 .advisors()는 빈 채로 호출한다(추후 advisor 삽입 지점).
+ *               도구는 TurnToolExecutions로 감싸 붙여 모든 도구 호출이 한 곳을 지나게 한다(이슈 #390).
  */
 @Service
 public class LlmChatStreamService {
@@ -59,10 +61,15 @@ public class LlmChatStreamService {
 			tools.add(request.documentTool());
 		}
 
+		// 모든 도구 호출이 이 턴의 공통 지점을 지나게 감싼다(이슈 #390). 감싸도 모델이 보는 도구 정의는 그대로고,
+		// 도구 루프(ToolCallingAdvisor)·스트림은 손대지 않는다.
+		TurnToolExecutions toolExecutions = request.toolExecutions() != null ? request.toolExecutions()
+				: new TurnToolExecutions(request.sessionId(), null, List.of());
 		return chatClient.prompt()
 				.messages(messages)
 				.options(ChatOptions.builder().model(request.modelId()))
-				.tools(tools.toArray())
+				// toolCallbacks(…)는 Spring AI 2.0에서 제거 예정이라 tools(…)로 넘긴다 — 감싼 ToolCallback은 그대로 담긴다.
+				.tools((Object[]) toolExecutions.wrap(ToolCallbacks.from(tools.toArray())))
 				.toolContext(toolContext)
 				.advisors()
 				.stream()
