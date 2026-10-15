@@ -9,14 +9,22 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * Class Name : RoomSessionRegistry.java
@@ -31,11 +39,28 @@ import reactor.core.publisher.Sinks;
  *
  *               커넥션 하나가 여러 방에 들 수 있다(이슈 #161) — 방→커넥션 맵(rooms)과 함께
  *               커넥션→방 역방향 인덱스를 들고, 연결이 끊길 때 그 커넥션이 든 모든 방에서 뺀다.
+ *
+ *               <b>이 클래스는 락을 쥔 채로, 또 호출한 스레드에서 sink에 내보내지 않는다(이슈 #405).</b>
+ *               내보내기(방 프레임·입퇴장 통보·방 완료·연결별 left·kicked)는 모두 방별 대기열에 넣기만
+ *               하고, 방마다 한 번에 하나씩 도는 비우기 스레드(drainScheduler)가 아무 락도 쥐지 않은 채
+ *               내보낸다. 내보내는 순간 구독자 코드가 같은 스레드에서 돌기 때문이다 — 닫히는 연결의 종료
+ *               처리(leaveAll → leave)가 그 자리에서 돌며 이 클래스의 락을 다시 잡거나, 방송을 부른 쪽
+ *               (dispatcher)이 쥔 락 안에서 남의 코드가 돌아 서로 다른 순서로 락을 잡는 교착이 났다.
+ *               그래서 방송 결과는 "대기열에 넣었다"까지만 알려 주고, 실제 전송 실패는 방에 고장으로
+ *               표시해 그 방의 다음 방송이 예외로 받는다.
  */
 @Component
 public class RoomSessionRegistry {
 
+	private static final Logger log = LoggerFactory.getLogger(RoomSessionRegistry.class);
+
 	private static final int WARMUP_BUFFER_SIZE = 1;
+
+	/** 방 하나의 대기열에 쌓일 수 있는 프레임·통보 수. 방송이 넘치면 그 방을 고장으로 본다(이슈 #405). */
+	static final int MAX_PENDING = 1024;
+
+	/** 비우기 스레드가 한 번에 내보내는 최대 개수 — 넘으면 다음 차례로 넘겨 스레드 하나를 오래 붙잡지 않는다. */
+	static final int DRAIN_BATCH = 64;
 
 	private final ConcurrentMap<UUID, RoomState> rooms = new ConcurrentHashMap<>();
 
@@ -44,9 +69,18 @@ public class RoomSessionRegistry {
 
 	private final Duration presenceLeaveDebounce;
 
+	/** 방별 대기열을 비우는 스케줄러. 방 하나는 한 번에 한 스레드만 비운다(RoomState.drain). */
+	private final Scheduler drainScheduler;
+
+	@Autowired
 	public RoomSessionRegistry(
 			@Value("${app.collab.presence.leave-debounce:8s}") Duration presenceLeaveDebounce) {
+		this(presenceLeaveDebounce, Schedulers.boundedElastic());
+	}
+
+	RoomSessionRegistry(Duration presenceLeaveDebounce, Scheduler drainScheduler) {
 		this.presenceLeaveDebounce = presenceLeaveDebounce;
+		this.drainScheduler = drainScheduler;
 	}
 
 	/**
@@ -79,9 +113,12 @@ public class RoomSessionRegistry {
 		Sinks.One<Void> kicked = Sinks.one();
 		Sinks.One<Void> left = Sinks.one();
 		RoomState room = rooms.compute(threadId, (ignored, current) -> {
-			RoomState joined = current == null ? new RoomState(presenceLeaveDebounce, presenceEnabled) : current;
+			RoomState joined = current == null
+					? new RoomState(presenceLeaveDebounce, presenceEnabled, drainScheduler)
+					: current;
 			if (joined.add(connectionId, participant, kicked, left) && joined.presenceEnabled) {
-				joined.emitPresence(
+				// 잠금 안에서는 대기열에 넣기만 한다 — 명단과 입장 통보의 순서는 여기서 정해지고, 내보내기는 비우기 스레드가 한다.
+				joined.offerNotice(
 						new PresenceJoinFrame(threadId, participant.subject(), participant.displayName()));
 			}
 			participants.addAll(joined.participants());
@@ -133,28 +170,32 @@ public class RoomSessionRegistry {
 	}
 
 	/**
-	 * 현재 방 세대에만 프레임을 방송한다.
+	 * 현재 방 세대에만 프레임을 방송한다. 방의 대기열에 넣고 바로 돌아온다 — 실제 전송은 비우기 스레드가
+	 * 한다(이슈 #405). 방이 이미 비활성이면 넣지 않는다 — 활성 판정과 넣기가 같은 잠금 안이라 방 완료
+	 * 신호 뒤에 프레임이 들어가지 않는다.
 	 *
-	 * @return 방이 없거나 generation이 달라 stale이면 {@code false}; 현재 sink 고장은 예외로 전파한다.
+	 * @return 대기열에 넣었으면 {@code true}. 방이 없거나 generation이 달라 stale이거나 비활성이면 {@code false}.
+	 * @throws IllegalStateException 이 방의 이전 전송이 실패했거나 대기열이 넘쳐 방이 고장 난 경우 — 호출자가
+	 *         그 세대의 AI 작업을 닫는다(지금까지 sink 고장을 예외로 받던 것과 같은 처리)
 	 */
 	public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
 		if (room == null || !room.generation().equals(roomGeneration)) {
 			return false;
 		}
-		return room.emitIfActive(frame);
+		return room.offerBroadcast(frame);
 	}
 
 	/**
 	 * 지금 그 방에 붙어 있는 사람에게만 의미가 있는 통지를 보낸다 — 아무도 듣고 있지 않으면
-	 * 조용히 버린다(위 emitPresence와 같은 결). broadcastIfCurrent와 달리 room generation을
+	 * 조용히 버린다(입퇴장 통보와 같은 결). broadcastIfCurrent와 달리 room generation을
 	 * 요구하지 않는다 — 배치(RiskCheckBatchService, 이슈 #28)처럼 특정 연결의 턴에 묶이지 않은
 	 * 호출자는 그 값을 모른다.
 	 */
 	public void notifyIfListening(UUID threadId, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
 		if (room != null) {
-			room.emitPresence(frame);
+			room.offerNotice(frame);
 		}
 	}
 
@@ -163,14 +204,14 @@ public class RoomSessionRegistry {
 	 * 보낸다 — 1:1 방에는 알릴 사람이 없다. presence처럼 부가 정보라 듣는 사람이 없으면 버리고
 	 * 실패해도 던지지 않는다. 입력한 본인에게 돌아가지 않게 거르는 것은 구독 쪽(ThreadWebSocketHandler) 몫이다.
 	 *
-	 * @return 방송했으면 {@code true}
+	 * @return 대기열에 넣었으면 {@code true}
 	 */
 	public boolean notifyTyping(UUID connectionId, ChatTypingFrame frame) {
 		RoomState room = rooms.get(frame.threadId());
 		if (room == null || !room.presenceEnabled || !room.contains(connectionId)) {
 			return false;
 		}
-		room.emitPresence(frame);
+		room.offerNotice(frame);
 		return true;
 	}
 
@@ -220,6 +261,15 @@ public class RoomSessionRegistry {
 					.ifPresent(generation -> emptiedGenerations.put(threadId, generation));
 		}
 		return emptiedGenerations;
+	}
+
+	/**
+	 * 그 방의 대기열이 비었고 비우는 중도 아니면 true(방이 없어도 true). 내보내기가 비동기라(이슈 #405)
+	 * 테스트가 "아무것도 오지 않았다"를 확인하기 전에 다 나갔는지 기다리는 데 쓴다.
+	 */
+	boolean idle(UUID threadId) {
+		RoomState room = rooms.get(threadId);
+		return room == null || room.idle();
 	}
 
 	/**
@@ -282,9 +332,24 @@ public class RoomSessionRegistry {
 				.multicast()
 				.onBackpressureBuffer(WARMUP_BUFFER_SIZE, false);
 
-		RoomState(Duration leaveDebounce, boolean presenceEnabled) {
+		/** 내보낼 것들의 방별 대기열(이슈 #405). 넣기는 아무 스레드나, 비우기는 한 번에 하나(wip)만 한다. */
+		private final Queue<Outgoing> outbox = new ConcurrentLinkedQueue<>();
+
+		/** 비우기 차례 수 — 0에서 1이 될 때만 비우기를 예약해, 방 하나를 두 스레드가 함께 비우지 않는다. */
+		private final AtomicInteger wip = new AtomicInteger();
+
+		/** 대기열에 든 방송·통보 수(상한 계산용). 방 완료·left·kicked는 세지 않는다 — 항상 넣는다. */
+		private final AtomicInteger pending = new AtomicInteger();
+
+		/** 이 방의 전송이 실패했거나 대기열이 넘쳤다 — 다음 방송이 예외를 받고, 남은 방송·통보는 버린다(이슈 #405). */
+		private volatile boolean broken;
+
+		private final Scheduler drainScheduler;
+
+		RoomState(Duration leaveDebounce, boolean presenceEnabled, Scheduler drainScheduler) {
 			this.leaveDebounce = leaveDebounce;
 			this.presenceEnabled = presenceEnabled;
+			this.drainScheduler = drainScheduler;
 		}
 
 		/**
@@ -339,17 +404,18 @@ public class RoomSessionRegistry {
 		}
 
 		/**
-		 * 연결을 방에서 빼고 그 결과를 돌려준다. 방이 비면 sink를 종결하고 이 방을 비활성으로
+		 * 연결을 방에서 빼고 그 결과를 돌려준다. 방이 비면 sink 종결을 넣고 이 방을 비활성으로
 		 * 표시한다 — 곧 버려질 방이고, 그 뒤 남은 세대로 들어오는 방송은 여기서 걸러야 한다.
+		 * 그 연결의 left와 방 종결은 대기열로 간다 — 그보다 먼저 넣은 프레임이 다 나간 뒤에 나간다.
 		 */
 		synchronized Departure remove(UUID connectionId) {
 			ConnectionEntry removed = connections.remove(connectionId);
 			if (removed != null) {
-				removed.left().tryEmitEmpty();
+				offer(new Signal(removed.left()));
 			}
 			if (connections.isEmpty()) {
 				active = false;
-				frames.tryEmitComplete();
+				offer(Complete.INSTANCE);
 				pendingLeaves.values().forEach(pending -> pending.schedule().dispose());
 				pendingLeaves.clear();
 				return Departure.ROOM_EMPTY;
@@ -384,7 +450,7 @@ public class RoomSessionRegistry {
 			if (pending == null || !active) {
 				return;
 			}
-			emitPresence(new PresenceLeaveFrame(threadId, subject, pending.participant().displayName()));
+			offerNotice(new PresenceLeaveFrame(threadId, subject, pending.participant().displayName()));
 		}
 
 		/** 유예 중인 퇴장 하나 — 취소용 스케줄과, 그동안 {@link #participants}가 계속 보여줘야
@@ -393,15 +459,15 @@ public class RoomSessionRegistry {
 		}
 
 		/**
-		 * 그 subject가 지금 들고 있는 연결(탭이 여럿이면 전부) 각각의 kicked 신호를 완료시킨다.
-		 * 실제 연결 제거는 하지 않는다 — 신호를 받은 ThreadWebSocketHandler가 그 구독을 풀며
+		 * 그 subject가 지금 들고 있는 연결(탭이 여럿이면 전부) 각각에 kicked 신호를 넣는다. 실제 연결
+		 * 제거는 하지 않는다 — 신호를 받은 ThreadWebSocketHandler가 그 구독을 풀며
 		 * {@link RoomSessionRegistry#leave}를 불러 자연히 빠진다.
 		 */
 		synchronized boolean evict(String subject) {
 			boolean evictedAny = false;
 			for (ConnectionEntry entry : connections.values()) {
 				if (entry.participant().subject().equals(subject)) {
-					entry.kicked().tryEmitEmpty();
+					offer(new Signal(entry.kicked()));
 					evictedAny = true;
 				}
 			}
@@ -414,7 +480,7 @@ public class RoomSessionRegistry {
 
 		synchronized boolean evictAllIfPresenceEnabled() {
 			if (!presenceEnabled) return false;
-			for (ConnectionEntry entry : connections.values()) entry.kicked().tryEmitEmpty();
+			for (ConnectionEntry entry : connections.values()) offer(new Signal(entry.kicked()));
 			return !connections.isEmpty();
 		}
 
@@ -422,34 +488,131 @@ public class RoomSessionRegistry {
 			return frames.asFlux();
 		}
 
-		/**
-		 * 입퇴장 통보 전용 emit. 지금 듣고 있는 구독자가 없으면 보내지 않는다 — presence는 그 순간
-		 * 방에 붙어 있는 사람에게만 의미가 있고, 무엇보다 구독자가 없을 때 밀어 넣으면 warm-up
-		 * 버퍼 한 칸을 차지해 뒤따라오는 첫 메시지를 밀어낸다(이슈 #102). 실패해도 던지지 않는다.
-		 * 이 통보는 부가 정보이고, 특히 퇴장 경로에서 예외가 나면 세션 종료가 망가진다.
-		 */
-		synchronized void emitPresence(WsFrame frame) {
-			if (frames.currentSubscriberCount() == 0) {
-				return;
-			}
-			frames.tryEmitNext(frame);
+		/** 넣을 때마다 wip가 오르고 비운 만큼 내려가므로, 0이면 대기열이 비었고 비우는 스레드도 없다. */
+		boolean idle() {
+			return wip.get() == 0;
 		}
 
-		synchronized boolean emitIfActive(WsFrame frame) {
+		/**
+		 * 입퇴장·입력 중 같은 부가 통보를 넣는다. 지금 듣고 있는 구독자가 없으면 보내지 않는데, 그 판정은
+		 * 내보내는 순간(비우기 스레드)에 한다 — 구독자가 없을 때 밀어 넣으면 warm-up 버퍼 한 칸을 차지해
+		 * 뒤따라오는 첫 메시지를 밀어낸다(이슈 #102). 실패해도 던지지 않고, 대기열이 차면 버린다 —
+		 * 부가 정보이고, 특히 퇴장 경로에서 예외가 나면 세션 종료가 망가진다.
+		 */
+		synchronized void offerNotice(WsFrame frame) {
+			offer(new Notice(frame));
+		}
+
+		/**
+		 * 방송 프레임을 넣는다. 활성 판정과 넣기를 같은 잠금 안에서 해, 방 완료 신호 뒤에 프레임이 들어가지
+		 * 않게 한다.
+		 */
+		synchronized boolean offerBroadcast(WsFrame frame) {
+			if (broken) {
+				throw new IllegalStateException("room frame emission failed: room is broken");
+			}
 			if (!active) {
 				return false;
 			}
-			Sinks.EmitResult result = frames.tryEmitNext(frame);
-			if (result.isFailure()) {
-				throw new IllegalStateException("room frame emission failed: " + result);
+			if (!offer(new Broadcast(frame))) {
+				broken = true;
+				throw new IllegalStateException("room frame emission failed: queue full");
 			}
 			return true;
+		}
+
+		/**
+		 * 대기열에 넣고, 비우는 스레드가 없으면 비우기를 예약한다. 기다리지 않고 남의 코드도 부르지 않으므로
+		 * 잠금 안에서 불러도 된다. 방송·통보는 상한을 넘으면 넣지 않고 false를 돌려준다 — 방 완료·left·kicked는
+		 * 버리면 연결이 방에서 영영 안 빠지거나 방이 안 닫히므로 항상 넣는다.
+		 */
+		private boolean offer(Outgoing item) {
+			boolean counted = item instanceof Broadcast || item instanceof Notice;
+			if (counted && pending.incrementAndGet() > MAX_PENDING) {
+				pending.decrementAndGet();
+				return false;
+			}
+			outbox.offer(item);
+			if (wip.getAndIncrement() == 0) {
+				drainScheduler.schedule(this::drain);
+			}
+			return true;
+		}
+
+		/**
+		 * 대기열을 넣은 순서대로 내보낸다. 한 번에 한 스레드만 돈다(wip) — 방 안 순서가 지켜지고 sink에 동시에
+		 * 내보내지 않는다. 이 스레드는 registry의 어떤 잠금도 쥐지 않는다: 내보내는 순간 구독자 코드(닫히는
+		 * 연결의 leaveAll 등)가 여기서 돌아도 잠금을 처음부터 잡는다. {@link #DRAIN_BATCH}개를 넘게 내보내면
+		 * 다음 차례로 넘긴다 — 그동안 wip가 0이 아니므로 다른 스레드가 비우기를 시작하지 않는다.
+		 */
+		private void drain() {
+			int missed = 1;
+			int sent = 0;
+			do {
+				Outgoing item;
+				while ((item = outbox.poll()) != null) {
+					if (item instanceof Broadcast || item instanceof Notice) {
+						pending.decrementAndGet();
+					}
+					deliver(item);
+					if (++sent >= DRAIN_BATCH) {
+						drainScheduler.schedule(this::drain);
+						return;
+					}
+				}
+				missed = wip.addAndGet(-missed);
+			} while (missed != 0);
+		}
+
+		private void deliver(Outgoing item) {
+			try {
+				if (item instanceof Broadcast broadcast) {
+					if (!broken && frames.tryEmitNext(broadcast.frame()).isFailure()) {
+						broken = true;
+					}
+				} else if (item instanceof Notice notice) {
+					if (!broken && frames.currentSubscriberCount() > 0) {
+						frames.tryEmitNext(notice.frame());
+					}
+				} else if (item instanceof Signal signal) {
+					signal.sink().tryEmitEmpty();
+				} else {
+					frames.tryEmitComplete();
+				}
+			} catch (RuntimeException error) {
+				// 구독자 코드가 던진 것이 비우기를 멈추게 두지 않는다 — 남은 left·완료가 못 나가면 연결이 방에 남는다.
+				if (item instanceof Broadcast) {
+					broken = true;
+				}
+				log.warn("방 대기열 전송 중 오류", error);
+			}
 		}
 
 		/** kicked·left는 이 연결 하나만의 것이라 frames(sink 하나를 방 전체가 공유)와 섞이지 않는다. */
 		private record ConnectionEntry(PresenceParticipant participant, Sinks.One<Void> kicked,
 				Sinks.One<Void> left) {
 		}
+	}
+
+	/** 방 대기열에 드는 것(이슈 #405). */
+	private sealed interface Outgoing permits Broadcast, Notice, Complete, Signal {
+	}
+
+	/** 방송 프레임 — 전송이 실패하면 방이 고장 난다. */
+	private record Broadcast(WsFrame frame) implements Outgoing {
+	}
+
+	/** 부가 통보(입퇴장·입력 중 등) — 듣는 사람이 없으면 버리고, 실패해도 무시한다. */
+	private record Notice(WsFrame frame) implements Outgoing {
+	}
+
+	/** 방 sink 종결 — 방의 마지막 연결이 빠졌다. */
+	private enum Complete implements Outgoing {
+		INSTANCE
+	}
+
+	/** 연결 하나에만 가는 신호(left·kicked). */
+	private record Signal(Sinks.One<Void> sink) implements Outgoing {
 	}
 
 }
