@@ -56,11 +56,6 @@ public class WebTools {
 		return enabled;
 	}
 
-	/** 웹 출처를 모으지 않는 toolContext 값. */
-	public Map<String, Object> context(List<String> userTexts) {
-		return context(userTexts, new WebSources());
-	}
-
 	/**
 	 * toolContext에 실을 값. userTexts는 그 요청의 사용자 발화들이고, 거기 나온 주소가 처음 허락 목록이 된다.
 	 * sources는 이 턴의 웹 출처 모음이다 — 턴이 끝나면 부른 쪽이 꺼내 답변 근거로 쓴다.

@@ -258,6 +258,25 @@ describe('CitationsPanel', () => {
       expect(hostLink.parentElement?.textContent).not.toContain('· b.com');
     });
 
+    it('keeps the domain when the title only looks like it', () => {
+      render(
+        <CitationsPanel
+          state={{
+            status: 'success',
+            citations: [
+              { ...searched, title: 'WWW.b.com', url: 'https://b.com/' },
+              { ...searched, title: 'wwwxb.com', url: 'https://b.com/x' },
+            ],
+          }}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole('button'));
+
+      // "www." 뒤가 같으면 같은 도메인이고, "www" 뒤에 점이 없으면 다른 이름이다.
+      expect(screen.getAllByText(/· b\.com$/)).toHaveLength(1);
+    });
+
     it('points aria-controls at the list only while it is open', () => {
       render(
         <CitationsPanel state={{ status: 'success', citations: [searched] }} />,
