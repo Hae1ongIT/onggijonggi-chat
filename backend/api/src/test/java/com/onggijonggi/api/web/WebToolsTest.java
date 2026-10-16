@@ -99,6 +99,25 @@ class WebToolsTest {
 	}
 
 	@Test
+	void stillAnswersTheModelWhenRecordingASourceFails() {
+		WebSources broken = new WebSources() {
+			@Override
+			synchronized void addSearch(String query, List<WebSearchProvider.Result> results) {
+				throw new IllegalStateException("기록 실패");
+			}
+
+			@Override
+			synchronized void addPage(String requestedKey, String finalUrl, String title) {
+				throw new IllegalStateException("기록 실패");
+			}
+		};
+		ToolContext context = new ToolContext(tools.context(List.of("스프링 가이드 찾아줘"), broken));
+
+		assertThat(tools.webSearch("spring guides", context)).contains("1. Spring");
+		assertThat(tools.webFetch("https://spring.io/guides", context)).startsWith("[외부 웹 페이지 내용");
+	}
+
+	@Test
 	void doesNotRecordFailedOrRefusedCalls() {
 		WebSources sources = new WebSources();
 		WebFetcher failingFetcher = new RecordingFetcher() {
