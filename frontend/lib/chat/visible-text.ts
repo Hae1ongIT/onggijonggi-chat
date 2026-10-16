@@ -29,15 +29,33 @@ export function withoutDisguising(text: string): string {
 
 /**
  * 주소의 %인코딩(한글 경로 등)을 사람이 읽을 수 있게 푼다. 풀 수 없거나, 풀면 제어·방향 바꾸기 문자가 드러나면
- * 그대로 둔다.
+ * 그대로 둔다. 서버가 길이로 잘라 "…"를 붙인 주소는 끝에 반쯤 남은 %인코딩(`%EC%A1…`)을 떼고 푼다 — 그대로면
+ * 주소 전체가 풀리지 않는다.
  */
 export function readableUrl(url: string): string {
-  try {
-    const decoded = decodeURI(url);
-    return [...decoded].some((char) => isDisguising(char.codePointAt(0) ?? 0))
-      ? url
-      : decoded;
-  } catch {
+  const truncated = url.endsWith('…');
+  const body = truncated ? url.slice(0, -1) : url;
+  const decoded = decodePrefix(body, truncated ? MAX_PARTIAL_ESCAPE : 0);
+  if (
+    decoded === null ||
+    [...decoded].some((char) => isDisguising(char.codePointAt(0) ?? 0))
+  ) {
     return url;
   }
+  return truncated ? `${decoded}…` : decoded;
+}
+
+/** 반쯤 잘린 %인코딩의 최대 길이 — 4바이트 글자에서 마지막 한 자리가 빠진 `%F0%9F%98%8`. */
+const MAX_PARTIAL_ESCAPE = 11;
+
+/** 끝에서 maxTrim자까지 떼어 가며 처음 풀리는 앞부분을 푼다. 끝까지 안 풀리면 null이다. */
+function decodePrefix(text: string, maxTrim: number): string | null {
+  for (let trim = 0; trim <= maxTrim && trim < text.length; trim++) {
+    try {
+      return decodeURI(text.slice(0, text.length - trim));
+    } catch {
+      // 더 떼어 본다.
+    }
+  }
+  return null;
 }

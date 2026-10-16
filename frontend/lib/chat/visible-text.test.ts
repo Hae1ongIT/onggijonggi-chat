@@ -26,4 +26,12 @@ describe('readableUrl', () => {
       'https://a.com/%E0%A4%A',
     );
   });
+
+  it('서버가 잘라 끝에 반쯤 남은 %인코딩은 떼고 푼다', () => {
+    expect(
+      readableUrl('https://law.go.kr/%EB%B2%95%EB%A0%B9/%EC%A0%9C60%EC%A1…'),
+    ).toBe('https://law.go.kr/법령/제60…');
+    expect(readableUrl('https://a.com/%F0%9F%98%8…')).toBe('https://a.com/…');
+    expect(readableUrl('https://a.com/%EC%97%B0…')).toBe('https://a.com/연…');
+  });
 });
