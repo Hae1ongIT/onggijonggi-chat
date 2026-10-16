@@ -1251,6 +1251,26 @@ class ThreadMessageDispatcherTest {
 				.contains(ChatAnswerStatus.DONE));
 	}
 
+	/**
+	* 방 프레임이 registry 대기열에서 나가다 sink에서 실패하면(여기서는 듣는 사람 없이 warm-up 버퍼 한 칸을 넘김) registry가
+	* 그 세대를 알려 오고, 그 세대의 AI 작업이 닫힌다(이슈 #405). 실패를 그 방의 다음 방송에 떠넘기지 않는다.
+	*/
+	@Test
+	void aFrameThatFailsInTheRoomQueueClosesItsOwnGeneration() {
+		TestRoom room = new TestRoom();
+		room.subscription.dispose();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("a", "b").concatWith(Flux.<String>never())
+				.doOnCancel(() -> upstreamCancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI fail", UUID.randomUUID()), room.membership.generation());
+
+		awaitTrue(upstreamCancelled);
+		assertThat(upstreamCancelled).isTrue();
+	}
+
 	@Test
 	void revocationDuringCompletionDoesNotEmitASecondTerminalFrame() {
 		AtomicReference<Runnable> revokeOnDone = new AtomicReference<>();

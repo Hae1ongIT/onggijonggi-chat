@@ -32,7 +32,10 @@ final class Eventually {
 		}
 	}
 
-	/** 그 방들의 대기열이 다 비워질 때까지 기다린다 — 부정 단언(아무것도 안 왔다) 전에 부른다. */
+	/**
+	 * 그 방들의 대기열이 다 비워질 때까지 기다린다 — 부정 단언(아무것도 안 왔다) 전에 부른다. 방이 비어 지워졌으면 바로
+	 * 통과하므로(지워진 방의 남은 완료·left는 보지 못한다) 방에 누가 남아 있는 상황에서만 쓴다.
+	 */
 	static void awaitIdle(RoomSessionRegistry registry, UUID... threadIds) {
 		eventually(() -> {
 			for (UUID threadId : threadIds) {

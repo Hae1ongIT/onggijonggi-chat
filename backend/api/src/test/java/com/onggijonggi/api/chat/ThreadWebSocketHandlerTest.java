@@ -559,8 +559,9 @@ class ThreadWebSocketHandlerTest {
 		CountDownLatch completed = new CountDownLatch(1);
 		AtomicReference<Throwable> failure = new AtomicReference<>();
 
+		// 기다리는 수를 하나 더 잡아 둔다 — 강퇴 뒤 방송이 새어 들어오면 받을 수 있게 연결을 열어 둔다.
 		Disposable client = openClient("evicted-order-user", threadId, outbound, received, subscribed, arrived,
-				completed, failure, before + 1, frameTypes("error", "chat.message"));
+				completed, failure, before + 2, frameTypes("error", "chat.message"));
 		try {
 			assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
 			RoomSessionRegistry.RoomMembership observer = roomSessionRegistry.join(threadId, UUID.randomUUID(),
@@ -584,6 +585,10 @@ class ThreadWebSocketHandlerTest {
 				assertThat(error.threadId()).isEqualTo(threadId);
 				assertThat(error.code()).isEqualTo("FORBIDDEN");
 			});
+			// 강퇴 뒤 방송은 오지 않는다 — 방 대기열이 다 빠진 뒤에도 받은 것은 그대로다.
+			Eventually.awaitIdle(roomSessionRegistry, threadId);
+			Thread.sleep(300);
+			assertThat(received).hasSize(before + 1);
 		} finally {
 			outbound.tryEmitComplete();
 			client.dispose();

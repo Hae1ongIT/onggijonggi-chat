@@ -735,8 +735,10 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 
 	/**
 	 * 서버가 이 방 구독만 푼다(참여자 제거·버퍼 넘침). 방에서 빼고, 그 연결의 left 신호가 실제로 온 뒤에
-	 * 사유를 그 방 threadId로 알린다 — left는 방 대기열로 나가므로(이슈 #405) 그보다 먼저 보내면 사유가
-	 * 남은 방 프레임보다 앞서 도착한다. 순서는 "남은 방 프레임 → 해지(프레임 끊김) → 사유"다.
+	 * 사유를 그 방 threadId로 알린다. 버퍼 넘침이면 이 연결의 방 버퍼(bufferForRoom)에 아직 나가지 않은 프레임이
+	 * 남아 있고, 방 프레임은 left가 와야 끊긴다 — left는 방 대기열로 나가므로(이슈 #405) 사유를 먼저 보내면 끊기기
+	 * 전 방 프레임이 사유 뒤에 도착할 수 있다. 강퇴는 kicked가 이미 프레임을 끊어 순서 차이가 없지만 같은 길로
+	 * 보낸다. 순서는 "남은 방 프레임 → 해지(프레임 끊김) → 사유"다.
 	 */
 	private void endSubscription(Connection connection, UUID threadId, Mono<Void> left, ErrorFrame reason) {
 		left.subscribe(null, null, () -> connection.send(reason));
