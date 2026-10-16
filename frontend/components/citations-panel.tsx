@@ -295,5 +295,10 @@ function WebSourceItem({ citation }: { citation: Citation }) {
 
 /** 제목이 곧 도메인인지(www. 제외, 대소문자 무시) — 같으면 " · 도메인"을 덧붙이지 않는다. */
 function sameHost(title: string, host: string): boolean {
-  return title.trim().toLowerCase().replace(/^www./, '') === host.toLowerCase();
+  return (
+    title
+      .trim()
+      .toLowerCase()
+      .replace(/^www\./, '') === host.toLowerCase()
+  );
 }
