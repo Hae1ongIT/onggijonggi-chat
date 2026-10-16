@@ -3,6 +3,8 @@ package com.onggijonggi.api.chat;
 import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.rag.SearchResult;
 import com.onggijonggi.api.rag.ThreadDocumentSearch;
+import com.onggijonggi.api.web.WebSources;
+import com.onggijonggi.api.web.WebSourcesFixture;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
 import com.onggijonggi.common.chat.domain.MsgStatus;
@@ -220,6 +222,42 @@ class ThreadMessageDispatcherTest {
 		eventually(() -> assertThat(room.frames).filteredOn(ChatActivityFrame.class::isInstance)
 				.extracting(frame -> ((ChatActivityFrame) frame).active())
 				.containsExactly(true, false));
+	}
+
+	/**
+	 * 웹 도구가 이 턴의 웹 출처 모음에 남긴 것이 완료 프레임과 저장 둘 다에 WEB 근거로 실린다(이슈 #401). 흐르는 동안의
+	 * STREAMING 프레임에는 싣지 않는다. 웹을 쓰지 않은 답변은 그대로다(persistsAndBroadcastsTheMentionedAgentOnCompletion).
+	 */
+	@Test
+	void includesWebSourcesOfTheTurnInTheAnswer() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			WebSources sources = ((ChatStreamRequest) invocation.getArgument(0)).webSources();
+			WebSourcesFixture.searched(sources, "서울 날씨", "날씨누리", "https://weather.example/seoul", "맑음");
+			WebSourcesFixture.read(sources, "https://weather.example/seoul", "서울 날씨 — 날씨누리");
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1L);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"), room.membership.generation());
+
+		awaitFrameCount(room.frames, 3);
+		List<ChatAnswerFrame> answers = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast).toList();
+		Citation web = Citation.web("https://weather.example/seoul", "서울 날씨 — 날씨누리", "맑음", "서울 날씨", true);
+		assertThat(answers).filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE).singleElement()
+				.satisfies(done -> assertThat(done.citations()).containsExactly(web));
+		assertThat(answers).filteredOn(frame -> frame.status() == ChatAnswerStatus.STREAMING)
+				.allSatisfy(frame -> assertThat(frame.citations()).isEmpty());
+		ArgumentCaptor<String> citationsJson = ArgumentCaptor.forClass(String.class);
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(eq(pending.getId()), eq("답"),
+				citationsJson.capture(), isNull());
+		assertThat(Citation.fromSrcJson(new ObjectMapper(), citationsJson.getValue())).containsExactly(web);
 	}
 
 	private static ToolCallback fakeTool(String name) {

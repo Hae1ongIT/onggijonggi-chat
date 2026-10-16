@@ -16,7 +16,7 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 /**
  * Class Name : WebToolsTest.java
  * Description : 웹 도구의 허락 목록을 검증한다 — 사용자 발화와 같은 턴의 검색 결과 주소만 읽고, 지어낸 주소는 거부하며, 턴끼리 섞이지 않는다.
- *               실패를 사유 문장으로 돌려주는 것과 본문 글자 수 자르기도 본다.
+ *               실패를 사유 문장으로 돌려주는 것과 본문 글자 수 자르기도 본다. 성공한 검색·읽기만 웹 출처로 남는지도 본다(이슈 #401).
  */
 class WebToolsTest {
 
@@ -84,6 +84,41 @@ class WebToolsTest {
 
 		assertThat(failing.webSearch("q", new ToolContext(failing.context(List.of()))))
 				.isEqualTo("웹 검색을 할 수 없다: DuckDuckGo가 자동 요청으로 보고 막았다");
+	}
+
+	@Test
+	void recordsSuccessfulSearchesAndReadsAsWebSources() {
+		WebSources sources = new WebSources();
+		ToolContext context = new ToolContext(tools.context(List.of("스프링 가이드 찾아줘"), sources));
+
+		tools.webSearch(" spring guides ", context);
+		tools.webFetch("https://spring.io/guides", context);
+
+		assertThat(sources.sources()).singleElement().isEqualTo(
+				new WebSources.Source("https://spring.io/guides", "제목", "요약", "spring guides", true));
+	}
+
+	@Test
+	void doesNotRecordFailedOrRefusedCalls() {
+		WebSources sources = new WebSources();
+		WebFetcher failingFetcher = new RecordingFetcher() {
+			@Override
+			Page fetch(URI start) {
+				throw new WebToolException("연결 실패");
+			}
+		};
+		WebTools empty = new WebTools(PROPERTIES, (query, limit) -> List.of(), failingFetcher);
+		WebTools failing = new WebTools(PROPERTIES, (query, limit) -> {
+			throw new WebToolException("막힘");
+		}, failingFetcher);
+		ToolContext context = new ToolContext(empty.context(List.of("https://a.com/ 읽어줘"), sources));
+
+		empty.webSearch("결과 없는 검색", context);
+		failing.webSearch("실패한 검색", context);
+		empty.webFetch("https://not-allowed.example/", context);
+		empty.webFetch("https://a.com/", context);
+
+		assertThat(sources.sources()).isEmpty();
 	}
 
 	@Test

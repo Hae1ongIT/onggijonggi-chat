@@ -7,12 +7,27 @@
   "seq" : 7,
   "delta" : "안녕",
   "citations" : [ {
+    "kind" : "DOCUMENT",
     "docId" : "doc-001",
     "title" : "제목",
     "snippet" : "발췌",
     "score" : 0.91,
     "chunkId" : "chunk-001",
-    "loc" : "page=1"
+    "loc" : "page=1",
+    "url" : null,
+    "query" : null,
+    "read" : false
+  }, {
+    "kind" : "WEB",
+    "docId" : null,
+    "title" : "웹 제목",
+    "snippet" : "웹 요약",
+    "score" : 0.0,
+    "chunkId" : null,
+    "loc" : null,
+    "url" : "https://example.com/a",
+    "query" : "검색어",
+    "read" : true
   } ],
   "restrictedResultsOmitted" : false,
   "status" : "streaming",

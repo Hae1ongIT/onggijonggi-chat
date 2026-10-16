@@ -3,6 +3,7 @@ package com.onggijonggi.api.chat;
 import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.rag.SearchResult;
 import com.onggijonggi.api.rag.ThreadDocumentSearch;
+import com.onggijonggi.api.web.WebSources;
 import com.onggijonggi.api.web.WebTools;
 import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
@@ -665,7 +666,7 @@ public class ThreadMessageDispatcher {
 					return withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
 							new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
 									prompt.messages(), activeTurn.turn.timeZone(), prompt.documentTool(),
-									activeTurn.toolExecutions))));
+									activeTurn.toolExecutions, activeTurn.webSources))));
 				})
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
@@ -956,7 +957,7 @@ public class ThreadMessageDispatcher {
 		try {
 			if (!roomSessionRegistry.broadcastIfCurrent(activeTurn.turn.threadId(), activeTurn.turn.roomGeneration(),
 					new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
-							modelIdFor(activeTurn.turn), activeTurn.seq, "", activeTurn.citations, false,
+							modelIdFor(activeTurn.turn), activeTurn.seq, "", answerCitations(activeTurn), false,
 							ChatAnswerStatus.DONE, activeTurn.groundingNotice, activeTurn.turn.agent()))) {
 				persistAgentCompletion(activeTurn, content);
 				closeGeneration(key, state);
@@ -1137,7 +1138,7 @@ public class ThreadMessageDispatcher {
 		if (!activeTurn.terminalPersisted.compareAndSet(false, true)) {
 			return;
 		}
-		String citationsJson = citationsJson(activeTurn.citations);
+		String citationsJson = citationsJson(answerCitations(activeTurn));
 		String agentJson = Agent.toPylJson(json, activeTurn.turn.agent());
 		activeTurn.pendingMsgId
 				.flatMap(msgId -> Mono
@@ -1146,6 +1147,20 @@ public class ThreadMessageDispatcher {
 						.doOnError(e -> log.error("agent 메시지 완료 저장 실패 msgId={}", msgId, e)))
 				.onErrorComplete()
 				.subscribe();
+	}
+
+	/**
+	* 답변에 남길 근거 — 방 문서 근거 뒤에 이 턴의 웹 출처(이슈 #401)를 붙인다. 완료 프레임과 저장이 같은 값을 쓴다.
+	* 웹 출처는 답변이 끝날 때 한 번에 싣는다 — 방 문서 근거처럼 STREAMING·취소 프레임에는 없다.
+	*/
+	private static List<Citation> answerCitations(ActiveTurn activeTurn) {
+		List<WebSources.Source> web = activeTurn.webSources.sources();
+		if (web.isEmpty()) return activeTurn.citations;
+		List<Citation> citations = new ArrayList<>(activeTurn.citations);
+		for (WebSources.Source source : web) {
+			citations.add(Citation.web(source.url(), source.title(), source.snippet(), source.query(), source.read()));
+		}
+		return List.copyOf(citations);
 	}
 
 	/** 비어 있으면 null — 재접속 복구(ThreadWebSocketHandler)가 null을 "출처 없음"으로 본다. */
@@ -1275,6 +1290,10 @@ public class ThreadMessageDispatcher {
 		/** 모델이 부른 방 문서 검색(FOUND)으로 찾은 근거(이슈 #347). 도구 실행 스레드가 activeTurn을 잡고 새 목록으로
 		 * 바꾸고, 완료 프레임이 읽는다. */
 		private volatile List<Citation> citations = List.of();
+
+		/** 이 턴의 웹 출처(이슈 #401). 웹 도구가 toolContext로 받아 성공한 검색·읽기를 남기고, 완료 프레임·저장이 꺼낸다.
+		 * 턴마다 새로 만들어 다른 턴과 섞이지 않는다. */
+		private final WebSources webSources = new WebSources();
 
 		/** 이 턴에서 방 문서 근거를 찾지 못했을 때 STREAMING·DONE 프레임에 함께 실을 안내(이슈 #353). 문서 목록 조회 실패면
 		 * LLM 호출 전에, 검색 도구가 근거를 못 찾으면 그 호출 뒤에 정해져 이후 프레임부터 실린다. citations와 같이 volatile이다. */

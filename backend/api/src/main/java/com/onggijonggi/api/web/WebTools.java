@@ -22,6 +22,7 @@ import org.springframework.ai.tool.annotation.ToolParam;
  *               주소의 쿼리에 담아 밖으로 보낼 수 있다. 허락 목록은 요청마다 새로 만들어 toolContext로 넘긴다(context()).
  *               읽은 내용은 외부 내용임을 표시해 돌려준다. 로그에는 검색어·주소를 남기지 않는다.
  *               실패는 예외 대신 사유 문장으로 돌려준다 — 모델이 사용자에게 사정을 설명하고 답변을 이어 가게 한다.
+ *               검색·읽기에 성공한 것은 그 턴의 웹 출처 모음(WebSources)에 남긴다 — 답변의 웹 출처가 된다(이슈 #401).
  */
 public class WebTools {
 
@@ -33,6 +34,7 @@ public class WebTools {
 	public static final String FETCH_NAME = "webFetch";
 
 	static final String ALLOWED_URLS = "webAllowedUrls";
+	static final String SOURCES = "webSources";
 	private static final Pattern URL = Pattern.compile("https?://[^\\s<>\"'`(){}\\[\\]]+");
 	/** 문장 끝 구두점은 주소에서 뺀다("https://a.com/x." → "https://a.com/x"). */
 	private static final String TRAILING = ".,;:!?。、)」』";
@@ -54,8 +56,16 @@ public class WebTools {
 		return enabled;
 	}
 
-	/** toolContext에 실을 값. userTexts는 그 요청의 사용자 발화들이고, 거기 나온 주소가 처음 허락 목록이 된다. */
+	/** 웹 출처를 모으지 않는 toolContext 값. */
 	public Map<String, Object> context(List<String> userTexts) {
+		return context(userTexts, new WebSources());
+	}
+
+	/**
+	 * toolContext에 실을 값. userTexts는 그 요청의 사용자 발화들이고, 거기 나온 주소가 처음 허락 목록이 된다.
+	 * sources는 이 턴의 웹 출처 모음이다 — 턴이 끝나면 부른 쪽이 꺼내 답변 근거로 쓴다.
+	 */
+	public Map<String, Object> context(List<String> userTexts, WebSources sources) {
 		Set<String> allowed = ConcurrentHashMap.newKeySet();
 		for (String text : userTexts) {
 			Matcher matcher = URL.matcher(text);
@@ -64,7 +74,7 @@ public class WebTools {
 				if (key != null) allowed.add(key);
 			}
 		}
-		return Map.of(ALLOWED_URLS, allowed);
+		return Map.of(ALLOWED_URLS, allowed, SOURCES, sources);
 	}
 
 	@Tool(name = SEARCH_NAME, description = "웹을 검색해 제목·주소·요약 목록을 돌려준다. 최신 정보나 대화·문서에 없는 사실이 필요할 때 쓴다. "
@@ -80,6 +90,7 @@ public class WebTools {
 			return "웹 검색을 할 수 없다: " + failure.getMessage();
 		}
 		if (results.isEmpty()) return "검색 결과가 없다.";
+		sources(toolContext).addSearch(query.strip(), results);
 		Set<String> allowed = allowed(toolContext);
 		StringBuilder out = new StringBuilder();
 		for (int i = 0; i < results.size(); i++) {
@@ -106,6 +117,7 @@ public class WebTools {
 			log.warn("웹 읽기 실패: {}", failure.getMessage(), failure.getCause());
 			return "페이지를 읽을 수 없다: " + failure.getMessage();
 		}
+		sources(toolContext).addPage(key, page.finalUrl().toString(), page.title());
 		String text = page.text().strip();
 		int max = properties.fetch().maxChars();
 		boolean truncated = text.length() > max;
@@ -121,6 +133,12 @@ public class WebTools {
 		Object value = toolContext == null ? null : toolContext.getContext().get(ALLOWED_URLS);
 		// 문맥이 없으면 아무 주소도 허락하지 않는다. 검색 결과를 담을 곳은 이 호출 안에서만 쓴다.
 		return value instanceof Set<?> set ? (Set<String>) set : ConcurrentHashMap.newKeySet();
+	}
+
+	private static WebSources sources(ToolContext toolContext) {
+		Object value = toolContext == null ? null : toolContext.getContext().get(SOURCES);
+		// 문맥이 없으면 이 호출 안에서만 쓰고 버린다.
+		return value instanceof WebSources sources ? sources : new WebSources();
 	}
 
 	/**
