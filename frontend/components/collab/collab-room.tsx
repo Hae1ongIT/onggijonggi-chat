@@ -32,15 +32,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { MessageAttachments } from '@/components/attachments';
 import { CitationsPanel } from '@/components/citations-panel';
 import { Markdown } from '@/components/markdown';
+import { ActivityLine } from '@/components/message';
 import { NoticeBanner } from '@/components/notice-banner';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
 import { fetchCollabThreads } from '@/lib/api/collab';
+import { activityLabel } from '@/lib/chat/activity';
 import type { RoomMessage, RoomMembershipNotice } from '@/lib/chat/room-state';
 import { isForbidden, isMembershipNotice } from '@/lib/chat/room-state';
 import { typingLabel } from '@/lib/chat/typing';
-import { activityLabel } from '@/lib/chat/activity';
-import { ActivityLine } from '@/components/message';
 import {
   type RoomConnection,
   useCollabRoom,

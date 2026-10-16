@@ -21,10 +21,31 @@ export function activityLabel(kind: string, target: string | null): string {
   return `${label} ${kind === 'WEB_FETCH' ? readableUrl(target) : target}`;
 }
 
-/** 주소의 %인코딩(한글 경로 등)을 사람이 읽을 수 있게 푼다. 풀 수 없으면 그대로 둔다. */
+/**
+ * 풀고 나면 보이는 모양을 바꾸는 글자인지 — 제어 문자와 방향 바꾸기 문자(주소를 거꾸로 보이게 꾸밀 수 있다).
+ * 정규식에 제어 문자를 쓰지 않으려고(lint) 코드 값으로 본다.
+ */
+function isDisguising(code: number): boolean {
+  return (
+    code <= 0x1f ||
+    code === 0x7f ||
+    code === 0x200e ||
+    code === 0x200f ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
+ * 주소의 %인코딩(한글 경로 등)을 사람이 읽을 수 있게 푼다. 풀 수 없거나, 풀면 제어·방향 바꾸기 문자가 드러나면
+ * 그대로 둔다.
+ */
 function readableUrl(url: string): string {
   try {
-    return decodeURI(url);
+    const decoded = decodeURI(url);
+    return [...decoded].some((char) => isDisguising(char.codePointAt(0) ?? 0))
+      ? url
+      : decoded;
   } catch {
     return url;
   }

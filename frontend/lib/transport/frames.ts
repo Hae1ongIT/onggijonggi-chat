@@ -282,7 +282,7 @@ export interface RoomSubscribedFrame {
 
 /**
  * AI 턴이 도구를 실행하기 시작했거나(active=true) 끝냈음(false)을 알린다(이슈 #397). 서버는 저장하지 않고,
- * 이미 끝난 턴의 늦은 알림은 보내지 않는다. msgId는 chat.answer의 msgId와 같은 턴 식별자다. kind는 종류
+ * 이미 끝난 턴의 늦은 알림은 보내지 않는다(시작이 턴 종료와 엇갈리면 끝을 바로 이어 보낸다). msgId는 chat.answer의 msgId와 같은 턴 식별자다. kind는 종류
  * 코드이고 문구는 화면이 고른다(lib/chat/activity.ts) — 모르는 코드도 받는다. target은 검색어·주소·파일
  * 이름처럼 그 도구가 다루는 대상이다.
  */

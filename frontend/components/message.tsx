@@ -220,7 +220,7 @@ export const ThinkingMessage = ({ label }: { label?: string | null }) => {
         </div>
 
         <div className="flex flex-col gap-2 w-full">
-          <div className="flex flex-col gap-4 text-muted-foreground">
+          <div className="flex min-w-0 flex-col gap-4 break-words text-muted-foreground">
             {label ?? 'Thinking...'}
           </div>
         </div>
@@ -239,12 +239,16 @@ export const ActivityLine = ({
   className?: string;
 }) => (
   <div
-    className={`${className} flex items-center gap-2 text-sm text-muted-foreground`}
+    className={cn(
+      className,
+      'flex items-center gap-2 text-sm text-muted-foreground',
+    )}
     aria-live="polite"
   >
-    <span className="animate-spin">
+    <span className="shrink-0 animate-spin">
       <LoaderIcon size={14} />
     </span>
-    {label}
+    {/* 대상은 공백 없는 긴 주소·파일 이름일 수 있다 — 줄을 넘기지 않으면 좁은 화면에서 말풍선이 옆으로 넘친다. */}
+    <span className="min-w-0 break-words">{label}</span>
   </div>
 );

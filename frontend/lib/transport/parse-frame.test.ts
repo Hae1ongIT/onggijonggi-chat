@@ -582,5 +582,11 @@ describe('parseFrame — system.notice(#29)', () => {
     expect(parseFrame(frame)).toEqual(frame);
     const { active: _active, ...withoutActive } = frame;
     expect(parseFrame(withoutActive)).toBeNull();
+    expect(parseFrame({ ...frame, target: '서울 날씨' })).toEqual({
+      ...frame,
+      target: '서울 날씨',
+    });
+    expect(parseFrame({ ...frame, active: 'true' })).toBeNull();
+    expect(parseFrame({ ...frame, agent: 'xyz' })).toBeNull();
   });
 });

@@ -901,6 +901,7 @@ describe('applyFrame - chat.activity(이슈 #397)', () => {
     kind = 'WEB_SEARCH',
     target: string | null = '서울 날씨',
     msgId = 'agent-msg-1',
+    agent: 'sol' | 'fin' | 'law' | null = null,
   ): WsFrame {
     return {
       type: 'chat.activity',
@@ -910,9 +911,24 @@ describe('applyFrame - chat.activity(이슈 #397)', () => {
       kind,
       target,
       active,
-      agent: null,
+      agent,
     };
   }
+
+  it('역할 에이전트를 함께 들어, 협업방 AI 자리에 그 이름을 쓸 수 있다', () => {
+    const state = fold([
+      activity(true, 'WEB_SEARCH', '환율', 'agent-msg-1', 'fin'),
+    ]);
+    expect(state.activity?.agent).toBe('fin');
+  });
+
+  it('같은 턴의 다음 도구 시작은 흐르는 답변이 있어도 표시를 바꾼다', () => {
+    const state = fold([
+      answer('먼저 찾아볼게요', 'streaming'),
+      activity(true, 'WEB_FETCH', 'https://example.org'),
+    ]);
+    expect(state.activity?.kind).toBe('WEB_FETCH');
+  });
 
   it('시작하면 들고, 끝나면 지운다', () => {
     const started = fold([activity(true)]);
@@ -963,6 +979,62 @@ describe('applyFrame - chat.activity(이슈 #397)', () => {
       },
     ]);
     expect(state.activity).toBeNull();
+  });
+
+  it('다른 턴의 답변 종료는 지금 표시를 지우지 않는다', () => {
+    expect(
+      fold([activity(true), answer('', 'done', { msgId: 'agent-msg-2' })])
+        .activity?.msgId,
+    ).toBe('agent-msg-1');
+    expect(
+      fold([activity(true), answer('', 'cancelled', { msgId: 'agent-msg-2' })])
+        .activity?.msgId,
+    ).toBe('agent-msg-1');
+  });
+
+  it('거부로 끝나도 지운다', () => {
+    expect(fold([activity(true), answer('', 'denied')]).activity).toBeNull();
+  });
+
+  it('종결이 아닌 오류는 표시를 그대로 둔다', () => {
+    const state = fold([
+      activity(true),
+      {
+        type: 'error',
+        threadId: THREAD,
+        code: 'RATE_LIMITED',
+        message: 'm',
+        traceId: 't',
+      },
+    ]);
+    expect(state.activity?.msgId).toBe('agent-msg-1');
+  });
+
+  it('이미 끝난 답변의 늦은 시작은 받지 않는다', () => {
+    const state = fold([
+      answer('답', 'streaming'),
+      answer('', 'done'),
+      activity(true),
+    ]);
+    expect(state.activity).toBeNull();
+  });
+
+  it('말풍선 없이 시작한 표시는 첫 조각에도 남고, 그 턴이 끝나면 지워진다', () => {
+    const streaming = fold([activity(true), answer('첫 조각', 'streaming')]);
+    expect(streaming.activity?.msgId).toBe('agent-msg-1');
+    expect(fold([answer('', 'done')], streaming).activity).toBeNull();
+  });
+
+  it('입장·명단 프레임은 표시를 건드리지 않는다', () => {
+    const state = fold([
+      activity(true),
+      {
+        type: 'presence.snapshot',
+        threadId: THREAD,
+        participants: [],
+      },
+    ]);
+    expect(state.activity?.msgId).toBe('agent-msg-1');
   });
 
   it('연결이 끊기면 clearActivity로 지운다', () => {

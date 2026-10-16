@@ -34,10 +34,20 @@ describe('activityLabel', () => {
     );
   });
 
+  it('풀면 제어·방향 바꾸기 문자가 드러나는 주소는 풀지 않는다', () => {
+    expect(activityLabel('WEB_FETCH', 'https://x.org/a%0Ab')).toBe(
+      '페이지 읽는 중… https://x.org/a%0Ab',
+    );
+    expect(activityLabel('WEB_FETCH', 'https://x.org/%E2%80%AEfdp.exe')).toBe(
+      '페이지 읽는 중… https://x.org/%E2%80%AEfdp.exe',
+    );
+  });
+
   it('대상이 없으면 문구만, 모르는 코드면 일반 문구', () => {
     expect(activityLabel('WEB_SEARCH', null)).toBe('웹 검색 중…');
     expect(activityLabel('DOCUMENT_GENERATE', '보고서')).toBe(
       '작업 중… 보고서',
     );
+    expect(activityLabel('TOOL', null)).toBe('작업 중…');
   });
 });

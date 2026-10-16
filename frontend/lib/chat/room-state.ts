@@ -194,6 +194,14 @@ export function clearActivity(state: RoomState): RoomState {
   return state.activity === null ? state : { ...state, activity: null };
 }
 
+/** 그 msgId의 답변이 이미 있고 더 흐르지 않는지. 말풍선이 아직 없으면(도구가 첫 글자보다 먼저 돎) false다. */
+function isFinishedAnswer(state: RoomState, msgId: string): boolean {
+  const index = messageIndexById(state, msgId);
+  if (index === null) return false;
+  const entry = state.messages[index];
+  return !isMembershipNotice(entry) && !entry.streaming;
+}
+
 /** 그 턴의 진행 중 표시만 지운다. 다른 턴의 표시는 그대로 둔다. */
 function clearActivityOf(state: RoomState, msgId: string): RoomState {
   return state.activity?.msgId === msgId ? { ...state, activity: null } : state;
@@ -524,7 +532,7 @@ function extendAnswer(
 
 /**
  * 프레임 하나를 상태에 접는다. 알 수 없는 프레임은 parse-frame.ts가 이미 걸러내므로
- * 여기 도착하는 것은 계약 안의 열 가지뿐이고, switch는 그 열을 모두 다룬다.
+ * 여기 도착하는 것은 계약 안의 프레임뿐이고, switch는 그 전부를 다룬다.
  */
 export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
   switch (frame.type) {
@@ -596,7 +604,10 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
     case 'approval.changed':
       return state;
     // 도구 실행 중 표시(이슈 #397). 지금 도는 것 하나만 둔다 — 시작이면 덮어쓰고, 끝이면 그 턴의 것만 지운다.
+    // 이미 끝난 답변의 늦은 시작은 받지 않는다 — 서버가 경합 때 끝을 바로 잇지만, 그 끝을 못 받으면 완료된 말풍선
+    // 아래에 진행 표시가 남는다.
     case 'chat.activity':
+      if (frame.active && isFinishedAnswer(state, frame.msgId)) return state;
       return frame.active
         ? {
             ...state,

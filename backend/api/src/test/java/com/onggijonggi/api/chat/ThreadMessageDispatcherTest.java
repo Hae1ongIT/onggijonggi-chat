@@ -32,6 +32,7 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.scheduler.VirtualTimeScheduler;
 import tools.jackson.databind.ObjectMapper;
 
@@ -164,6 +165,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(command(room, "@AI 서울 날씨"), room.membership.generation());
 
+		// 사람 발화 1 + 웹 검색 시작·끝 2 + 답변 조각 1 + 완료 1 — 현재 시각 도구는 세지 않는다.
 		awaitFrameCount(room.frames, 5);
 		List<ChatActivityFrame> activities = room.frames.stream()
 				.filter(ChatActivityFrame.class::isInstance).map(ChatActivityFrame.class::cast).toList();
@@ -180,6 +182,45 @@ class ThreadMessageDispatcherTest {
 		// 방 프레임은 대기열로 나가므로(이슈 #405) 다 빠질 때까지 기다린 뒤 본다.
 		awaitIdle(room.registry, room.threadId);
 		assertThat(room.frames).hasSize(before);
+	}
+
+	/**
+	* 도구 "시작"을 넣는 사이에 턴이 끝나면(여기서는 시작을 방송하는 순간 중지) 그 시작이 종료 프레임 뒤에 들어갈 수 있다 —
+	* 그 뒤 "끝"은 끝난 턴이라 막히므로, 서버가 "끝"을 바로 이어 화면에 진행 표시가 남지 않게 한다(이슈 #397 리뷰).
+	*/
+	@Test
+	void anActivityStartRacingTheTurnEndIsFollowedByAnEnd() {
+		AtomicReference<Runnable> onStart = new AtomicReference<>(() -> {
+		});
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+				boolean broadcast = super.broadcastIfCurrent(threadId, generation, frame);
+				if (frame instanceof ChatActivityFrame activity && activity.active()) {
+					onStart.getAndSet(() -> {
+					}).run();
+				}
+				return broadcast;
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback search = toolExecutions.wrap(new ToolCallback[] { fakeTool("webSearch") })[0];
+			return Mono.fromCallable(() -> search.call("{\"query\":\"서울 날씨\"}"))
+					.subscribeOn(Schedulers.boundedElastic())
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		UUID turnId = UUID.randomUUID();
+		onStart.set(() -> dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId));
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨", turnId), room.membership.generation());
+
+		eventually(() -> assertThat(room.frames).filteredOn(ChatActivityFrame.class::isInstance)
+				.extracting(frame -> ((ChatActivityFrame) frame).active())
+				.containsExactly(true, false));
 	}
 
 	private static ToolCallback fakeTool(String name) {

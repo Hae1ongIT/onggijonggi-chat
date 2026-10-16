@@ -46,4 +46,41 @@ class ToolActivityTest {
 		assertThat(ToolActivity.of("webSearch", "{깨진", json)).contains(new ToolActivity("WEB_SEARCH", null));
 		assertThat(ToolActivity.of("webSearch", "{\"query\":\"  \"}", json)).contains(new ToolActivity("WEB_SEARCH", null));
 	}
+
+	/** 정확히 상한 길이면 자르지 않는다. 키가 없거나 문자열이 아니면 대상 없이 알린다. */
+	@Test
+	void keepsTargetsAtTheLimitAndSkipsMissingOrNonStringArguments() {
+		String atLimit = "가".repeat(ToolActivity.MAX_TARGET_LENGTH);
+		assertThat(ToolActivity.of("webSearch", "{\"query\":\"" + atLimit + "\"}", json).orElseThrow().target())
+				.isEqualTo(atLimit);
+		assertThat(ToolActivity.of(ThreadDocumentTool.REVISE_NAME, "{\"edits\":[]}", json))
+				.contains(new ToolActivity("DOCUMENT_REVISE", null));
+		assertThat(ToolActivity.of("webSearch", "{\"query\":123}", json)).contains(new ToolActivity("WEB_SEARCH", null));
+		assertThat(ToolActivity.of("webFetch", "{\"url\":\"mailto:a@example.org\"}", json).orElseThrow().target())
+				.isNull();
+	}
+
+	/** 글자 단위로 자른다 — 이모지(UTF-16 두 단위)가 경계에 걸려도 반으로 갈리지 않는다. */
+	@Test
+	void cutsByCharactersNotUtf16Units() {
+		String emojis = "😀".repeat(150);
+		assertThat(ToolActivity.of("webSearch", "{\"query\":\"" + emojis + "\"}", json).orElseThrow().target())
+				.isEqualTo("😀".repeat(ToolActivity.MAX_TARGET_LENGTH) + "…");
+	}
+
+	/** 페이지 주소는 방 참여자 모두에게 보이므로 쿼리·조각·사용자 정보를 빼고, 주소가 아니면 싣지 않는다. */
+	@Test
+	void fetchTargetDropsQueryFragmentAndUserInfo() {
+		assertThat(ToolActivity.of("webFetch",
+				"{\"url\":\"https://user:pw@example.org:8443/a/b?token=secret&q=1#part\"}", json).orElseThrow().target())
+				.isEqualTo("https://example.org:8443/a/b");
+		assertThat(ToolActivity.of("webFetch", "{\"url\":\"그냥 글자\"}", json).orElseThrow().target()).isNull();
+	}
+
+	/** 모델이 만든 값의 줄바꿈·제어 문자는 한 줄 표시로 바꾼다. */
+	@Test
+	void flattensLineBreaksInTargets() {
+		assertThat(ToolActivity.of("webSearch", "{\"query\":\"서울\\n날씨\\t오늘\"}", json).orElseThrow().target())
+				.isEqualTo("서울 날씨 오늘");
+	}
 }
