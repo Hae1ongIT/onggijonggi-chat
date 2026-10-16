@@ -55,7 +55,7 @@ describe('parseFrame', () => {
     }
   });
 
-  it('chat.answer의 웹 출처(docId·chunkId·loc null)와 kind 없는 과거 근거를 함께 받는다(이슈 #401)', () => {
+  it('chat.answer의 웹 출처(docId·chunkId·loc null)와 kind 없는 과거 근거, read가 null인 근거를 함께 받는다(이슈 #401)', () => {
     const web = {
       kind: 'WEB',
       docId: null,
@@ -69,6 +69,7 @@ describe('parseFrame', () => {
       read: true,
     };
     const legacy = { docId: 'd1', title: '제목', snippet: '발췌', score: 0.9 };
+    const readUnknown = { ...web, url: 'https://b.com/', read: null };
     const frame = parseFrame({
       type: 'chat.answer',
       threadId: 's1',
@@ -77,7 +78,7 @@ describe('parseFrame', () => {
       model: 'm',
       seq: 1,
       delta: '',
-      citations: [legacy, web],
+      citations: [legacy, web, readUnknown],
       restrictedResultsOmitted: false,
       status: 'done',
       groundingNotice: null,
@@ -85,7 +86,7 @@ describe('parseFrame', () => {
     });
     expect(frame?.type).toBe('chat.answer');
     if (frame?.type === 'chat.answer') {
-      expect(frame.citations).toEqual([legacy, web]);
+      expect(frame.citations).toEqual([legacy, web, readUnknown]);
     }
   });
 

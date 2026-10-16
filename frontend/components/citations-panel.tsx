@@ -18,7 +18,7 @@
  *********************************************************/
 
 import { AnimatePresence, motion } from 'framer-motion';
-import { useId, useState } from 'react';
+import { type ReactNode, useId, useState } from 'react';
 
 import type { Citation } from '@/lib/api/chat';
 import {
@@ -29,6 +29,7 @@ import {
   hostOf,
   safeWebUrl,
 } from '@/lib/chat/citations';
+import { readableUrl, withoutDisguising } from '@/lib/chat/visible-text';
 import type { ChatAnswerFrame } from '@/lib/transport/frames';
 import { ChevronDownIcon, InfoIcon, LoaderIcon, LockIcon } from './icons';
 
@@ -57,8 +58,9 @@ function formatLoc(loc: string | null | undefined): string | null {
 function webQueries(web: Citation[]): string[] {
   const queries: string[] = [];
   for (const citation of web) {
-    if (citation.query && !queries.includes(citation.query)) {
-      queries.push(citation.query);
+    const query = citation.query && withoutDisguising(citation.query);
+    if (query && !queries.includes(query)) {
+      queries.push(query);
     }
   }
   return queries;
@@ -117,32 +119,22 @@ export function CitationsPanel({ state }: { state: CitationsState }) {
       {(documents.length > 0 || web.length > 0) && (
         <div className="flex flex-wrap items-center">
           {documents.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setDocumentsExpanded((prev) => !prev)}
-              aria-expanded={documentsExpanded}
-              aria-controls={documentsListId}
-              className="flex items-center gap-1 text-muted-foreground hover:text-foreground px-2 py-1"
+            <PanelToggle
+              expanded={documentsExpanded}
+              onToggle={() => setDocumentsExpanded((prev) => !prev)}
+              controls={documentsListId}
             >
               📚 근거 검색됨 ({documents.length}건)
-              <span className={documentsExpanded ? 'rotate-180' : ''}>
-                <ChevronDownIcon size={12} />
-              </span>
-            </button>
+            </PanelToggle>
           )}
           {web.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setWebExpanded((prev) => !prev)}
-              aria-expanded={webExpanded}
-              aria-controls={webListId}
-              className="flex items-center gap-1 text-muted-foreground hover:text-foreground px-2 py-1"
+            <PanelToggle
+              expanded={webExpanded}
+              onToggle={() => setWebExpanded((prev) => !prev)}
+              controls={webListId}
             >
               🌐 웹 출처 ({web.length}건)
-              <span className={webExpanded ? 'rotate-180' : ''}>
-                <ChevronDownIcon size={12} />
-              </span>
-            </button>
+            </PanelToggle>
           )}
         </div>
       )}
@@ -192,11 +184,11 @@ export function CitationsPanel({ state }: { state: CitationsState }) {
             className="flex flex-col gap-2 px-2 pb-2 max-w-md overflow-hidden"
           >
             {queries.length > 0 && (
-              <div className="text-muted-foreground break-words">
+              <div className="text-muted-foreground [overflow-wrap:anywhere]">
                 검색어: {queries.join(' · ')}
               </div>
             )}
-            <ul className="flex flex-col gap-2">
+            <ul className="flex min-w-0 flex-col gap-2">
               {web.map((citation, index) => (
                 <WebSourceItem
                   key={citationKey(citation) ?? `web-${index}`}
@@ -225,22 +217,58 @@ export function CitationsPanel({ state }: { state: CitationsState }) {
   );
 }
 
-/** 웹 출처 한 건 — 제목(http·https면 새 탭 링크)·도메인·읽음 표시·요약. */
+/** 근거 목록 하나를 접고 펴는 버튼. */
+function PanelToggle({
+  expanded,
+  onToggle,
+  controls,
+  children,
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+  controls: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      className="flex items-center gap-1 text-muted-foreground hover:text-foreground px-2 py-1"
+    >
+      {children}
+      <span className={expanded ? 'rotate-180' : ''}>
+        <ChevronDownIcon size={12} />
+      </span>
+    </button>
+  );
+}
+
+/**
+ * 웹 출처 한 건 — 제목(http·https면 새 탭 링크)·도메인·읽음 표시·요약. 제목·요약은 웹 페이지가 정한 글자라
+ * 방향 바꾸기 문자를 빼고, 공백 없는 긴 주소도 줄을 바꾼다. 도메인은 퓨니코드(xn--) 그대로 둔다 — 비슷하게 생긴
+ * 다른 글자로 꾸민 도메인이 진짜처럼 보이지 않게. 링크에 마우스를 올리면 실제 주소가 보인다.
+ */
 function WebSourceItem({ citation }: { citation: Citation }) {
   const href = safeWebUrl(citation.url);
   const host = hostOf(citation.url);
-  const title = citation.title || host || citation.url || '';
+  const title = withoutDisguising(
+    citation.title || host || readableUrl(citation.url ?? ''),
+  );
   return (
-    <li className="rounded-md border bg-muted/40 p-2 text-muted-foreground">
-      <div className="font-medium text-foreground break-words">
+    <li className="min-w-0 rounded-md border bg-muted/40 p-2 text-muted-foreground [overflow-wrap:anywhere]">
+      <div className="font-medium text-foreground">
         {href ? (
           <a
             href={href}
+            title={href}
             target="_blank"
             rel="noopener noreferrer"
             className="underline-offset-2 hover:underline"
           >
             {title}
+            <span className="sr-only"> (새 탭에서 열림)</span>
           </a>
         ) : (
           title
@@ -252,7 +280,7 @@ function WebSourceItem({ citation }: { citation: Citation }) {
           </span>
         )}
       </div>
-      {citation.snippet && <div>{citation.snippet}</div>}
+      {citation.snippet && <div>{withoutDisguising(citation.snippet)}</div>}
     </li>
   );
 }

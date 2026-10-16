@@ -178,10 +178,13 @@ describe('CitationsPanel', () => {
       fireEvent.click(buttons[1]);
 
       expect(screen.getByText('검색어: 스프링 가이드')).toBeTruthy();
-      const link = screen.getByRole('link', { name: 'Spring Guides' });
+      const link = screen.getByRole('link', {
+        name: /^Spring Guides\s*\(새 탭에서 열림\)$/,
+      });
       expect(link.getAttribute('href')).toBe('https://www.spring.io/guides');
       expect(link.getAttribute('target')).toBe('_blank');
       expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(link.getAttribute('title')).toBe('https://www.spring.io/guides');
       expect(screen.getByText(/spring\.io$/)).toBeTruthy();
       expect(screen.getAllByText('읽음')).toHaveLength(1);
       expect(screen.getByText('수상한 링크').closest('a')).toBeNull();
@@ -214,6 +217,40 @@ describe('CitationsPanel', () => {
       );
 
       expect(container.textContent).toBe('');
+    });
+
+    it('strips direction overrides from page text and falls back to the host', () => {
+      render(
+        <CitationsPanel
+          state={{
+            status: 'success',
+            citations: [
+              {
+                ...searched,
+                title: 'gpj.‮exe',
+                snippet: '요약‮끝',
+                query: '검색⁦어',
+              },
+              {
+                ...searched,
+                title: '',
+                url: 'https://b.com/x',
+                query: null,
+                read: false,
+              },
+            ],
+          }}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole('button'));
+
+      expect(screen.getByText('gpj.exe')).toBeTruthy();
+      expect(screen.getByText('요약끝')).toBeTruthy();
+      expect(screen.getByText('검색어: 검색어')).toBeTruthy();
+      expect(
+        screen.getByRole('link', { name: /^b\.com\s*\(새 탭에서 열림\)$/ }),
+      ).toBeTruthy();
     });
   });
 

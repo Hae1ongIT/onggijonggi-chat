@@ -25,7 +25,7 @@ const citationSchema = z.object({
   loc: z.string().nullable().optional(),
   url: z.string().nullable().optional(),
   query: z.string().nullable().optional(),
-  read: z.boolean().optional(),
+  read: z.boolean().nullable().optional(),
 });
 
 /** 이슈 #10 코멘트에서 확정된 통합 답변 패킷 — chat.token/chat.done/(제안했던)chat.citation을

@@ -45,7 +45,7 @@ export interface Citation {
   /** 웹 출처를 처음 찾은 검색어. 검색 없이 읽은 주소와 방 문서 근거는 null이다. */
   query?: string | null;
   /** 웹 출처의 본문을 웹 읽기로 실제로 읽었는지. */
-  read?: boolean;
+  read?: boolean | null;
 }
 
 export interface CitationsResponse {

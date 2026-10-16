@@ -40,6 +40,8 @@ describe('safeWebUrl', () => {
     expect(safeWebUrl('http://a.com')).toBe('http://a.com/');
     expect(safeWebUrl('javascript:alert(1)')).toBeNull();
     expect(safeWebUrl('data:text/html,hi')).toBeNull();
+    expect(safeWebUrl('//evil.com/x')).toBeNull();
+    expect(safeWebUrl('HTTPS://A.com/x')).toBe('https://a.com/x');
     expect(safeWebUrl('주소 아님')).toBeNull();
     expect(safeWebUrl(null)).toBeNull();
   });
