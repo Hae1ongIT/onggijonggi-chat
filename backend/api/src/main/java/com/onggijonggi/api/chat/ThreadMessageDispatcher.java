@@ -1306,9 +1306,9 @@ public class ThreadMessageDispatcher {
 
 		/**
 		* 이 턴의 도구 실행 시작·끝을 방에 활동 프레임으로 알린다(이슈 #397). 이미 끝난 턴(완료·중지·오류)의 늦은
-		* 알림은 보내지 않는다 — 끝난 턴에서도 이미 요청된 도구는 끝까지 돌기 때문이다(#390). 진행 표시는 부가
-		* 기능이라 대기열이 꽉 차 넣지 못해도 턴을 깨지 않는다(넣은 뒤 전송이 실패하면 registry가 그 세대를 닫는 것은
-		* 다른 방 프레임과 같다, #405).
+		* 알림은 보내지 않는다 — 끝난 턴에서도 이미 요청된 도구는 끝까지 돌기 때문이다(#390). 진행 표시는 화면 힌트라
+		* 방송이 아니라 부가 통보로 보낸다(notifyIfCurrent) — 넘치거나 전송이 실패하면 버려질 뿐 답변 세대를 닫지 않고,
+		* 방송 대기열 자리도 먹지 않는다. 버려진 "끝"은 화면이 답변 종료·종결 오류·연결 끊김에서 지운다.
 		*/
 		private final class ActivityBroadcaster implements ToolExecutionListener {
 
@@ -1334,13 +1334,9 @@ public class ThreadMessageDispatcher {
 			}
 
 			private void send(ToolActivity activity, boolean active) {
-				try {
-					roomSessionRegistry.broadcastIfCurrent(turn.threadId(), turn.roomGeneration(),
-							new ChatActivityFrame(turn.threadId(), msgId, turn.turnId(), activity.kind(),
-									activity.target(), active, turn.agent()));
-				} catch (RuntimeException error) {
-					log.debug("도구 활동 방송 실패 threadId={} traceId={}", turn.threadId(), turn.traceId(), error);
-				}
+				roomSessionRegistry.notifyIfCurrent(turn.threadId(), turn.roomGeneration(),
+						new ChatActivityFrame(turn.threadId(), msgId, turn.turnId(), activity.kind(), activity.target(),
+								active, turn.agent()));
 			}
 		}
 

@@ -220,9 +220,12 @@ export const ThinkingMessage = ({ label }: { label?: string | null }) => {
         </div>
 
         <div className="flex flex-col gap-2 w-full">
-          <div className="flex min-w-0 flex-col gap-4 break-words text-muted-foreground">
-            {label ?? 'Thinking...'}
-          </div>
+          {/* 도구가 돌면 그 문구를 스피너와 함께 보인다 — 답변 아래 진행 줄(ActivityLine)과 같은 모양. */}
+          {label ? (
+            <ActivityLine label={label} className="" />
+          ) : (
+            <div className="text-muted-foreground">생각 중…</div>
+          )}
         </div>
       </div>
     </motion.div>
@@ -243,9 +246,12 @@ export const ActivityLine = ({
       className,
       'flex items-center gap-2 text-sm text-muted-foreground',
     )}
-    aria-live="polite"
+    role="status"
   >
-    <span className="shrink-0 animate-spin">
+    <span
+      className="shrink-0 animate-spin motion-reduce:animate-none"
+      aria-hidden="true"
+    >
       <LoaderIcon size={14} />
     </span>
     {/* 대상은 공백 없는 긴 주소·파일 이름일 수 있다 — 줄을 넘기지 않으면 좁은 화면에서 말풍선이 옆으로 넘친다. */}

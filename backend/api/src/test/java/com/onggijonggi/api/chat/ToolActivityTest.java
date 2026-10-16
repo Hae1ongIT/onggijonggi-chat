@@ -2,7 +2,12 @@ package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.onggijonggi.api.web.WebTools;
+import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.tool.annotation.Tool;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -23,6 +28,29 @@ class ToolActivityTest {
 		assertThat(ToolActivity.of(ThreadDocumentTool.NAME, "{\"query\":\"연차 신청\"}", json))
 				.contains(new ToolActivity("DOCUMENT_SEARCH", "연차 신청"));
 		assertThat(ToolActivity.of("unknownTool", "{\"x\":1}", json)).contains(new ToolActivity("TOOL", null));
+	}
+
+	/**
+	* 모델에 넘기는 도구(LlmChatStreamService가 담는 클래스들)마다 진행 표시 종류가 정해져 있다 — 도구 이름을 바꾸거나
+	* 새 도구를 더하고 ToolActivity를 잊으면 "작업 중…"으로 조용히 바뀌므로 여기서 잡는다. 현재 시각만 알리지 않는다.
+	*/
+	@Test
+	void everyToolGivenToTheModelHasAnActivityKind() {
+		for (Class<?> toolClass : List.of(CurrentTimeTool.class, WebTools.class, ThreadDocumentTool.class)) {
+			for (Method method : toolClass.getDeclaredMethods()) {
+				Tool tool = method.getAnnotation(Tool.class);
+				if (tool == null) {
+					continue;
+				}
+				String name = tool.name().isEmpty() ? method.getName() : tool.name();
+				Optional<ToolActivity> activity = ToolActivity.of(name, "{}", json);
+				if (name.equals(CurrentTimeTool.NAME)) {
+					assertThat(activity).as(name).isEmpty();
+				} else {
+					assertThat(activity).as(name).hasValueSatisfying(value -> assertThat(value.kind()).isNotEqualTo("TOOL"));
+				}
+			}
+		}
 	}
 
 	@Test

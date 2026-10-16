@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.api.web.WebTools;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Optional;
@@ -20,10 +21,11 @@ record ToolActivity(String kind, String target) {
 
 	static Optional<ToolActivity> of(String toolName, String input, ObjectMapper json) {
 		return switch (toolName) {
-			// 도구 이름은 @Tool 메서드 이름이다(CurrentTimeTool·WebTools·ThreadDocumentTool).
-			case "currentDateTime" -> Optional.empty();
-			case "webSearch" -> Optional.of(new ToolActivity("WEB_SEARCH", shorten(argument(input, "query", json))));
-			case "webFetch" ->
+			// 도구 이름은 각 도구의 @Tool(name) 상수다 — 이름을 바꾸면 여기도 함께 바뀌고, 매핑이 빠진 도구는
+			// ToolActivityTest가 등록된 도구 전체를 훑어 잡는다.
+			case CurrentTimeTool.NAME -> Optional.empty();
+			case WebTools.SEARCH_NAME -> Optional.of(new ToolActivity("WEB_SEARCH", shorten(argument(input, "query", json))));
+			case WebTools.FETCH_NAME ->
 				Optional.of(new ToolActivity("WEB_FETCH", shorten(withoutQuery(argument(input, "url", json)))));
 			case ThreadDocumentTool.NAME ->
 				Optional.of(new ToolActivity("DOCUMENT_SEARCH", shorten(argument(input, "query", json))));

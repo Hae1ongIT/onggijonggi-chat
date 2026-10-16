@@ -43,6 +43,15 @@ describe('activityLabel', () => {
     );
   });
 
+  it('검색어·파일 이름의 방향 바꾸기 문자는 빼고 보인다', () => {
+    expect(
+      activityLabel(
+        'DOCUMENT_REVISE',
+        `규정${String.fromCodePoint(0x202e)}xcod.exe`,
+      ),
+    ).toBe('개정본 만드는 중… 규정xcod.exe');
+  });
+
   it('대상이 없으면 문구만, 모르는 코드면 일반 문구', () => {
     expect(activityLabel('WEB_SEARCH', null)).toBe('웹 검색 중…');
     expect(activityLabel('DOCUMENT_GENERATE', '보고서')).toBe(

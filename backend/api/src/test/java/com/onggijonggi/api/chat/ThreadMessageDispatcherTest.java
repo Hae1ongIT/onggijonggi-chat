@@ -194,13 +194,12 @@ class ThreadMessageDispatcherTest {
 		});
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
-				boolean broadcast = super.broadcastIfCurrent(threadId, generation, frame);
+			public void notifyIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+				super.notifyIfCurrent(threadId, generation, frame);
 				if (frame instanceof ChatActivityFrame activity && activity.active()) {
 					onStart.getAndSet(() -> {
 					}).run();
 				}
-				return broadcast;
 			}
 		};
 		TestRoom room = new TestRoom(registry);
