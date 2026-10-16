@@ -39,7 +39,7 @@ import {
   dismissNotice as dismissNoticeIn,
   initialRoomState,
   isForbidden,
-  isMembershipNotice,
+  isNotice,
   noticeMessage,
 } from '@/lib/chat/room-state';
 import {
@@ -134,6 +134,11 @@ export interface Room {
    * 전한다. 값의 크기에는 의미가 없다.
    */
   participantsRevision: number;
+  /**
+   * 승인 요청이 생기거나 처리됐다는 통보(approval.changed)를 받을 때마다 1씩 오르는 눈금(이슈 #407).
+   * 요청 내용은 프레임에 없어 이 훅이 들지 않는다 — 승인 목록을 읽는 쪽에 "다시 불러와"만 전한다.
+   */
+  approvalsRevision: number;
   /** 지금 입력 중인 다른 사람(협업방). 1:1 방에는 서버가 보내지 않아 늘 비어 있다. */
   typing: TypingPeer[];
   /**
@@ -168,6 +173,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
   /** 따라잡기 요청에 실을 커서. WS 콜백이 최신 값을 봐야 해서 ref로 따로 둔다. */
   const lastSeqRef = useRef<number | null>(null);
   const [participantsRevision, setParticipantsRevision] = useState(0);
+  const [approvalsRevision, setApprovalsRevision] = useState(0);
   const [typing, setTypingPeers] = useState<TypingPeer[]>([]);
   /** 마지막으로 알린 입력 상태와 그 시각. 다시 알릴지 판단하는 데만 쓴다. */
   const typingSentRef = useRef<{ active: boolean; at: number }>({
@@ -314,6 +320,9 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
         // action으로 분기할 이유가 없다(어느 액션이든 답은 재조회다).
         if (frame.type === 'participant.changed') {
           setParticipantsRevision((current) => current + 1);
+        }
+        if (frame.type === 'approval.changed') {
+          setApprovalsRevision((current) => current + 1);
         }
         setState((current) => applyFrame(current, frame));
         setTypingPeers((current) =>
@@ -463,7 +472,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
   const cancellableTurnId = useMemo(() => {
     for (let index = state.messages.length - 1; index >= 0; index -= 1) {
       const entry = state.messages[index];
-      if (isMembershipNotice(entry)) continue;
+      if (isNotice(entry)) continue;
       if (!entry.streaming || entry.from !== null) continue;
       if (entry.turnId !== null && myTurnIdsRef.current.has(entry.turnId)) {
         return entry.turnId;
@@ -491,6 +500,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
     dismissError,
     dismissNotice,
     participantsRevision,
+    approvalsRevision,
     typing,
     setTyping,
   };

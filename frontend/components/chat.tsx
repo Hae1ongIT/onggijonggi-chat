@@ -37,7 +37,7 @@ import {
 import { activityLabel } from '@/lib/chat/activity';
 import { useLingeringActivity } from '@/lib/chat/use-lingering-activity';
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
-import { type RoomMessage, isMembershipNotice } from '@/lib/chat/room-state';
+import { type RoomMessage, isNotice } from '@/lib/chat/room-state';
 import { useRoom } from '@/lib/chat/use-room';
 import type { MessageAttachment } from '@/lib/transport/frames';
 import {
@@ -179,7 +179,7 @@ function ChatSession({
   const roomMessages = useMemo(
     () =>
       room.state.messages.filter(
-        (entry): entry is RoomMessage => !isMembershipNotice(entry),
+        (entry): entry is RoomMessage => !isNotice(entry),
       ),
     [room.state.messages],
   );

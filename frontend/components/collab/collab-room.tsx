@@ -8,7 +8,7 @@
  보낸 사람이 없다)를 전제하기 때문이다. 협업방은 여러 사람의 메시지를 이름과 함께 보여줘야 한다.
  스크롤 붙임(use-scroll-to-bottom)과 마크다운 렌더는 그대로 재사용한다.
 
- 참여자 목록 사이드바와 입퇴장 라인은 프레임이 실어 보낸 표시 이름을 그대로 쓴다(#26·#130).
+ 참여자 목록 사이드바와 입퇴장·승인 라인은 프레임이 실어 보낸 표시 이름을 그대로 쓴다(#26·#130·#407).
  subject는 화면에 그리지 않고 title로만 남긴다 — 같은 이름이 둘일 때 구분할 수단은 있어야 한다.
 
  이 사이드바(#26)는 "지금 붙어 있는 사람"이고, 방에 들어올 자격이 있는 참여자 "명단" 관리는
@@ -17,6 +17,9 @@
 
  메시지 시각과 AI 라벨(@FIN 같은 에이전트 구분)은 기획 시안에 있으나 그리지 않는다 — 프레임
  계약(#8)에 그 필드가 없어 서버가 보내주지 않는다. 계약이 넓어지면 여기에 붙일 자리다.
+
+ 승인 요청(#407)은 메시지에 붙는 "승인 요청" 버튼으로 시작하고, 처리할 요청은 헤더의 "승인 대기" 버튼과 토스트로
+ 모달을 연다. 목록 조회와 토스트 판단은 use-thread-approvals.ts가 맡고 이 파일은 모달을 여는 상태만 든다.
 
  시스템 알림(#29)은 오류 배너와 자리는 같지만 성격이 다르다 — 오류는 방금 한 일이 실패했다는
  신호라 닫으면 끝이고, 알림은 배치가 사후에 알려주는 것이라 닫기 전까지 남는다. 색을 나눠 둔
@@ -36,16 +39,30 @@ import { ActivityLine } from '@/components/message';
 import { NoticeBanner } from '@/components/notice-banner';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
+import { Button } from '@/components/ui/button';
 import { fetchCollabThreads } from '@/lib/api/collab';
+import type { ThreadApproval } from '@/lib/api/thread-approvals';
 import { activityLabel } from '@/lib/chat/activity';
+import type {
+  RoomApprovalNotice,
+  RoomMembershipNotice,
+  RoomMessage,
+} from '@/lib/chat/room-state';
+import {
+  isApprovalNotice,
+  isForbidden,
+  isMembershipNotice,
+  isNotice,
+} from '@/lib/chat/room-state';
 import { useLingeringActivity } from '@/lib/chat/use-lingering-activity';
-import type { RoomMessage, RoomMembershipNotice } from '@/lib/chat/room-state';
-import { isForbidden, isMembershipNotice } from '@/lib/chat/room-state';
 import { typingLabel } from '@/lib/chat/typing';
+import { useThreadApprovals } from '@/lib/collab/use-thread-approvals';
 import {
   type RoomConnection,
   useCollabRoom,
 } from '@/lib/collab/use-collab-room';
+import { ApprovalDialog } from './approval-dialog';
+import { ApprovalRequestDialog } from './approval-request-dialog';
 import { CollabInput } from './collab-input';
 import { ParticipantsSheet } from './participants-sheet';
 import { PresenceAvatars } from './presence-avatars';
@@ -76,6 +93,23 @@ function MembershipRow({ notice }: { notice: RoomMembershipNotice }) {
   );
 }
 
+/** 승인 요청이 생기거나 승인·반려로 처리된 줄(이슈 #407). 입퇴장 줄처럼 흐름 가운데에 옅게 남긴다. */
+function ApprovalRow({ notice }: { notice: RoomApprovalNotice }) {
+  const { requester, target } = notice;
+  return (
+    <p
+      title={`${requester.subject} → ${target.subject}`}
+      className="px-3 py-1 text-center text-xs text-muted-foreground"
+    >
+      {notice.event === 'requested'
+        ? `${requester.displayName}님이 ${target.displayName}님에게 승인을 요청했습니다`
+        : `${target.displayName}님이 ${requester.displayName}님의 요청을 ${
+            notice.event === 'approved' ? '승인' : '반려'
+          }했습니다`}
+    </p>
+  );
+}
+
 /** `@SOL`·`@FIN`·`@LAW`로 답했으면 그 이름을, `@AI`로 답했으면 "AI"를 보여준다(이슈 #357). */
 function agentLabel(agent: RoomMessage['agent']): string {
   return agent === null ? 'AI' : agent.toUpperCase();
@@ -85,16 +119,20 @@ function agentLabel(agent: RoomMessage['agent']): string {
  * 배경으로 구분한다(이슈 #357). */
 function MessageRow({
   message,
+  onRequestApproval,
   activity = null,
 }: {
   message: RoomMessage;
+  onRequestApproval: (messageId: string) => void;
   /** 이 답변의 턴이 지금 실행 중인 도구의 문구(이슈 #397). */
   activity?: string | null;
 }) {
   const isAi = message.from === null;
+  // 쓰는 중인 답변은 서버가 승인 대상에서 제외하고, 본문 없는 메시지는 보여 줄 내용이 없어 요청하지 않는다.
+  const canRequestApproval = !message.streaming && message.content !== '';
   return (
     <div
-      className={`flex flex-col gap-1 ${
+      className={`group flex flex-col gap-1 ${
         isAi ? 'rounded-lg bg-muted/60 px-3 py-2' : 'px-3 py-2'
       }`}
     >
@@ -128,6 +166,15 @@ function MessageRow({
             <p className="whitespace-pre-wrap text-sm">{message.content}</p>
           )}
         </>
+      )}
+      {canRequestApproval && (
+        <Button
+          variant="ghost"
+          className="h-auto w-fit self-start px-1 py-0 text-xs text-muted-foreground opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+          onClick={() => onRequestApproval(message.id)}
+        >
+          승인 요청
+        </Button>
       )}
     </div>
   );
@@ -177,9 +224,20 @@ export function CollabRoom({ threadId }: { threadId: string }) {
     dismissError,
     dismissNotice,
     participantsRevision,
+    approvalsRevision,
     typing,
     setTyping,
   } = useCollabRoom(threadId);
+  const [requestingMessageId, setRequestingMessageId] = useState<string | null>(
+    null,
+  );
+  const [reviewing, setReviewing] = useState<ThreadApproval | null>(null);
+  const { decidable, nameOf, reload } = useThreadApprovals(threadId, {
+    revision: approvalsRevision,
+    open: connection === 'open',
+    participantsRevision,
+    onOpenRequest: setReviewing,
+  });
   const [containerRef, endRef] = useScrollToBottom<HTMLDivElement>();
   // 도구가 연달아 돌 때 그 사이 빈틈에 표시가 깜박이지 않게 지울 때만 잠깐 남긴다(이슈 #397).
   const activity = useLingeringActivity(state.activity);
@@ -188,12 +246,20 @@ export function CollabRoom({ threadId }: { threadId: string }) {
   const senderNames = useMemo(() => {
     const names = new Map<string, string>();
     for (const entry of state.messages) {
-      if (!isMembershipNotice(entry) && entry.from) {
+      if (!isNotice(entry) && entry.from) {
         names.set(entry.from.subject, entry.from.displayName);
       }
     }
     return names;
   }, [state.messages]);
+
+  const reviewingContent = useMemo(() => {
+    if (reviewing === null) return null;
+    const found = state.messages.find(
+      (entry) => !isNotice(entry) && entry.id === reviewing.messageId,
+    );
+    return found && !isNotice(found) ? found.content : null;
+  }, [reviewing, state.messages]);
 
   if (isForbidden(state.error)) {
     return (
@@ -218,7 +284,7 @@ export function CollabRoom({ threadId }: { threadId: string }) {
       threadId={threadId}
       attachmentCount={state.messages.reduce(
         (count, entry) =>
-          isMembershipNotice(entry) ? count : count + entry.attachments.length,
+          isNotice(entry) ? count : count + entry.attachments.length,
         0,
       )}
       senderNames={senderNames}
@@ -236,6 +302,15 @@ export function CollabRoom({ threadId }: { threadId: string }) {
             refreshSignal={participantsRevision}
           />
           <div className="ml-auto flex items-center gap-2">
+            {decidable.length > 0 && (
+              <Button
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                onClick={() => setReviewing(decidable[0])}
+              >
+                승인 대기 {decidable.length}건
+              </Button>
+            )}
             <PresenceAvatars participants={state.participants} />
             <span className="whitespace-nowrap pr-2 text-xs text-muted-foreground">
               {CONNECTION_LABEL[connection]}
@@ -284,10 +359,13 @@ export function CollabRoom({ threadId }: { threadId: string }) {
               {state.messages.map((entry) =>
                 isMembershipNotice(entry) ? (
                   <MembershipRow key={entry.id} notice={entry} />
+                ) : isApprovalNotice(entry) ? (
+                  <ApprovalRow key={entry.id} notice={entry} />
                 ) : (
                   <MessageRow
                     key={entry.id}
                     message={entry}
+                    onRequestApproval={setRequestingMessageId}
                     activity={
                       activity?.msgId === entry.id
                         ? activityLabel(activity.kind, activity.target)
@@ -334,6 +412,21 @@ export function CollabRoom({ threadId }: { threadId: string }) {
           <ThreadDocumentsPanel />
         </div>
       </div>
+
+      <ApprovalRequestDialog
+        threadId={threadId}
+        messageId={requestingMessageId}
+        onRequested={reload}
+        onClose={() => setRequestingMessageId(null)}
+      />
+      <ApprovalDialog
+        threadId={threadId}
+        approval={reviewing}
+        messageContent={reviewingContent}
+        requesterName={reviewing ? nameOf(reviewing.requesterSubject) : ''}
+        onDecided={reload}
+        onClose={() => setReviewing(null)}
+      />
     </ThreadDocumentsProvider>
   );
 }
