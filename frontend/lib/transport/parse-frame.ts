@@ -58,6 +58,10 @@ const chatAnswerFrameSchema = z.object({
     z.literal('law'),
     z.null(),
   ]),
+  // 이슈 #413 — 옛 서버는 보내지 않는다. 모르는 키는 zod가 버리므로 여기 적어야 화면까지 간다.
+  offset: z.number().nullable().optional(),
+  content: z.string().nullable().optional(),
+  mine: z.boolean().nullable().optional(),
 });
 
 const chatMessageFrameSchema = z.object({

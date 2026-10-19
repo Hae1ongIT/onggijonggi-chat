@@ -39,6 +39,7 @@ import { Markdown } from '@/components/markdown';
 import { ActivityLine } from '@/components/message';
 import { NoticeBanner } from '@/components/notice-banner';
 import { SidebarToggle } from '@/components/sidebar-toggle';
+import { TerminalStatusNote } from '@/components/terminal-status-note';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
 import { Button } from '@/components/ui/button';
 import { fetchCollabThreads } from '@/lib/api/collab';
@@ -46,6 +47,7 @@ import type { ThreadApproval } from '@/lib/api/thread-approvals';
 import { activityLabel } from '@/lib/chat/activity';
 import type { RoomMembershipNotice, RoomMessage } from '@/lib/chat/room-state';
 import {
+  THINKING_ACTIVITY,
   isApprovalNotice,
   isForbidden,
   isMembershipNotice,
@@ -156,6 +158,7 @@ function MessageRow({
             />
           )}
           {activity && <ActivityLine label={activity} className="" />}
+          <TerminalStatusNote status={message.terminalStatus} />
         </>
       ) : (
         <>
@@ -433,8 +436,10 @@ export function CollabRoom({ threadId }: { threadId: string }) {
                   />
                 ),
               )}
-              {/* 답변 말풍선이 생기기 전에 도구가 돌면 AI 자리를 만들어 문구를 보인다(이슈 #397). */}
+              {/* 답변 말풍선이 생기기 전에 도구가 돌면 AI 자리를 만들어 문구를 보인다(이슈 #397). "생각 중"(THINKING)은
+               * 그리지 않는다 — 협업방은 질문한 화면에도 첫 글자 전 자리 표시가 없어 지금 동작을 따른다(이슈 #413 결정 9). */}
               {activity &&
+                activity.kind !== THINKING_ACTIVITY &&
                 !state.messages.some(
                   (entry) => entry.id === activity.msgId,
                 ) && (

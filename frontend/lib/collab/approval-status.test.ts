@@ -83,6 +83,7 @@ describe('latestApprovalByOrigin', () => {
       streaming: false,
       terminalStatus: null,
       turnId: null,
+      mine: false,
       citations: [],
       restrictedResultsOmitted: false,
       groundingNotice: null,

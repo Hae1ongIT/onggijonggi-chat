@@ -31,12 +31,13 @@ import type { ClientFrame } from '@/lib/transport/frames';
 import { generateUUID } from '@/lib/utils';
 import {
   type RoomState,
-  advanceCursor,
   applyFrame,
   applyHistory,
+  catchUpCursor,
   clearActivity,
   clearRoomError,
   dismissNotice as dismissNoticeIn,
+  historyCursor,
   initialRoomState,
   isForbidden,
   isNotice,
@@ -248,10 +249,9 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
         // 않으므로 한 번 부풀려지면 이후 진짜 값이 와도 안 줄어든다) — setState 못지않게
         // 위험하다.
         if (alive) {
-          lastSeqRef.current = items.reduce(
-            (cursor, item) => advanceCursor(cursor, item.seq),
-            lastSeqRef.current,
-          );
+          // 아직 만들어지는 중인 답변(PENDING) 앞에서 멈춘다 — 이력과 구독 사이에 그 답이 끝나면 끝 프레임을 못 받아,
+          // 최초 따라잡기가 그 행을 다시 가져와야 한다(이슈 #413). catchUpCursor와 같은 규칙이다.
+          lastSeqRef.current = historyCursor(lastSeqRef.current, items);
           setState((current) => applyHistory(current, items));
         }
       })
@@ -365,9 +365,11 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
     };
   }, [threadId, startPromoted]);
 
+  // 따라잡기 커서는 받은 가장 큰 seq가 아니라, 아직 흐르는 중인 AI 답변·이력에서 PENDING이던 답변 앞에서 멈춘 값이다
+  // (이슈 #413 8.4) — 끊긴 사이 끝난 답을 다시 가져와 "생성 중"에 머물지 않게 한다.
   useEffect(() => {
-    lastSeqRef.current = state.lastSeq;
-  }, [state.lastSeq]);
+    lastSeqRef.current = catchUpCursor(state);
+  }, [state]);
 
   // 거부를 통보받았으면 이 방 구독을 푼다 — 커넥션은 다른 방과 함께 쓰므로 닫지 않는다(이슈 #161).
   // 구독을 남겨 두면 재연결할 때마다 권한 없는 방을 다시 두드린다.
@@ -401,9 +403,8 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
     [],
   );
 
-  // 내가 시작한 턴만 기억한다. 서버는 그 턴을 시작한 커넥션이 보낸 취소만 인정하므로
-  // (CollabMessageDispatcher.ignoresACancelFromAnotherConnection), 남의 답변에 중지 버튼을
-  // 달아도 눌리기만 할 뿐 아무 일도 일어나지 않는다.
+  // 이 화면이 보낸 턴. 서버가 받는 사람마다 "내가 요청한 턴인지"(mine)를 알려 주지만(이슈 #413), 그 값이 없는 옛 서버와
+  // 첫 프레임이 오기 전을 위해 남긴다. 서버는 요청한 사람의 취소만 인정하므로 남의 답변에는 버튼을 달지 않는다.
   const myTurnIdsRef = useRef<Set<string>>(new Set());
 
   const send = useCallback(
@@ -463,7 +464,8 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
 
   /**
    * 지금 중지할 수 있는 턴. 흐르는 중인 AI 답변 중 내가 부른 것을 뒤에서 찾는다 — 방에는 남이
-   * 부른 턴도 함께 흐르기 때문이다(이슈 #160).
+   * 부른 턴도 함께 흐르기 때문이다(이슈 #160). 서버가 알려 준 mine으로 고른다 — 방을 떠났다 돌아와도(새로고침·다른
+   * 탭) 내 턴을 멈출 수 있다(이슈 #413 결정 4).
    *
    * 아직 첫 delta가 오지 않은 턴은 말풍선이 없어 여기 잡히지 않는다. 그 구간을 취소하려면
    * chat.queued까지 상태로 들고 있어야 하는데, 눌러도 화면에 멈출 것이 없는 짧은 구간이라
@@ -474,7 +476,10 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
       const entry = state.messages[index];
       if (isNotice(entry)) continue;
       if (!entry.streaming || entry.from !== null) continue;
-      if (entry.turnId !== null && myTurnIdsRef.current.has(entry.turnId)) {
+      if (
+        entry.turnId !== null &&
+        (entry.mine || myTurnIdsRef.current.has(entry.turnId))
+      ) {
         return entry.turnId;
       }
     }

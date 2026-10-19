@@ -16,6 +16,8 @@ const LABEL_BY_KIND: Record<string, string> = {
   DOCUMENT_SEARCH: '방 문서 찾는 중…',
   DOCUMENT_REVISE: '개정본 만드는 중…',
   DOCUMENT_CREATE: '문서 만드는 중…',
+  // 도구가 아니라 첫 글자를 기다리는 중 — 방에 막 들어온 화면에만 온다(이슈 #413 결정 9).
+  THINKING: '생각 중…',
 };
 
 const GENERIC_LABEL = '작업 중…';

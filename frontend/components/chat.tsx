@@ -37,7 +37,11 @@ import {
 import { activityLabel } from '@/lib/chat/activity';
 import { useLingeringActivity } from '@/lib/chat/use-lingering-activity';
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
-import { type RoomMessage, isNotice } from '@/lib/chat/room-state';
+import {
+  type RoomMessage,
+  type TerminalStatus,
+  isNotice,
+} from '@/lib/chat/room-state';
 import { useRoom } from '@/lib/chat/use-room';
 import type { MessageAttachment } from '@/lib/transport/frames';
 import {
@@ -247,13 +251,16 @@ function ChatSession({
     if (next.length !== pendingTurnIds.length) setPendingTurnIds(next);
   }, [pendingTurnIds, roomMessages]);
 
+  // 진행 표시(도구·"생각 중")가 있어도 답변 중이다 — 방에 들어와 보니 진행 중인 턴이 있으면 이 화면은 보낸 적이 없어
+  // pendingTurnIds가 비어 있다(이슈 #413 결정 9). 질문한 화면과 같게 "생각 중…"과 입력창 답변 중 모양을 보인다.
   const isLoading =
     pendingTurnIds.length > 0 ||
-    roomMessages.some((message) => message.streaming);
+    roomMessages.some((message) => message.streaming) ||
+    room.state.activity !== null;
 
   /** 중지·거부는 그 AI 답변 자체에 표시한다(이슈 #162, §3.2). */
   const terminalStatusByMessageId = useMemo(() => {
-    const byId: Record<string, 'cancelled' | 'denied'> = {};
+    const byId: Record<string, TerminalStatus> = {};
     for (const message of roomMessages) {
       if (message.terminalStatus !== null)
         byId[message.id] = message.terminalStatus;
