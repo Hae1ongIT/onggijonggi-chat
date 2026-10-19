@@ -841,6 +841,123 @@ class ThreadWebSocketHandlerUnitTest {
 		assertThat(sent).noneMatch(frame -> frame.contains("MALFORMED_REQUEST"));
 	}
 
+	/**
+	* 진행 중인 답이 있는 방에 들어오면 지금까지 내용을 이 연결에만 받는다 — delta가 아니라 content로, 받는 사람이 요청자가
+	* 아니면 mine=false다. 이어 오는 조각에도 받는 사람별 mine이 붙고, 서버 안에서만 드는 요청자 subject는 나가지 않는다
+	* (이슈 #413 결정 3·4·12).
+	*/
+	@Test
+	void joiningARoomWithARunningAnswerReceivesItsContentSoFarAndTheFollowingChunks() {
+		UUID threadId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(source.asFlux());
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
+				mock(MsgPersistenceService.class), noDocuments(), new ObjectMapper(), "test-model",
+				Duration.ofSeconds(120), 20, 20, Schedulers.parallel());
+		PresenceParticipant requester = new PresenceParticipant("requester", "요청자");
+		UUID requesterConnection = UUID.randomUUID();
+		registry.join(threadId, requesterConnection, requester);
+		dispatcher.dispatch(new ChatMessageCommand(threadId, ThrKind.COLLAB, UUID.randomUUID(), requester.subject(),
+				requester.displayName(), "@AI 질문", List.of(), null, null, null, UUID.randomUUID(), requesterConnection,
+				"trace", null));
+		verify(llm, org.mockito.Mockito.timeout(1000)).streamChat(any());
+		source.tryEmitNext("지금까지");
+		Eventually.awaitIdle(registry, threadId);
+
+		List<String> sent = connect(registry, dispatcher, "collab-member",
+				Flux.concat(Flux.just(WsTestExchange.subscribeFrame(threadId)),
+						Mono.delay(Duration.ofMillis(200)).then(Mono.fromRunnable(() -> source.tryEmitNext("더")))
+								.thenMany(Flux.<String>never())),
+				frames -> frames.stream().anyMatch(frame -> frame.contains("\"delta\":\"더\"")));
+
+		assertThat(sent).anyMatch(frame -> frame.contains("\"type\":\"chat.answer\"")
+				&& frame.contains("\"content\":\"지금까지\"") && frame.contains("\"delta\":\"\"")
+				&& frame.contains("\"mine\":false"));
+		assertThat(sent).anyMatch(frame -> frame.contains("\"delta\":\"더\"") && frame.contains("\"offset\":4")
+				&& frame.contains("\"mine\":false"));
+		assertThat(sent).filteredOn(frame -> frame.contains("\"type\":\"chat.answer\""))
+				.noneMatch(frame -> frame.contains("requesterSubject") || frame.contains("\"requester\""));
+		registry.leave(threadId, requesterConnection, requester);
+	}
+
+	/**
+	* 협업방 중지는 보낸 연결이 아니라 사람으로 찾는다 — 질문한 사람이 새 연결(새로고침·다른 탭)로 들어와도 자기 턴을 멈춘다
+	* (이슈 #413 결정 4). 남의 턴은 여전히 못 멈춘다(ThreadMessageDispatcherTest.ignoresACancelFromAnotherPerson).
+	*/
+	@Test
+	void theRequesterCanStopTheirTurnFromANewConnection() {
+		UUID threadId = UUID.randomUUID();
+		UUID turnId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		AtomicReference<Boolean> cancelled = new AtomicReference<>(false);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
+				mock(MsgPersistenceService.class), noDocuments(), new ObjectMapper(), "test-model",
+				Duration.ofSeconds(120), 20, 20, Schedulers.parallel());
+		PresenceParticipant self = new PresenceParticipant("collab-member", "나");
+		UUID oldConnection = UUID.randomUUID();
+		registry.join(threadId, oldConnection, self);
+		dispatcher.dispatch(new ChatMessageCommand(threadId, ThrKind.COLLAB, UUID.randomUUID(), self.subject(),
+				self.displayName(), "@AI 질문", List.of(), null, null, null, turnId, oldConnection, "trace", null));
+		verify(llm, org.mockito.Mockito.timeout(1000)).streamChat(any());
+		registry.leave(threadId, oldConnection, self);
+		dispatcher.roomVacated(threadId);
+
+		List<String> sent = connect(registry, dispatcher, "collab-member",
+				Flux.concat(Flux.just(WsTestExchange.subscribeFrame(threadId),
+								"{\"type\":\"chat.cancel\",\"threadId\":\"" + threadId + "\",\"turnId\":\"" + turnId + "\"}"),
+						Flux.<String>never()),
+				frames -> frames.stream().anyMatch(frame -> frame.contains("\"status\":\"cancelled\"")));
+
+		assertThat(cancelled.get()).isTrue();
+		assertThat(sent).anyMatch(frame -> frame.contains("\"type\":\"chat.answer\"")
+				&& frame.contains("\"status\":\"cancelled\"") && frame.contains("\"mine\":true"));
+	}
+
+	/** 검색할 고정 문서가 없는 방 — 답변 턴이 문서 목록을 묻고 바로 모델을 부른다. */
+	private static ThreadDocumentSearch noDocuments() {
+		ThreadDocumentSearch documents = noOpDocumentSearch();
+		when(documents.searchableDocuments(any(), any())).thenReturn(Mono.just(List.of()));
+		return documents;
+	}
+
+	/** 한 연결을 열어 프레임을 올려보내고, done이 참이 될 때까지(최대 3초) 나간 프레임을 모은다. */
+	private static List<String> connect(RoomSessionRegistry registry, ThreadMessageDispatcher dispatcher, String subject,
+			Flux<String> frames, java.util.function.Predicate<List<String>> done) {
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		List<String> sent = new CopyOnWriteArrayList<>();
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> subject));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision(subject)).thenReturn(Mono.just(UUID.randomUUID()));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(frames.map(ThreadWebSocketHandlerUnitTest::inboundText));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(
+				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+				.doOnNext(message -> sent.add(message.getPayloadAsText())).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+		reactor.core.Disposable running = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				new CollabAuthorizationRevoker(registry, dispatcher), provisioning, admittingMembership(),
+				mock(DirectChatTurnService.class), noRanks(), mock(MsgFileService.class), Clock.systemUTC(), WINDOW_SECONDS,
+				MESSAGES_PER_WINDOW)
+				.handle(session).subscribe();
+		long deadline = System.currentTimeMillis() + 3000;
+		while (!done.test(sent) && System.currentTimeMillis() < deadline) {
+			try {
+				Thread.sleep(10);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		running.dispose();
+		return sent;
+	}
+
 	/** 인바운드 프레임을 차례로 넣고 나간 프레임을 모은다. */
 	private static List<String> runFrames(ThreadMembershipService membership, String... frames) {
 		return runFrames(membership, mock(MsgFileService.class), frames);

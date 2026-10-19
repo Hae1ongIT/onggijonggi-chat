@@ -841,9 +841,9 @@ class RoomSessionRegistryTest {
 	}
 
 	/**
-	* 내보내기가 실패하면(여기서는 듣는 사람 없이 warm-up 버퍼 한 칸을 넘김) registry가 그 방·세대를 실패 알림으로 보낸다 —
-	* dispatcher가 그 세대 AI 작업을 닫는 신호다(이슈 #405). 실패를 그 방의 다음 방송에 예외로 떠넘기지 않으므로 다음 방송은
-	* 그대로 들어간다. 실패한 뒤에도 left는 나간다.
+	* 내보내기가 실패하면(여기서는 요청하지 않는 구독자 때문에 sink 버퍼가 넘침) registry가 그 방·세대를 실패 알림으로 보낸다 —
+	* dispatcher가 그 방 AI 작업을 실패로 닫는 신호다(이슈 #405). 실패를 그 방의 다음 방송에 예외로 떠넘기지 않으므로 다음
+	* 방송은 그대로 들어간다. 실패한 뒤에도 left는 나간다. 듣는 사람이 없어 버린 것은 실패가 아니다(이슈 #413, 아래 테스트).
 	*/
 	@Test
 	void aFailedEmissionIsReportedForItsRoomAndGenerationWithoutFailingTheNextBroadcast() {
@@ -855,6 +855,13 @@ class RoomSessionRegistryTest {
 		RoomSessionRegistry.RoomMembership membership = registry.join(roomId, connectionId, user);
 		AtomicBoolean left = new AtomicBoolean();
 		membership.left().subscribe(null, null, () -> left.set(true));
+		// 구독은 했지만 하나도 요청하지 않는 느린 구독자 — sink 버퍼(한 칸)를 넘기면 FAIL_OVERFLOW다.
+		BaseSubscriber<WsFrame> stalled = new BaseSubscriber<>() {
+			@Override
+			protected void hookOnSubscribe(Subscription subscription) {
+			}
+		};
+		membership.frames().subscribe(stalled);
 
 		assertThat(registry.broadcastIfCurrent(roomId, membership.generation(), message(roomId, "buffered"))).isTrue();
 		assertThat(registry.broadcastIfCurrent(roomId, membership.generation(), message(roomId, "overflow"))).isTrue();
@@ -863,6 +870,7 @@ class RoomSessionRegistryTest {
 		assertThat(registry.broadcastIfCurrent(roomId, membership.generation(), message(roomId, "next"))).isTrue();
 		registry.leave(roomId, connectionId, user);
 		eventually(() -> assertThat(left).isTrue());
+		stalled.dispose();
 	}
 
 	/**
@@ -976,29 +984,78 @@ class RoomSessionRegistryTest {
 	}
 
 	/**
-	* 화면 힌트(notifyIfCurrent, 이슈 #397)는 그 세대에만 가고, 전송이 실패해도 방송 실패로 알리지 않는다 — 힌트 하나 때문에
-	* 답변 세대가 닫히지 않게. 옛 세대로는 들어가지 않는다.
+	* 화면 힌트(notifyRoom, 이슈 #397)는 지금 방에 가고, 전송이 실패해도 방송 실패로 알리지 않는다 — 힌트 하나 때문에
+	* 답변이 닫히지 않게. 방이 없으면 버려진다.
 	*/
 	@Test
-	void currentGenerationHintsReachListenersButNeverReportABroadcastFailure() {
+	void roomHintsReachListenersButNeverReportABroadcastFailure() {
 		UUID roomId = UUID.randomUUID();
 		List<List<UUID>> failures = new CopyOnWriteArrayList<>();
 		registry.onBroadcastFailure((threadId, generation) -> failures.add(List.of(threadId, generation)));
+		registry.notifyRoom(roomId, message(roomId, "before anyone joined"));
 		RoomSessionRegistry.RoomMembership membership = registry.join(roomId, UUID.randomUUID(), anyone());
 		List<WsFrame> received = new CopyOnWriteArrayList<>();
 		Disposable subscription = membership.frames().subscribe(received::add);
 
 		ChatMessageFrame hint = message(roomId, "hint");
-		registry.notifyIfCurrent(roomId, membership.generation(), hint);
-		registry.notifyIfCurrent(roomId, UUID.randomUUID(), message(roomId, "stale"));
+		registry.notifyRoom(roomId, hint);
 		eventually(() -> assertThat(received).containsExactly(hint));
 
-		// 듣는 사람 없이 warm-up 버퍼를 넘겨도(방송이면 실패 알림이 갈 상황) 힌트는 조용히 버려진다.
 		subscription.dispose();
-		registry.notifyIfCurrent(roomId, membership.generation(), message(roomId, "a"));
-		registry.notifyIfCurrent(roomId, membership.generation(), message(roomId, "b"));
+		registry.notifyRoom(roomId, message(roomId, "a"));
+		registry.notifyRoom(roomId, message(roomId, "b"));
 		awaitIdle(registry, roomId);
 		assertThat(failures).isEmpty();
+	}
+
+	/**
+	* AI 턴은 연결과 떨어져 돌아(이슈 #413) 방 항목만 있고 듣는 사람이 없는 순간(탭을 닫을 때 구독이 먼저 끊기고 방 퇴장은
+	* 조금 뒤)에도 방송한다. 그 방송은 실패가 아니다 — 알리면 답변이 실패로 닫힌다. warm-up 버퍼에도 남기지 않는다(#102):
+	* 다음 구독자가 낡은 조각을 받으면 안 된다.
+	*/
+	@Test
+	void broadcastsWithNoListenerAreDroppedWithoutReportingAFailure() {
+		UUID roomId = UUID.randomUUID();
+		List<List<UUID>> failures = new CopyOnWriteArrayList<>();
+		registry.onBroadcastFailure((threadId, generation) -> failures.add(List.of(threadId, generation)));
+		RoomSessionRegistry.RoomMembership membership = registry.join(roomId, UUID.randomUUID(), anyone());
+
+		for (int i = 0; i < 5; i++) {
+			assertThat(registry.broadcastToRoom(roomId, message(roomId, "nobody " + i))).isTrue();
+		}
+		awaitIdle(registry, roomId);
+		List<WsFrame> received = new CopyOnWriteArrayList<>();
+		Disposable subscription = membership.frames().subscribe(received::add);
+		ChatMessageFrame fresh = message(roomId, "fresh");
+		registry.broadcastToRoom(roomId, fresh);
+
+		eventually(() -> assertThat(received).containsExactly(fresh));
+		assertThat(failures).isEmpty();
+		subscription.dispose();
+	}
+
+	/** 지금 방으로 보내는 방송은 세대를 묻지 않는다 — 방이 없으면 false, 비었다 다시 생긴 방에는 새 세대로 간다(이슈 #413). */
+	@Test
+	void broadcastToRoomFollowsTheCurrentGeneration() {
+		UUID roomId = UUID.randomUUID();
+		UUID first = UUID.randomUUID();
+		assertThat(registry.broadcastToRoom(roomId, message(roomId, "nobody"))).isFalse();
+		assertThat(registry.hasRoom(roomId)).isFalse();
+		assertThat(registry.currentGeneration(roomId)).isEmpty();
+
+		RoomSessionRegistry.RoomMembership old = registry.join(roomId, first, anyone());
+		assertThat(registry.hasRoom(roomId)).isTrue();
+		assertThat(registry.currentGeneration(roomId)).contains(old.generation());
+		registry.leave(roomId, first, anyone());
+		RoomSessionRegistry.RoomMembership renewed = registry.join(roomId, UUID.randomUUID(), anyone());
+		List<WsFrame> received = new CopyOnWriteArrayList<>();
+		Disposable subscription = renewed.frames().subscribe(received::add);
+		ChatMessageFrame frame = message(roomId, "after rejoin");
+
+		assertThat(registry.currentGeneration(roomId)).contains(renewed.generation()).isNotEqualTo(Optional.of(old.generation()));
+		assertThat(registry.broadcastToRoom(roomId, frame)).isTrue();
+		eventually(() -> assertThat(received).containsExactly(frame));
+		subscription.dispose();
 	}
 
 	private static ChatMessageFrame message(UUID roomId, String content) {

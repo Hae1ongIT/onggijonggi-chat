@@ -45,15 +45,18 @@ public class ChatController {
 	private final CurrentActorProvider currentActorProvider;
 	private final MsgFileService msgFileService;
 	private final ObjectMapper objectMapper;
+	private final ThreadMessageDispatcher threadMessageDispatcher;
 
 	public ChatController(ThrRepository thrRepository, ThrMbrRepository thrMbrRepository, MsgRepository msgRepository,
-			CurrentActorProvider currentActorProvider, MsgFileService msgFileService, ObjectMapper objectMapper) {
+			CurrentActorProvider currentActorProvider, MsgFileService msgFileService, ObjectMapper objectMapper,
+			ThreadMessageDispatcher threadMessageDispatcher) {
 		this.thrRepository = thrRepository;
 		this.thrMbrRepository = thrMbrRepository;
 		this.msgRepository = msgRepository;
 		this.currentActorProvider = currentActorProvider;
 		this.msgFileService = msgFileService;
 		this.objectMapper = objectMapper;
+		this.threadMessageDispatcher = threadMessageDispatcher;
 	}
 
 	@GetMapping("/api/chat/sessions")
@@ -83,7 +86,9 @@ public class ChatController {
 		return currentUserId()
 				.flatMap(userId -> findOwnedDirectThreadOrNotFound(sessionId, userId))
 				.flatMap(thread -> Mono.fromRunnable(() -> thrRepository.delete(thread))
-						.subscribeOn(Schedulers.boundedElastic()))
+						.subscribeOn(Schedulers.boundedElastic())
+						// AI 턴은 연결과 떨어져 돌아(이슈 #413) 방을 떠난 뒤 지울 수도 있다 — 지운 방에 답을 계속 만들지 않는다.
+						.then(Mono.fromRunnable(() -> threadMessageDispatcher.discard(thread.getId()))))
 				.then();
 	}
 
@@ -110,7 +115,9 @@ public class ChatController {
 		return currentUserId()
 				.flatMap(userId -> findOwnedDirectThreadOrNotFound(threadId, userId))
 				.flatMap(thread -> Mono.fromRunnable(() -> thrRepository.delete(thread))
-						.subscribeOn(Schedulers.boundedElastic()))
+						.subscribeOn(Schedulers.boundedElastic())
+						// AI 턴은 연결과 떨어져 돌아(이슈 #413) 방을 떠난 뒤 지울 수도 있다 — 지운 방에 답을 계속 만들지 않는다.
+						.then(Mono.fromRunnable(() -> threadMessageDispatcher.discard(thread.getId()))))
 				.then();
 	}
 

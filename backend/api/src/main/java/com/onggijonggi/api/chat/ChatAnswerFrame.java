@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,6 +38,18 @@ import java.util.UUID;
  *               agent는 협업방에서 `@SOL`·`@FIN`·`@LAW`로 멘션해 역할별 페르소나로 답했을 때만
  *               채워진다(이슈 #357) — `@AI`로 답했거나 DIRECT(1:1)면 null이다. citations와 달리
  *               이 값은 메시지에 저장돼 재접속 후에도 복원된다.
+ *
+ *               offset·content·mine은 이슈 #413(AI 턴이 연결과 떨어져 끝까지 감)에서 더했다. 모두 없을 수 있다(null).
+ *               - offset: streaming 조각의 delta가 답변의 몇 번째 글자(UTF-16 단위 — Java String.length와 JS
+ *                 string.length가 같다)부터인지. 화면은 이미 가진 범위를 버린다 — 중간에 들어온 화면이 받은 지금까지
+ *                 내용과 이어 오는 조각이 겹쳐도 글자가 중복되지 않는다.
+ *               - content: 답변의 처음부터 그 시점까지 전체. 끝 프레임(done·cancelled)의 최종 내용, 방에 들어올 때의
+ *                 지금까지 내용, 1:1 같은 요청 재전송 내용에 싣는다. delta에 싣지 않는 것은 배포 순간 열려 있던 탭(옛
+ *                 화면)이 delta를 이어 붙여 글자가 두 번 보이기 때문이다 — 옛 화면은 모르는 필드를 버린다.
+ *               - mine: 받는 사람이 이 턴을 요청한 사람인지. 방 전체가 한 sink를 나눠 받아 방송 때는 null이고, 연결마다
+ *                 내보내는 자리(ThreadWebSocketHandler)가 requesterSubject와 받는 사람을 비교해 채운다. 화면은 이것으로
+ *                 돌아온 요청자에게 중지 버튼을 띄운다.
+ *               requesterSubject는 서버 안에서만 드는 요청자 subject다 — 직렬화하지 않는다.
  */
 public record ChatAnswerFrame(
 		UUID threadId,
@@ -49,5 +62,26 @@ public record ChatAnswerFrame(
 		boolean restrictedResultsOmitted,
 		ChatAnswerStatus status,
 		GroundingNotice groundingNotice,
-		Agent agent) implements WsFrame {
+		Agent agent,
+		Integer offset,
+		String content,
+		Boolean mine,
+		@JsonIgnore String requesterSubject) implements WsFrame {
+
+	/** 위치·전체 내용·요청자를 싣지 않는 프레임(거부·대기 취소·재전송 메아리 등). */
+	public ChatAnswerFrame(UUID threadId, UUID msgId, UUID turnId, String model, long seq, String delta,
+			List<Citation> citations, boolean restrictedResultsOmitted, ChatAnswerStatus status,
+			GroundingNotice groundingNotice, Agent agent) {
+		this(threadId, msgId, turnId, model, seq, delta, citations, restrictedResultsOmitted, status, groundingNotice,
+				agent, null, null, null, null);
+	}
+
+	/** 받는 사람이 요청자인지 채운 복사본. 요청자를 모르는 프레임은 그대로 둔다. */
+	ChatAnswerFrame forRecipient(String subject) {
+		if (requesterSubject == null) {
+			return this;
+		}
+		return new ChatAnswerFrame(threadId, msgId, turnId, model, seq, delta, citations, restrictedResultsOmitted,
+				status, groundingNotice, agent, offset, content, requesterSubject.equals(subject), requesterSubject);
+	}
 }

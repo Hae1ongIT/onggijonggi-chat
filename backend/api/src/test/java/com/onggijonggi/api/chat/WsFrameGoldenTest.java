@@ -67,7 +67,9 @@ class WsFrameGoldenTest {
 		samples.put("chat.answer", new ChatAnswerFrame(THREAD_ID, MSG_ID, TURN_ID, "gemini-3.6-flash", 7L, "안녕",
 				List.of(new Citation("doc-001", "제목", "발췌", 0.91, "chunk-001", "page=1"),
 						Citation.web("https://example.com/a", "웹 제목", "웹 요약", "검색어", true)), false,
-				ChatAnswerStatus.STREAMING, GroundingNotice.NO_EVIDENCE, Agent.FIN));
+				// offset·mine은 이슈 #413 — 이 조각이 답변의 12번째 글자부터이고, 받는 사람이 요청자다. content(전체 내용)는
+				// 끝 프레임·들어올 때 프레임에만 실려 조각에서는 null이다. 요청자 subject는 직렬화하지 않아 샘플에서 비운다.
+				ChatAnswerStatus.STREAMING, GroundingNotice.NO_EVIDENCE, Agent.FIN, 12, null, true, null));
 		samples.put("chat.message", new ChatMessageFrame(THREAD_ID, MSG_ID, CLIENT_MSG_ID, TURN_ID, 3L,
 				participant.subject(), participant.displayName(), "@AI 요약해줘",
 				List.of(new MsgFileView(FILE_ID, "보고서.pdf"))));

@@ -19,6 +19,9 @@ record ToolActivity(String kind, String target) {
 	/** 대상이 이보다 많은 글자면 잘라서 보낸다. */
 	static final int MAX_TARGET_LENGTH = 100;
 
+	/** 도구가 아니라 "첫 글자를 기다리는 중" — 방에 막 들어온 화면에만 보낸다(이슈 #413 결정 9). 화면은 "생각 중…"으로 읽는다. */
+	static final String THINKING = "THINKING";
+
 	static Optional<ToolActivity> of(String toolName, String input, ObjectMapper json) {
 		return switch (toolName) {
 			// 도구 이름은 각 도구의 @Tool(name) 상수다 — 이름을 바꾸면 여기도 함께 바뀌고, 매핑이 빠진 도구는
