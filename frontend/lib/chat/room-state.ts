@@ -394,7 +394,7 @@ export function advanceCursor(current: number | null, seq: number): number {
 }
 
 /**
- * 재연결·따라잡기에 실을 커서(이슈 #413 8.4). 받은 가장 큰 seq(lastSeq)에서, 아직 흐르는 중인 AI 말풍선과 이력에서 PENDING이던
+ * 재연결·따라잡기에 실을 커서(이슈 #413). 받은 가장 큰 seq(lastSeq)에서, 아직 흐르는 중인 AI 말풍선과 이력에서 PENDING이던
  * 답변 앞에서 멈춘다 — 끊긴 사이 그 답이 끝났으면 끝 프레임이 안 와 "생성 중"에 머무르는데, 커서가 그 seq를 지나 있으면
  * 따라잡기도 그 행을 다시 가져오지 않는다. 이미 받은 행이 다시 와도 applyHistory가 id로 거른다.
  */
@@ -496,7 +496,7 @@ export function applyHistory(
 
 /**
  * 화면에서 아직 흐르는 중인 AI 말풍선이 이력에서는 끝나 있으면(완료·중지·거부·실패) 이력의 내용·상태·근거로 마무리한다
- * (이슈 #413 8.4). 끊긴 사이 끝나 끝 프레임을 놓친 답이다 — 그 턴의 진행 표시도 끝 알림을 못 받았으니 지운다. 실패는
+ * (이슈 #413). 끊긴 사이 끝나 끝 프레임을 놓친 답이다 — 그 턴의 진행 표시도 끝 알림을 못 받았으니 지운다. 실패는
  * 서버가 받은 내용을 버렸으므로 흐르던 조각도 비운다. 이력이 아직 PENDING이면 건드리지 않는다 — 들어올 때 받는 지금까지
  * 내용과 이어 오는 조각이 채운다.
  */
@@ -973,7 +973,7 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       );
 
     case 'chat.answer': {
-      // 답변이 끝나면(완료·중지·거부) 그 턴의 도구 진행 표시도 함께 지운다(이슈 #397). 글자가 오면 "생각 중"도 지운다(#413).
+      // 답변이 끝나면(완료·중지·거부·실패) 그 턴의 도구 진행 표시도 함께 지운다(이슈 #397). 글자가 오면 "생각 중"도 지운다(이슈 #413).
       const hasText = frame.delta !== '' || (frame.content ?? '') !== '';
       const answered =
         frame.status === 'streaming'

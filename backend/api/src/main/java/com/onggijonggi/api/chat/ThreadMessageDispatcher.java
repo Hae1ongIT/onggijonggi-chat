@@ -343,7 +343,7 @@ public class ThreadMessageDispatcher {
 			boolean cancelledBeforeQueue = inFlight != null && inFlight.cancelled();
 			if (state.closed) {
 				// 저장만 하고 끝낸다 — DIRECT는 예약해둔 PENDING AGENT가 영영 PENDING으로 남지
-				// 않도록 CANCELLED로 정리한다.
+				// 않도록 FAILED로 정리한다(이슈 #413 결정 10 — 사람이 멈춘 것이 아니다).
 				if (direct) {
 					finishDirectReservedAgent(pendingTurn, MsgStatus.FAILED, null);
 				}
@@ -397,10 +397,10 @@ public class ThreadMessageDispatcher {
 	}
 
 	/**
-	* DIRECT의 예약된 PENDING AGENT를 CANCELLED·DENIED·FAILED로 닫고, 같은 상태의 `chat.answer`를 방
-	* 전체에 방송한다(이슈 #162) — 큐 진입 전 취소·FIFO 초과·방 실패 종료가 모두 이 경로를 쓴다. CANCELLED는
-	* 사용자 취소 의미라 cancelBlocking(빈 본문)을, 나머지는 failBlocking을 쓴다. 실패(answerStatus null)는 chat.answer에
-	* 실패 상태가 없어 프레임을 보내지 않는다 — 화면은 이력에서 실패로 본다(이슈 #413 결정 8).
+	* DIRECT의 예약된 PENDING AGENT를 CANCELLED·DENIED·FAILED로 닫고, 같은 상태의 `chat.answer`를 지금
+	* 그 방에 붙은 연결들에게 방송한다(이슈 #162) — 큐 진입 전 취소·FIFO 초과·방 실패 종료가 모두 이 경로를 쓴다. CANCELLED는
+	* 사용자 취소 의미라 cancelBlocking(빈 본문)을, 나머지는 failBlocking을 쓴다. 실패(answerStatus null)는 방이 이미
+	* 닫혀 알릴 곳이 없어 프레임 없이 저장만 한다 — 화면은 이력에서 실패로 본다(이슈 #413 결정 8).
 	*/
 	private void finishDirectReservedAgent(PendingTurn turn, MsgStatus terminalStatus, ChatAnswerStatus answerStatus) {
 		ChatMessageCommand.ReservedTurn reserved = turn.reservedTurn();
@@ -1545,7 +1545,7 @@ public class ThreadMessageDispatcher {
 		 * 끝나도 그 턴의 것에만 쌓인다. */
 		private final TurnToolExecutions toolExecutions;
 
-		/** 이 턴이 낸 끝 프레임(완료·중지). 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송에 다시 준다(이슈 #413). */
+		/** 이 턴이 낸 끝 프레임(완료·중지·실패). 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송에 다시 준다(이슈 #413). */
 		private volatile ChatAnswerFrame endFrame;
 
 		boolean claimTerminal() {
@@ -1561,7 +1561,7 @@ public class ThreadMessageDispatcher {
 		/**
 		* 이 턴의 도구 실행 시작·끝을 방에 활동 프레임으로 알린다(이슈 #397). 이미 끝난 턴(완료·중지·오류)의 늦은
 		* 알림은 보내지 않는다 — 끝난 턴에서도 이미 요청된 도구는 끝까지 돌기 때문이다(#390). 진행 표시는 화면 힌트라
-		* 방송이 아니라 부가 통보로 보낸다(notifyRoom) — 넘치거나 전송이 실패하면 버려질 뿐 답변 세대를 닫지 않고,
+		* 방송이 아니라 부가 통보로 보낸다(notifyRoom) — 넘치거나 전송이 실패하면 버려질 뿐 방의 AI 작업을 실패로 닫지 않고,
 		* 방송 대기열 자리도 먹지 않는다. 버려진 "끝"은 화면이 답변 종료·종결 오류·연결 끊김에서 지운다.
 		*/
 		private final class ActivityBroadcaster implements ToolExecutionListener {

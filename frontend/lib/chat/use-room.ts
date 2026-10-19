@@ -366,7 +366,7 @@ export function useRoom(threadId: string, options: UseRoomOptions): Room {
   }, [threadId, startPromoted]);
 
   // 따라잡기 커서는 받은 가장 큰 seq가 아니라, 아직 흐르는 중인 AI 답변·이력에서 PENDING이던 답변 앞에서 멈춘 값이다
-  // (이슈 #413 8.4) — 끊긴 사이 끝난 답을 다시 가져와 "생성 중"에 머물지 않게 한다.
+  // (이슈 #413) — 끊긴 사이 끝난 답을 다시 가져와 "생성 중"에 머물지 않게 한다.
   useEffect(() => {
     lastSeqRef.current = catchUpCursor(state);
   }, [state]);
