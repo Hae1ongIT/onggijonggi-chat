@@ -46,6 +46,7 @@ const chatAnswerFrameSchema = z.object({
     z.literal('done'),
     z.literal('cancelled'),
     z.literal('denied'),
+    z.literal('failed'),
   ]),
   groundingNotice: z.union([
     z.literal('no_evidence'),

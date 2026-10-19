@@ -459,9 +459,10 @@ public class ThreadMessageDispatcher {
 	*
 	* active면 지금까지 누적된 내용을, pending·inFlight면(아직 한 글자도 안 만들어졌다) 빈
 	* 문자열을 돌려준다 — 셋 다 아니면 empty(호출부가 DB 상태로 마저 분기한다: 이미 끝났거나
-	* 진짜 고아).
+	* 진짜 고아). active가 끝 프레임을 이미 냈으면(다음 턴으로 넘어가기 전) 그 끝 프레임도 함께 준다 — 흐르는 중으로
+	* 답하면 끝 프레임이 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413 리뷰).
 	*/
-	Optional<String> activeTurnContentIfMatches(UUID threadId, UUID agentMsgId) {
+	Optional<LiveAnswer> liveAnswer(UUID threadId, UUID agentMsgId) {
 		RoomAiState state = states.get(threadId);
 		if (state == null) {
 			return Optional.empty();
@@ -471,17 +472,17 @@ public class ThreadMessageDispatcher {
 				return Optional.empty();
 			}
 			if (state.active != null && agentMsgId.equals(state.active.msgId)) {
-				return Optional.of(state.active.content.toString());
+				return Optional.of(new LiveAnswer(state.active.content.toString(), state.active.endFrame));
 			}
 			for (PendingTurn candidate : state.pending) {
 				if (candidate.reservedTurn() != null && agentMsgId.equals(candidate.reservedTurn().agentMsgId())) {
-					return Optional.of("");
+					return Optional.of(new LiveAnswer("", null));
 				}
 			}
 			for (InFlightTurn inFlight : state.inFlight.values()) {
 				ChatMessageCommand.ReservedTurn reserved = inFlight.queued().command().reservedTurn();
 				if (reserved != null && agentMsgId.equals(reserved.agentMsgId())) {
-					return Optional.of("");
+					return Optional.of(new LiveAnswer("", null));
 				}
 			}
 			return Optional.empty();
@@ -495,8 +496,8 @@ public class ThreadMessageDispatcher {
 	*   결정 12). 흐르는 조각에 한 번만 실리는 agent·groundingNotice도 싣는다.
 	* - 실행 중인 도구가 있으면 그 chat.activity(시작).
 	* - 둘 다 없으면 THINKING 활동 — 첫 글자를 기다리는 중이라는 표시다.
-	* 진행 중인 턴이 없거나 이미 끝을 잡았으면(끝 프레임이 나가는 중) 아무것도 보내지 않는다 — 끝 프레임이 이 연결에도
-	* 가거나 이력에서 보인다.
+	* 진행 중인 턴이 없으면 아무것도 보내지 않는다. 이미 끝을 잡았으면 낸 끝 프레임을 준다(실패는 끝 프레임이 없어 이력에서
+	* 보인다).
 	*/
 	List<WsFrame> snapshotFor(UUID threadId, String subject) {
 		RoomAiState state = states.get(threadId);
@@ -507,8 +508,14 @@ public class ThreadMessageDispatcher {
 		synchronized (state) {
 			activeTurn = state.closed ? null : state.active;
 		}
-		if (activeTurn == null || activeTurn.terminalClaimed.get()) {
+		if (activeTurn == null) {
 			return List.of();
+		}
+		if (activeTurn.terminalClaimed.get()) {
+			// 끝 프레임이 방송되는 사이 들어온 연결은 그 프레임을 못 받을 수 있다 — 방에 붙고(join) 구독을 걸기(attach)
+			// 전에 나간 방송은 받는 사람이 없어 버려진다(이슈 #413 리뷰). 다음 턴으로 넘어가기 전이면 그 끝 프레임을 준다.
+			ChatAnswerFrame ended = activeTurn.endFrame;
+			return ended == null ? List.of() : List.of(ended.forRecipient(subject));
 		}
 		List<WsFrame> frames = new ArrayList<>();
 		PendingTurn turn = activeTurn.turn;
@@ -649,12 +656,12 @@ public class ThreadMessageDispatcher {
 	private void stopActive(RoomAiState state, ActiveTurn activeTurn) {
 		activeTurn.subscription.dispose();
 		persistAgentCancellation(activeTurn);
-		broadcastQuietly(state.threadId, endFrame(activeTurn, ChatAnswerStatus.CANCELLED, activeTurn.content.toString(),
-				List.of()));
+		broadcastQuietly(state.threadId, activeTurn.end(endFrame(activeTurn, ChatAnswerStatus.CANCELLED,
+				activeTurn.content.toString(), List.of())));
 		advance(state, activeTurn);
 	}
 
-	/** 끝 프레임(완료·중지) — delta는 비우고 최종 전체 내용을 content에 싣는다(이슈 #413 결정 12). */
+	/** 끝 프레임(완료·중지·실패) — delta는 비우고 최종 전체 내용을 content에 싣는다(이슈 #413 결정 12). 실패는 빈 내용이다. */
 	private ChatAnswerFrame endFrame(ActiveTurn activeTurn, ChatAnswerStatus status, String content,
 			List<Citation> citations) {
 		return new ChatAnswerFrame(activeTurn.turn.threadId(), activeTurn.msgId, activeTurn.turn.turnId(),
@@ -1104,7 +1111,7 @@ public class ThreadMessageDispatcher {
 		List<Citation> citations = answerCitations(activeTurn);
 		try {
 			roomSessionRegistry.broadcastToRoom(activeTurn.turn.threadId(),
-					endFrame(activeTurn, ChatAnswerStatus.DONE, content, citations));
+					activeTurn.end(endFrame(activeTurn, ChatAnswerStatus.DONE, content, citations)));
 		} catch (RuntimeException ignored) {
 			persistAgentCompletion(activeTurn, content, citations);
 			closeRoom(state, Closing.FAILURE);
@@ -1137,6 +1144,10 @@ public class ThreadMessageDispatcher {
 		// 다음 턴으로 간다 — 돌아온 사람은 이력에서 "답변을 만들지 못했습니다"로 본다(이슈 #413 결정 8).
 		persistAgentFailure(activeTurn, MsgStatus.FAILED);
 		try {
+			// 어느 답이 실패했는지는 msgId를 단 failed 끝 프레임으로 알린다(받은 내용은 버려 content가 빈다). 오류 프레임은
+			// 배너 문구용이다 — 거기엔 msgId가 없어 화면이 다른 답을 실패로 오인할 수 있었다(이슈 #413 리뷰).
+			roomSessionRegistry.broadcastToRoom(activeTurn.turn.threadId(),
+					activeTurn.end(endFrame(activeTurn, ChatAnswerStatus.FAILED, "", List.of())));
 			roomSessionRegistry.broadcastToRoom(activeTurn.turn.threadId(),
 					new ErrorFrame(activeTurn.turn.threadId(), code, message, activeTurn.turn.traceId()));
 		} catch (RuntimeException ignored) {
@@ -1148,18 +1159,35 @@ public class ThreadMessageDispatcher {
 
 	private void advance(RoomAiState state, ActiveTurn finishedTurn) {
 		ActiveTurn nextTurn = null;
+		PendingTurn next;
 		synchronized (state) {
 			if (state.closed || state.active != finishedTurn) {
 				return;
 			}
-			PendingTurn next = state.pending.pollFirst();
+			next = state.pending.peekFirst();
 			if (next != null) {
-				nextTurn = new ActiveTurn(next, state.seqBlock);
+				try {
+					nextTurn = new ActiveTurn(next, state.seqBlock);
+				} catch (RuntimeException failure) {
+					// 다음 턴을 만들지 못했다(seq 블록 예약 등 DB 실패). 그대로 두면 끝난 턴이 active로 남아 방이 영영 할 일이
+					// 있는 상태가 된다 — 예전엔 연결이 끊길 때 세대를 닫아 정리됐지만 이제 그 경로가 없다(이슈 #413 리뷰).
+					log.error("다음 AI 턴을 시작하지 못했다 threadId={} traceId={}", state.threadId, next.traceId(),
+							failure);
+				}
+				if (nextTurn != null) {
+					state.pending.pollFirst();
+				}
 			}
-			state.active = nextTurn;
+			if (next == null || nextTurn != null) {
+				state.active = nextTurn;
+			}
+		}
+		if (next == null) {
+			closeIfIdle(state);
+			return;
 		}
 		if (nextTurn == null) {
-			closeIfIdle(state);
+			closeRoom(state, Closing.FAILURE);
 			return;
 		}
 		startTurn(state, nextTurn);
@@ -1219,6 +1247,11 @@ public class ThreadMessageDispatcher {
 			activeTurn.subscription.dispose();
 		}
 		if (closing == Closing.DELETED) {
+			// 저장할 행은 없지만, 아직 붙어 있는 연결의 말풍선이 "생성 중"에 남지 않게 중지를 한 번 알린다.
+			if (activeTurn != null && activeTurn.claimTerminal()) {
+				broadcastQuietly(state.threadId, endFrame(activeTurn, ChatAnswerStatus.CANCELLED,
+						activeTurn.content.toString(), List.of()));
+			}
 			return List.of();
 		}
 		List<Mono<Void>> persistences = new ArrayList<>();
@@ -1366,6 +1399,12 @@ public class ThreadMessageDispatcher {
 				.subscribe();
 	}
 
+	/**
+	* 아직 메모리에 있는 답변(liveAnswer) — 지금까지 내용과, 이미 끝 프레임을 냈으면 그 프레임(아니면 null).
+	*/
+	record LiveAnswer(String content, ChatAnswerFrame endFrame) {
+	}
+
 	/** 일이 남은 채로 방의 AI 작업을 닫는 까닭(closeRoom). 할 일이 없을 때 지우는 것은 closeIfIdle이다. */
 	private enum Closing {
 		FAILURE, DELETED
@@ -1501,8 +1540,17 @@ public class ThreadMessageDispatcher {
 		 * 끝나도 그 턴의 것에만 쌓인다. */
 		private final TurnToolExecutions toolExecutions;
 
+		/** 이 턴이 낸 끝 프레임(완료·중지). 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송에 다시 준다(이슈 #413). */
+		private volatile ChatAnswerFrame endFrame;
+
 		boolean claimTerminal() {
 			return terminalClaimed.compareAndSet(false, true);
+		}
+
+		/** 끝 프레임을 기억하고 그대로 돌려준다. */
+		ChatAnswerFrame end(ChatAnswerFrame frame) {
+			endFrame = frame;
+			return frame;
 		}
 
 		/**
@@ -1635,14 +1683,20 @@ public class ThreadMessageDispatcher {
 						try {
 							process(this, queued);
 						} catch (RuntimeException error) {
+							// 처리 중 예외(사람 메시지 seq 예약·턴 생성의 DB 실패 등)면 그 발화의 대기 등록이 남아 방이 영영 비지 않는다.
+							// 방송·저장 통로가 막힌 것과 같게 방의 AI 작업을 실패로 닫는다(이슈 #413 리뷰).
 							log.error("방 워커가 메시지를 처리하지 못했다 threadId={}", threadId, error);
+							closeRoom(this, Closing.FAILURE);
 						} finally {
 							synchronized (this) {
 								queuedMessages -= 1;
 							}
 							closeIfIdle(this);
 						}
-					}, error -> log.error("방 워커가 비정상 종료했다 threadId={}", threadId, error));
+					}, error -> {
+						log.error("방 워커가 비정상 종료했다 threadId={}", threadId, error);
+						closeRoom(this, Closing.FAILURE);
+					});
 		}
 	}
 

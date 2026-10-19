@@ -89,7 +89,7 @@ function notice(
 
 function answer(
   delta: string,
-  status: 'streaming' | 'done' | 'cancelled' | 'denied',
+  status: 'streaming' | 'done' | 'cancelled' | 'denied' | 'failed',
   metadata: {
     citations?: Citation[];
     restrictedResultsOmitted?: boolean;
@@ -669,7 +669,7 @@ describe('applyFrame - error', () => {
     expect(state.error?.code).toBe('RATE_LIMITED');
   });
 
-  it('AI 종결 오류는 흐르던 답변을 실패로 끝내고 받은 조각을 비운다 — 서버도 버렸다(이슈 #413 결정 8)', () => {
+  it('AI 종결 오류만 오면(실패 프레임을 모르는 옛 서버) 흐름만 끝낸다 — msgId가 없어 실패로 단정하지 않는다', () => {
     const state = fold([
       answer('부분 답변', 'streaming'),
       {
@@ -682,13 +682,13 @@ describe('applyFrame - error', () => {
     ]);
 
     expect(state.messages[0]).toMatchObject({
-      content: '',
+      content: '부분 답변',
       streaming: false,
-      terminalStatus: 'failed',
+      terminalStatus: null,
     });
   });
 
-  it('턴 시간 제한 초과도 종결 오류다 — 실패로 끝내고 시간 초과 문구를 띄운다(이슈 #389·#413)', () => {
+  it('턴 시간 제한 초과도 종결 오류다 — 흐름을 끝내고 시간 초과 문구를 띄운다(이슈 #389)', () => {
     const state = fold([
       answer('부분 답변', 'streaming'),
       {
@@ -701,9 +701,9 @@ describe('applyFrame - error', () => {
     ]);
 
     expect(state.messages[0]).toMatchObject({
-      content: '',
+      content: '부분 답변',
       streaming: false,
-      terminalStatus: 'failed',
+      terminalStatus: null,
     });
     expect(state.error?.message).toBe(
       '답변이 시간 제한을 넘겨 중단됐어요. 질문을 나눠서 다시 요청해 주세요.',
@@ -1376,6 +1376,54 @@ describe('#413 답변 이어 받기', () => {
     });
   });
 
+  it('실패는 그 msgId의 failed 끝 프레임으로 온다 — 받은 조각을 비우고 실패로 끝내며, 뒤따른 오류 프레임은 배너만 띄운다', () => {
+    const state = fold([
+      at('부분', 0, { msgId: 'mine-turn' }),
+      {
+        ...(answer('', 'failed', { msgId: 'mine-turn' }) as ChatAnswerFrame),
+        content: '',
+      },
+      {
+        type: 'error',
+        threadId: THREAD,
+        code: 'MODEL_UNAVAILABLE',
+        message: '모델 오류',
+        traceId: 'trace-ai',
+      },
+    ]);
+    expect(chats(state)[0]).toMatchObject({
+      content: '',
+      streaming: false,
+      terminalStatus: 'failed',
+    });
+    expect(state.error?.code).toBe('MODEL_UNAVAILABLE');
+    // 첫 글자 전에 실패해도 말풍선이 생겨 실패가 보인다.
+    const early = fold([
+      { ...(answer('', 'failed') as ChatAnswerFrame), content: '' },
+    ]);
+    expect(chats(early)[0].terminalStatus).toBe('failed');
+  });
+
+  it('끝난 말풍선의 상태는 늦게 온 끝 프레임이 바꾸지 않는다 — 더 긴 최종 내용만 받는다', () => {
+    const cancelled = fold([
+      at('부분', 0),
+      { ...(answer('', 'cancelled') as ChatAnswerFrame), content: '부분' },
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '부분과 더' },
+    ]);
+    expect(chats(cancelled)[0]).toMatchObject({
+      content: '부분과 더',
+      terminalStatus: 'cancelled',
+    });
+    const failed = fold([
+      { ...(answer('', 'failed') as ChatAnswerFrame), content: '' },
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '되살아난 글' },
+    ]);
+    expect(chats(failed)[0]).toMatchObject({
+      content: '',
+      terminalStatus: 'failed',
+    });
+  });
+
   it('mine은 서버가 받는 사람마다 채운 값이고, 한 번 내 것이면 남는다', () => {
     const state = fold([
       at('', null, { content: '안녕', mine: true }),
@@ -1424,6 +1472,8 @@ describe('#413 답변 이어 받기', () => {
     };
     expect(fold([thinking]).activity?.kind).toBe('THINKING');
     expect(fold([thinking, at('안녕', 0)]).activity).toBeNull();
+    // 들어올 때 받은 "생각 중"이 첫 조각보다 늦게 와도 남지 않는다.
+    expect(fold([at('안녕', 0), thinking]).activity).toBeNull();
     const tool: WsFrame = { ...thinking, kind: 'WEB_SEARCH', target: '날씨' };
     expect(fold([tool, at('안녕', 0)]).activity?.kind).toBe('WEB_SEARCH');
   });
@@ -1503,6 +1553,15 @@ describe('#413 답변 이어 받기', () => {
         historyRow('q2', 12, '다음', { athKind: 'HUMAN' }),
       ]),
     ).toBe(10);
+
+    // 실시간으로 말풍선이 생기면 이력의 PENDING으로는 더 멈추지 않는다(흐르는 말풍선으로 멈춘다).
+    const live = applyFrame(loaded, {
+      ...(answer('', 'streaming', { msgId: 'a1' }) as ChatAnswerFrame),
+      seq: 11,
+      content: '지금까지',
+    });
+    expect(live.pendingAnswers).toEqual({});
+    expect(catchUpCursor(live)).toBe(10);
 
     // 다시 가져온 행이 끝나 있으면 그 답을 그리고 더는 멈추지 않는다.
     const caughtUp = applyHistory(loaded, [historyRow('a1', 11, '완성')]);

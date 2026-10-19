@@ -445,8 +445,9 @@ class ThreadMessageDispatcherTest {
 				.containsExactly("RATE_LIMITED");
 	}
 
+	/** 공백뿐인 출력은 실패다 — done 없이, 그 답을 가리키는 failed 끝 프레임(빈 내용)과 배너용 오류 프레임이 간다(이슈 #413). */
 	@Test
-	void emptyOrWhitespaceOnlyOutputBroadcastsModelUnavailableWithoutDone() {
+	void emptyOrWhitespaceOnlyOutputEndsAsFailedWithModelUnavailable() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("", "   "));
@@ -454,12 +455,91 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(command(room, "@AI hello"));
 
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).hasSize(2);
+		awaitFrameCount(room.frames, 3);
+		assertThat(room.frames).hasSize(3);
 		assertThat(room.frames.get(0)).usingRecursiveComparison().ignoringFields("msgId", "seq")
 				.isEqualTo(message(room, "@AI hello"));
-		assertThat(room.frames.get(1)).isInstanceOf(ErrorFrame.class);
-		assertThat(((ErrorFrame) room.frames.get(1)).code()).isEqualTo("MODEL_UNAVAILABLE");
+		assertThat(room.frames.get(1)).isInstanceOfSatisfying(ChatAnswerFrame.class, failed -> {
+			assertThat(failed.status()).isEqualTo(ChatAnswerStatus.FAILED);
+			assertThat(failed.content()).isEmpty();
+		});
+		assertThat(room.frames.get(2)).isInstanceOf(ErrorFrame.class);
+		assertThat(((ErrorFrame) room.frames.get(2)).code()).isEqualTo("MODEL_UNAVAILABLE");
+	}
+
+	/**
+	* 끝 프레임을 낸 뒤 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송은 그 끝 프레임을 받는다 — 방에 붙고 구독을 걸기 전에
+	* 나간 방송은 받는 사람이 없어 버려진다(이슈 #413 리뷰).
+	*/
+	@Test
+	void aConnectionJoiningRightAfterTheEndFrameGetsThatEndFrame() {
+		AtomicReference<ThreadMessageDispatcher> dispatcherRef = new AtomicReference<>();
+		AtomicReference<List<WsFrame>> snapshot = new AtomicReference<>();
+		AtomicReference<ThreadMessageDispatcher.LiveAnswer> replay = new AtomicReference<>();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+				boolean sent = super.broadcastToRoom(threadId, frame);
+				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE) {
+					snapshot.set(dispatcherRef.get().snapshotFor(threadId, "subject-someone-else"));
+					replay.set(dispatcherRef.get().liveAnswer(threadId, answer.msgId()).orElseThrow());
+				}
+				return sent;
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("끝난 답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		dispatcherRef.set(dispatcher);
+
+		dispatcher.dispatch(command(room, "@AI 질문"));
+
+		eventually(() -> assertThat(snapshot.get()).isNotNull());
+		assertThat(snapshot.get()).singleElement().isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> {
+			assertThat(frame.status()).isEqualTo(ChatAnswerStatus.DONE);
+			assertThat(frame.content()).isEqualTo("끝난 답");
+			assertThat(frame.mine()).isFalse();
+		});
+		assertThat(replay.get().endFrame().status()).isEqualTo(ChatAnswerStatus.DONE);
+	}
+
+	/** 다음 턴을 만들지 못하면(seq 블록 예약 실패) 방의 AI 작업을 실패로 닫는다 — 끝난 턴이 active로 남아 방이 영영 지워지지
+	 * 않던 것을 막는다(이슈 #413 리뷰). */
+	@Test
+	void closesTheRoomAsFailedWhenTheNextTurnCannotBeCreated() {
+		TestRoom room = new TestRoom();
+		Sinks.Many<String> first = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(first.asFlux());
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		AtomicBoolean failSeq = new AtomicBoolean();
+		when(msgPersistenceService.allocateSeqBlockBlocking(eq(room.threadId), anyInt())).thenAnswer(invocation -> {
+			if (failSeq.get()) throw new IllegalStateException("db down");
+			return 0L;
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 첫째"));
+		dispatcher.dispatch(command(room, "@AI 둘째"));
+		verify(llm, timeout(1000)).streamChat(any());
+		awaitFrameCount(room.frames, 3);
+		// 예약해 둔 블록을 다 써서 다음 턴이 블록을 새로 받으려다 실패하게 한다.
+		failSeq.set(true);
+		for (int i = 0; i < 200; i++) {
+			try {
+				dispatcher.allocateSeqBlocking(room.threadId);
+			} catch (IllegalStateException exhausted) {
+				break;
+			}
+		}
+		first.tryEmitNext("답");
+		first.tryEmitComplete();
+
+		eventually(() -> assertThat(room.frames).filteredOn(ErrorFrame.class::isInstance)
+				.extracting(frame -> ((ErrorFrame) frame).code())
+				.contains("MESSAGE_DELIVERY_FAILED"));
+		verify(llm, times(1)).streamChat(any());
 	}
 
 	@Test
@@ -1438,7 +1518,7 @@ class ThreadMessageDispatcherTest {
 		dispatcher.closeAfterBroadcastFailure(room.threadId, UUID.randomUUID());
 
 		assertThat(cancelled).isFalse();
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId, UUID.randomUUID())).isEmpty();
+		assertThat(dispatcher.liveAnswer(room.threadId, UUID.randomUUID())).isEmpty();
 	}
 
 	@Test
@@ -1950,14 +2030,14 @@ class ThreadMessageDispatcherTest {
 	}
 
 	/**
-	* 재검토로 확인한 버그(이슈 #233) — activeTurnContentIfMatches가 state.active만 보면, 아직
+	* 재검토로 확인한 버그(이슈 #233) — liveAnswer(예전 activeTurnContentIfMatches)가 state.active만 보면, 아직
 	* 시작 전이라 FIFO 대기 중인(state.pending) 정상 턴을 "고아"로 오판한다. DIRECT는 같은
 	* OWNER가 첫 턴이 스트리밍 중인 동안 다음 발화를 보낼 수 있고 그 발화도 정상적으로
 	* 큐잉된다 — 이 상태에서 재시도가 오면 그 턴을 FAILED로 잘못 닫고 중복 턴을 새로
 	* 시작하게 된다.
 	*/
 	@Test
-	void activeTurnContentIfMatchesRecognizesAQueuedDirectTurnAsStillAlive() {
+	void liveAnswerRecognizesAQueuedDirectTurnAsStillAlive() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1972,11 +2052,11 @@ class ThreadMessageDispatcherTest {
 		verify(llm, timeout(1000)).streamChat(any());
 		dispatcher.dispatch(directCommand(room, "second", UUID.randomUUID(), queued));
 
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId,
-				queued.agentMsgId())).contains("");
+		assertThat(dispatcher.liveAnswer(room.threadId,
+				queued.agentMsgId()).map(ThreadMessageDispatcher.LiveAnswer::content)).contains("");
 		// active 쪽도 여전히 정상 동작해야 한다 — pending 지원을 더하면서 active 분기를
 		// 깨뜨리지 않았는지 같은 테스트에서 함께 확인한다.
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId,
+		assertThat(dispatcher.liveAnswer(room.threadId,
 				first.agentMsgId())).isPresent();
 	}
 

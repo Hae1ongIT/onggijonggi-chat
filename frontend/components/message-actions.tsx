@@ -36,26 +36,31 @@ export function PureMessageActions({
 
   if (isLoading) return null;
   if (message.role === 'user') return null;
+  // 본문 없이 끝난 답(중단·거부·실패)은 복사할 것이 없다 — 다시 만들기만 남긴다(이슈 #413).
+  const hasContent = message.content !== '';
+  if (!hasContent && !isLastMessage) return null;
 
   return (
     <TooltipProvider delayDuration={0}>
       <div className="flex flex-row gap-2">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              className="py-1 px-2 h-fit text-muted-foreground"
-              variant="outline"
-              aria-label="답변 복사"
-              onClick={async () => {
-                await copyToClipboard(message.content);
-                toast.success('Copied to clipboard!');
-              }}
-            >
-              <CopyIcon />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Copy</TooltipContent>
-        </Tooltip>
+        {hasContent && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                className="py-1 px-2 h-fit text-muted-foreground"
+                variant="outline"
+                aria-label="답변 복사"
+                onClick={async () => {
+                  await copyToClipboard(message.content);
+                  toast.success('Copied to clipboard!');
+                }}
+              >
+                <CopyIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Copy</TooltipContent>
+          </Tooltip>
+        )}
 
         {isLastMessage && (
           <Tooltip>

@@ -36,16 +36,14 @@ import type {
 type AnswerStatus = ChatAnswerFrame['status'];
 
 /**
- * AI 답변이 평범하게 끝나지 않은 사유. 중지·거부는 프레임 상태에서, 실패는 이력의 FAILED와 종결 오류 프레임에서 온다
- * (이슈 #413 결정 8) — chat.answer에는 실패 상태가 없다.
+ * AI 답변이 평범하게 끝나지 않은 사유. 실시간 프레임(chat.answer.status)과 이력(MsgItem.status) 양쪽에서 온다 — 실패도
+ * msgId를 단 failed 끝 프레임으로 온다(이슈 #413 결정 8).
  */
 export type TerminalStatus = 'cancelled' | 'denied' | 'failed';
 
 /** 평범한 완료가 아닌 종료인지. 화면이 "중지됨"·"거부됨"을 표시할 근거다. */
-function isTerminalStatus(
-  status: AnswerStatus,
-): status is 'cancelled' | 'denied' {
-  return status === 'cancelled' || status === 'denied';
+function isTerminalStatus(status: AnswerStatus): status is TerminalStatus {
+  return status === 'cancelled' || status === 'denied' || status === 'failed';
 }
 
 /** 도구가 아니라 첫 글자를 기다리는 중이라는 활동 종류(이슈 #413 결정 9) — 방에 막 들어온 화면에만 온다. */
@@ -723,10 +721,24 @@ function extendAnswer(
 ): RoomState {
   const messages = [...state.messages];
   const target = messages[index] as RoomMessage;
-  if (!target.streaming && frame.status === 'streaming') return state;
+  if (!target.streaming) {
+    // 이미 끝난 말풍선 — 늦게 온 streaming은 다시 열지 않고, 늦게 온 끝 프레임은 상태를 바꾸지 않는다(이력으로 먼저
+    // 마무리했거나 같은 끝이 두 번 온 경우). 더 긴 최종 내용과 근거만 받는다.
+    if (frame.status === 'streaming' || target.terminalStatus === 'failed') {
+      return state;
+    }
+    messages[index] = {
+      ...target,
+      content: nextAnswerContent(target.content, { ...frame, delta: '' }),
+      citations: mergeCitations(target.citations, frame.citations),
+    };
+    return { ...state, messages };
+  }
   messages[index] = {
     ...target,
-    content: nextAnswerContent(target.content, frame),
+    // 실패는 서버가 받은 내용을 버렸다 — 흐르던 조각도 비운다(남기면 새로고침했을 때 달라진다).
+    content:
+      frame.status === 'failed' ? '' : nextAnswerContent(target.content, frame),
     // streaming 외의 모든 상태가 종료다 — 예전에는 done만 봐서 취소·거부된 답변이 영영 흐르는
     // 중으로 남았다(COLLAB은 그 둘을 안 써서 드러나지 않던 구멍이다).
     streaming: frame.status === 'streaming',
@@ -749,22 +761,6 @@ function extendAnswer(
   return { ...state, messages };
 }
 
-/**
- * 흐르던 AI 답변을 실패로 끝낸다(이슈 #413 결정 8). 서버는 실패한 턴의 받은 내용을 버리고 빈 본문으로 저장하므로 화면도
- * 조각을 비운다 — 남기면 새로고침했을 때 내용이 달라진다. 문구("답변을 만들지 못했습니다")는 화면이 고른다.
- */
-function failAnswer(state: RoomState, index: number): RoomState {
-  const messages = [...state.messages];
-  const target = messages[index] as RoomMessage;
-  messages[index] = {
-    ...target,
-    content: '',
-    streaming: false,
-    terminalStatus: 'failed',
-  };
-  return { ...state, messages };
-}
-
 /** 그 턴의 "생각 중" 표시(THINKING)를 지운다 — 첫 글자가 오면 더 기다리는 중이 아니다(이슈 #413 결정 9). */
 function clearThinkingOf(state: RoomState, msgId: string): RoomState {
   return state.activity?.msgId === msgId &&
@@ -778,6 +774,7 @@ function clearThinkingOf(state: RoomState, msgId: string): RoomState {
  * 먼저 그린 뒤의 대기 질문(seq가 더 큼)보다 앞에 놓여야 한다(이슈 #413). 커서는 지금처럼 이 seq까지 민다.
  */
 function insertAnswer(state: RoomState, frame: ChatAnswerFrame): RoomState {
+  const { [frame.msgId]: _seen, ...pendingAnswers } = state.pendingAnswers;
   const message: RoomMessage = {
     id: frame.msgId,
     seq: frame.seq,
@@ -795,6 +792,8 @@ function insertAnswer(state: RoomState, frame: ChatAnswerFrame): RoomState {
   };
   const inserted: RoomState = {
     ...state,
+    // 말풍선이 생겼으니 이력의 PENDING으로 커서를 멈출 까닭이 없다 — 이제 흐르는 말풍선으로 멈춘다.
+    pendingAnswers,
     messages: insertBySeq(state.messages, [message], state.lastSeq),
     lastSeq: advanceCursor(state.lastSeq, frame.seq),
   };
@@ -901,6 +900,14 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
     // 아래에 진행 표시가 남는다.
     case 'chat.activity':
       if (frame.active && isFinishedAnswer(state, frame.msgId)) return state;
+      // "생각 중"은 첫 글자 전에만 뜻이 있다 — 방에 들어올 때 받은 이 표시가 첫 조각보다 늦게 와도 남기지 않는다(이슈 #413).
+      if (
+        frame.active &&
+        frame.kind === THINKING_ACTIVITY &&
+        messageIndexById(state, frame.msgId) !== null
+      ) {
+        return state;
+      }
       return frame.active
         ? {
             ...state,
@@ -974,10 +981,22 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       // 종결 오류는 흐름만 끊는다 — 중지·거부와 달리 사용자가 고른 결말이 아니라
       // terminalStatus를 남기지 않는다. 사유는 방 위 배너(error)가 따로 알린다.
       const terminal = TERMINAL_AI_ERROR_CODES.has(frame.code);
-      // 실패로 끝낸다(이슈 #413 결정 8) — 오류 프레임에는 msgId가 없어 첫 글자 전에 실패한 턴은 실시간에는 줄이 없고,
-      // 이력(FAILED)에서 보인다.
+      // 실패한 답은 그 msgId를 단 failed 끝 프레임이 먼저 실패로 끝낸다(이슈 #413). 여기는 그 프레임을 모르는 옛 서버를
+      // 위한 대비라 예전처럼 흐름만 끝낸다 — 오류 프레임에는 msgId가 없어 실패로 단정하면 남의 답을 지울 수 있다.
       const ended =
-        index !== null && terminal ? failAnswer(state, index) : state;
+        index !== null && terminal
+          ? extendAnswer(state, index, {
+              delta: '',
+              offset: null,
+              content: null,
+              status: 'done',
+              citations: [],
+              restrictedResultsOmitted: false,
+              groundingNotice: null,
+              agent: null,
+              mine: null,
+            })
+          : state;
       // 종결 오류는 턴을 끝내므로 도구 진행 표시도 지운다(이슈 #397). 답변 말풍선이 생기기 전에 끝났을 수도 있다.
       const nextState = terminal ? clearActivity(ended) : ended;
       return {

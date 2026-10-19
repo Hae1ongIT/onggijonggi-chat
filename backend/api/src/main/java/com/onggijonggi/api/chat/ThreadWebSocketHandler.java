@@ -429,7 +429,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 돌려주는 것뿐이라 FIFO·레이트리밋(#74)을 소모하지 않는다.
 	*
 	* 그 턴이 아직 살아있으면(진행 중이거나 FIFO 대기 중이거나 워커가 아직 안 꺼낸 —
-	* ThreadMessageDispatcher.activeTurnContentIfMatches 참고) 지금까지 누적된 내용(대기
+	* ThreadMessageDispatcher.liveAnswer 참고) 지금까지 누적된 내용(대기
 	* 중이면 빈 문자열)을 그 turnId로 담아 보낸다 — mergeOtherTurnAnswer(프런트)의 "처음 본
 	* 프레임=시작 텍스트" 경로가 캐치업 역할을 한다. 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
 	* 저장된 결과를, FAILED면 ChatAnswerStatus에 FAILED가 없어 ErrorFrame을 대신 보낸다. DB는
@@ -450,11 +450,17 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 
 		// 지금까지 내용은 delta가 아니라 content에 싣는다(이슈 #413 결정 12) — delta에 실으면 이어 오는 조각과 겹쳐
 		// 글자가 두 번 보였다(S9). 화면은 content로 앞부분을 맞추고 조각은 위치(offset)로 이어 붙인다.
-		Optional<String> streaming = threadMessageDispatcher.activeTurnContentIfMatches(threadId, stored.agentMessageId());
-		if (streaming.isPresent()) {
+		// 이미 끝 프레임을 냈지만 다음 턴으로 넘어가기 전이면 그 끝 프레임으로 답한다 — 흐르는 중으로 답하면 끝 프레임이
+		// 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413 리뷰).
+		Optional<ThreadMessageDispatcher.LiveAnswer> live =
+				threadMessageDispatcher.liveAnswer(threadId, stored.agentMessageId());
+		if (live.isPresent()) {
+			if (live.get().endFrame() != null) {
+				return Mono.<WsFrame>just(live.get().endFrame().forRecipient(actor.subject()));
+			}
 			return Mono.<WsFrame>just(new ChatAnswerFrame(threadId, stored.agentMessageId(), inbound.turnId(),
 					threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "", List.of(), false,
-					ChatAnswerStatus.STREAMING, null, null, null, streaming.get(), true, null));
+					ChatAnswerStatus.STREAMING, null, null, null, live.get().content(), true, null));
 		}
 
 		return switch (stored.agentStatus()) {

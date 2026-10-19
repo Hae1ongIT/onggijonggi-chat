@@ -47,8 +47,9 @@ export interface ChatAnswerFrame {
   delta: string;
   citations: Citation[];
   restrictedResultsOmitted: boolean;
-  /** 협업방 중지도 cancelled다(이슈 #413) — 예전엔 done이었다. denied는 1:1 전용이다(이슈 #162). */
-  status: 'streaming' | 'done' | 'cancelled' | 'denied';
+  /** 협업방 중지도 cancelled다(이슈 #413) — 예전엔 done이었다. denied는 1:1 전용이다(이슈 #162). failed는 실패한
+   * 답이다(이슈 #413) — 받은 내용은 버려져 비고, 같은 실패의 오류 프레임(error)이 배너 문구를 따로 싣는다. */
+  status: 'streaming' | 'done' | 'cancelled' | 'denied' | 'failed';
   /** 방 문서 검색(#344)이 FOUND가 아니었을 때만 채워진다(이슈 #353). 재접속 복원 대상이
    * 아니라 그 턴에만 실려 오는 일시적 안내다. */
   groundingNotice: 'no_evidence' | 'unavailable' | null;
