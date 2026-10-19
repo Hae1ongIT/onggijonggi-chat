@@ -100,7 +100,22 @@ export interface RoomMessage {
   agent: ChatAnswerFrame['agent'];
   /** 사람 메시지에 실린 첨부. 이름만 든다. AI 답변은 언제나 빈 배열이다. */
   attachments: MessageAttachment[];
+  /**
+   * 앞에 빈틈이 있어 아직 붙이지 못한 조각(이슈 #413). 방에 들어올 때 받는 지금까지 내용과 방 프레임은 서로 다른 길로
+   * 와 순서가 섞인다 — 지금까지 내용보다 뒤 조각이 먼저 오면 버리지 않고 들고 있다가 앞이 채워지면 붙인다. 버리면 그 뒤
+   * 조각도 모두 빈틈 뒤라 끝 프레임까지 글자가 멈춘다. 흐르는 AI 답변에만 있다.
+   */
+  heldChunks?: readonly AnswerChunk[];
 }
+
+/** 위치(offset)를 단 답변 조각. */
+export interface AnswerChunk {
+  offset: number;
+  delta: string;
+}
+
+/** 들고 있는 조각의 상한 — 앞이 끝내 안 채워져도 끝 프레임의 전체 내용이 메우므로 넘치는 것은 버린다. */
+const MAX_HELD_CHUNKS = 200;
 
 /**
  * 참가자가 되거나 참가가 끝난 것을 시간 순서에 남기는 줄. 목록(#26)이 "지금 누가 접속해 있나"라면
@@ -679,24 +694,37 @@ function streamingAnswerIndex(state: RoomState): number | null {
  * 지금 가진 답변 내용에 프레임을 적용한다(이슈 #413 결정 3·12).
  * - content(처음부터 그 시점까지 전체)가 있으면 지금 것보다 짧지 않을 때 통째로 바꾼다 — 짧으면 늦게 온 것이다.
  * - delta는 offset(답변의 몇 번째 글자부터인지)으로 이어 붙인다. 이미 가진 범위는 버리고, 겹친 앞부분은 잘라 내고,
- *   빈틈이 생기면(offset > 지금 길이) 붙이지 않는다 — 화면의 내용은 언제나 답변의 올바른 앞부분으로만 남고, 빈틈은
- *   다음 content(끝 프레임)가 메운다. offset이 없으면(옛 서버) 예전처럼 이어 붙인다.
+ *   빈틈이 생기면(offset > 지금 길이) 붙이지 않고 들고 있다가(heldChunks) 앞이 채워지면 붙인다 — 화면의 내용은 언제나
+ *   답변의 올바른 앞부분으로만 남는다. offset이 없으면(옛 서버) 예전처럼 이어 붙인다.
  * 길이는 UTF-16 단위(string.length) — 서버(Java String.length)와 같은 값으로 센다.
  */
 function nextAnswerContent(
   current: string,
+  held: readonly AnswerChunk[],
   frame: Pick<ChatAnswerFrame, 'delta' | 'offset' | 'content'>,
-): string {
+): { content: string; held: readonly AnswerChunk[] } {
   let content = current;
   if (frame.content != null && frame.content.length >= content.length) {
     content = frame.content;
   }
-  if (frame.delta === '') return content;
-  const offset = frame.offset;
-  if (offset == null) return content + frame.delta;
-  if (offset + frame.delta.length <= content.length) return content;
-  if (offset > content.length) return content;
-  return content + frame.delta.slice(content.length - offset);
+  let chunks = held;
+  if (frame.delta !== '') {
+    if (frame.offset == null) content += frame.delta;
+    else chunks = [...held, { offset: frame.offset, delta: frame.delta }];
+  }
+  if (chunks.length === 0) return { content, held: chunks };
+  // 위치 순으로 붙일 수 있는 것을 붙인다. 이미 가진 범위는 버리고 겹친 앞부분은 잘라 낸다. 빈틈 뒤 조각은 남긴다 —
+  // 위치 순이라 하나가 남으면 그 뒤도 모두 빈틈 뒤다.
+  const rest: AnswerChunk[] = [];
+  for (const chunk of [...chunks].sort((a, b) => a.offset - b.offset)) {
+    if (chunk.offset + chunk.delta.length <= content.length) continue;
+    if (chunk.offset > content.length) {
+      rest.push(chunk);
+      continue;
+    }
+    content += chunk.delta.slice(content.length - chunk.offset);
+  }
+  return { content, held: rest.slice(0, MAX_HELD_CHUNKS) };
 }
 
 /**
@@ -729,16 +757,26 @@ function extendAnswer(
     }
     messages[index] = {
       ...target,
-      content: nextAnswerContent(target.content, { ...frame, delta: '' }),
+      content: nextAnswerContent(target.content, [], { ...frame, delta: '' })
+        .content,
       citations: mergeCitations(target.citations, frame.citations),
     };
     return { ...state, messages };
   }
+  const next = nextAnswerContent(
+    target.content,
+    target.heldChunks ?? [],
+    frame,
+  );
+  const { heldChunks: _held, ...rest } = target;
   messages[index] = {
-    ...target,
+    ...rest,
+    // 끝난 답에는 들고 있던 조각이 필요 없다 — 끝 프레임의 전체 내용이 메웠다.
+    ...(frame.status === 'streaming' && next.held.length > 0
+      ? { heldChunks: next.held }
+      : {}),
     // 실패는 서버가 받은 내용을 버렸다 — 흐르던 조각도 비운다(남기면 새로고침했을 때 달라진다).
-    content:
-      frame.status === 'failed' ? '' : nextAnswerContent(target.content, frame),
+    content: frame.status === 'failed' ? '' : next.content,
     // streaming 외의 모든 상태가 종료다 — 예전에는 done만 봐서 취소·거부된 답변이 영영 흐르는
     // 중으로 남았다(COLLAB은 그 둘을 안 써서 드러나지 않던 구멍이다).
     streaming: frame.status === 'streaming',

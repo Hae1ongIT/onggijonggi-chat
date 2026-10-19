@@ -1330,7 +1330,19 @@ describe('#413 답변 이어 받기', () => {
     expect(content(state)).toBe('안녕하세요!');
   });
 
-  it('이미 가진 범위의 조각은 버리고, 빈틈이 생기면 붙이지 않고 끝 프레임의 전체 내용이 메운다', () => {
+  it('빈틈 뒤 조각을 먼저 받아도 들고 있다가, 늦게 온 지금까지 내용이 앞을 채우면 이어 붙인다 — 그 뒤 조각도 계속 흐른다', () => {
+    // 들어올 때 받는 지금까지 내용('안녕', 길이 2)보다 그 뒤 방 프레임이 먼저 왔다.
+    const state = fold([
+      at('하', 2),
+      at('세요', 3),
+      at('', null, { content: '안녕' }),
+      at('!', 5),
+    ]);
+    expect(content(state)).toBe('안녕하세요!');
+    expect(chats(state)[0].heldChunks).toBeUndefined();
+  });
+
+  it('이미 가진 범위의 조각은 버리고, 빈틈이 메워지지 않으면 끝 프레임의 전체 내용이 메운다', () => {
     const gap = fold([at('안녕', 0), at('요', 4)]);
     expect(content(gap)).toBe('안녕');
     const old = fold([at('안녕', 0), at('녕', 1)]);
