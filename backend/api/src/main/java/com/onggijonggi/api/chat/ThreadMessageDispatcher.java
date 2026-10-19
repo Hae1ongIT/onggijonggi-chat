@@ -460,7 +460,7 @@ public class ThreadMessageDispatcher {
 	* active면 지금까지 누적된 내용을, pending·inFlight면(아직 한 글자도 안 만들어졌다) 빈
 	* 문자열을 돌려준다 — 셋 다 아니면 empty(호출부가 DB 상태로 마저 분기한다: 이미 끝났거나
 	* 진짜 고아). active가 끝 프레임을 이미 냈으면(다음 턴으로 넘어가기 전) 그 끝 프레임도 함께 준다 — 흐르는 중으로
-	* 답하면 끝 프레임이 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413 리뷰).
+	* 답하면 끝 프레임이 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413).
 	*/
 	Optional<LiveAnswer> liveAnswer(UUID threadId, UUID agentMsgId) {
 		RoomAiState state = states.get(threadId);
@@ -493,7 +493,7 @@ public class ThreadMessageDispatcher {
 	* 방에 막 들어온 연결에 보낼, 진행 중인 답의 지금 모습(이슈 #413 결정 3·7·9). 구독을 건 뒤에 부른다 — 그 뒤 조각은
 	* 방 프레임으로 오고, 겹치는 범위는 화면이 위치로 버린다.
 	* - 글자가 있으면 chat.answer(streaming) — delta는 비우고 지금까지 전체를 content에(옛 화면은 모르는 필드라 버린다,
-	*   결정 12). 흐르는 조각에 한 번만 실리는 agent·groundingNotice도 싣는다.
+	*   이슈 #413 결정 12). 흐르는 조각에 한 번만 실리는 agent·groundingNotice도 싣는다.
 	* - 실행 중인 도구가 있으면 그 chat.activity(시작).
 	* - 둘 다 없으면 THINKING 활동 — 첫 글자를 기다리는 중이라는 표시다.
 	* 진행 중인 턴이 없으면 아무것도 보내지 않는다. 이미 끝을 잡았으면 낸 끝 프레임을 준다(실패는 끝 프레임이 없어 이력에서
@@ -513,7 +513,7 @@ public class ThreadMessageDispatcher {
 		}
 		if (activeTurn.terminalClaimed.get()) {
 			// 끝 프레임이 방송되는 사이 들어온 연결은 그 프레임을 못 받을 수 있다 — 방에 붙고(join) 구독을 걸기(attach)
-			// 전에 나간 방송은 받는 사람이 없어 버려진다(이슈 #413 리뷰). 다음 턴으로 넘어가기 전이면 그 끝 프레임을 준다.
+			// 전에 나간 방송은 받는 사람이 없어 버려진다(이슈 #413). 다음 턴으로 넘어가기 전이면 그 끝 프레임을 준다.
 			ChatAnswerFrame ended = activeTurn.endFrame;
 			return ended == null ? List.of() : List.of(ended.forRecipient(subject));
 		}
@@ -1140,12 +1140,12 @@ public class ThreadMessageDispatcher {
 		// 이 경로는 원래 로그가 없다 — 턴 제한 초과는 어디에도 남지 않아 화면의 traceId로 찾을 수 없었다(이슈 #389).
 		log.warn("AI 턴 실패 threadId={} traceId={} code={} cause={}", activeTurn.turn.threadId(),
 				activeTurn.turn.traceId(), code, error.getClass().getSimpleName());
-		// 실패는 받은 내용을 버리고 FAILED로 저장한다(S5 결정 3). 방에 아무도 없어 오류 프레임이 버려져도 저장하고
+		// 실패는 받은 내용을 버리고 FAILED로 저장한다(이슈 #389). 방에 아무도 없어 오류 프레임이 버려져도 저장하고
 		// 다음 턴으로 간다 — 돌아온 사람은 이력에서 "답변을 만들지 못했습니다"로 본다(이슈 #413 결정 8).
 		persistAgentFailure(activeTurn, MsgStatus.FAILED);
 		try {
 			// 어느 답이 실패했는지는 msgId를 단 failed 끝 프레임으로 알린다(받은 내용은 버려 content가 빈다). 오류 프레임은
-			// 배너 문구용이다 — 거기엔 msgId가 없어 화면이 다른 답을 실패로 오인할 수 있었다(이슈 #413 리뷰).
+			// 배너 문구용이다 — 거기엔 msgId가 없어 화면이 다른 답을 실패로 오인할 수 있었다(이슈 #413).
 			roomSessionRegistry.broadcastToRoom(activeTurn.turn.threadId(),
 					activeTurn.end(endFrame(activeTurn, ChatAnswerStatus.FAILED, "", List.of())));
 			roomSessionRegistry.broadcastToRoom(activeTurn.turn.threadId(),
@@ -1170,7 +1170,7 @@ public class ThreadMessageDispatcher {
 					nextTurn = new ActiveTurn(next, state.seqBlock);
 				} catch (RuntimeException failure) {
 					// 다음 턴을 만들지 못했다(seq 블록 예약 등 DB 실패). 그대로 두면 끝난 턴이 active로 남아 방이 영영 할 일이
-					// 있는 상태가 된다 — 예전엔 연결이 끊길 때 세대를 닫아 정리됐지만 이제 그 경로가 없다(이슈 #413 리뷰).
+					// 있는 상태가 된다 — 예전엔 연결이 끊길 때 세대를 닫아 정리됐지만 이제 그 경로가 없다(이슈 #413).
 					log.error("다음 AI 턴을 시작하지 못했다 threadId={} traceId={}", state.threadId, next.traceId(),
 							failure);
 				}
@@ -1686,7 +1686,7 @@ public class ThreadMessageDispatcher {
 							process(this, queued);
 						} catch (RuntimeException error) {
 							// 처리 중 예외(사람 메시지 seq 예약·턴 생성의 DB 실패 등)면 그 발화의 대기 등록이 남아 방이 영영 비지 않는다.
-							// 방송·저장 통로가 막힌 것과 같게 방의 AI 작업을 실패로 닫는다(이슈 #413 리뷰).
+							// 방송·저장 통로가 막힌 것과 같게 방의 AI 작업을 실패로 닫는다(이슈 #413).
 							log.error("방 워커가 메시지를 처리하지 못했다 threadId={}", threadId, error);
 							closeRoom(this, Closing.FAILURE);
 						} finally {

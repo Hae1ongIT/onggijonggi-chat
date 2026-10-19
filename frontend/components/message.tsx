@@ -119,7 +119,7 @@ const PurePreviewMessage = ({
 
             {/* 중단 — 본문이 있으면 위에서 이미 그린 말풍선에 덧붙고, 본문이 없으면(위 블록은 message.content를
              * 요구해 아무것도 안 그린다) 빈 말풍선 대신 이 안내가 유일한 표시가 된다(이슈 #162, §3.2). 거부·실패는 본문
-             * 없이 끝나 항상 이 안내로만 보인다(실패는 #413 결정 8). */}
+             * 없이 끝나 항상 이 안내로만 보인다(실패는 이슈 #413 결정 8). */}
             {message.role === 'assistant' && (
               <TerminalStatusNote status={terminalStatus} />
             )}

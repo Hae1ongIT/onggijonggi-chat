@@ -469,7 +469,7 @@ class ThreadMessageDispatcherTest {
 
 	/**
 	* 끝 프레임을 낸 뒤 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송은 그 끝 프레임을 받는다 — 방에 붙고 구독을 걸기 전에
-	* 나간 방송은 받는 사람이 없어 버려진다(이슈 #413 리뷰).
+	* 나간 방송은 받는 사람이 없어 버려진다(이슈 #413).
 	*/
 	@Test
 	void aConnectionJoiningRightAfterTheEndFrameGetsThatEndFrame() {
@@ -505,7 +505,7 @@ class ThreadMessageDispatcherTest {
 	}
 
 	/** 다음 턴을 만들지 못하면(seq 블록 예약 실패) 방의 AI 작업을 실패로 닫는다 — 끝난 턴이 active로 남아 방이 영영 지워지지
-	 * 않던 것을 막는다(이슈 #413 리뷰). */
+	 * 않던 것을 막는다(이슈 #413). */
 	@Test
 	void closesTheRoomAsFailedWhenTheNextTurnCannotBeCreated() {
 		TestRoom room = new TestRoom();
@@ -1276,7 +1276,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, revision);
 
-		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"));
 
 		awaitDone(room);
 		verify(revision, times(2)).revise(eq(room.threadId), any(), eq("규정.docx"), eq(edits));
@@ -1310,7 +1310,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, null, creation);
 
-		dispatcher.dispatch(command(room, "@AI 보고서 만들어줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 보고서 만들어줘"));
 
 		awaitDone(room);
 		assertThat(toolResult).hasValue("등록했습니다");
@@ -1333,7 +1333,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());

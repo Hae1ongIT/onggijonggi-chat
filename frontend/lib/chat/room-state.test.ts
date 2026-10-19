@@ -1573,7 +1573,7 @@ describe('#413 답변 이어 받기', () => {
     expect(catchUpCursor(caughtUp)).toBe(12);
   });
 
-  it('옛 화면 방식(delta만 이어 붙이기)으로 새 서버 프레임을 받아도 글자가 두 번 보이지 않는다 — 전체 내용이 content에만 실린다(결정 12)', () => {
+  it('옛 화면 방식(delta만 이어 붙이기)으로 새 서버 프레임을 받아도 글자가 두 번 보이지 않는다 — 전체 내용이 content에만 실린다(이슈 #413 결정 12)', () => {
     const frames: ChatAnswerFrame[] = [
       {
         ...(answer('', 'streaming') as ChatAnswerFrame),

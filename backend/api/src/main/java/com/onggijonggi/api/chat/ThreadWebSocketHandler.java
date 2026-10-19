@@ -448,9 +448,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		}
 
 		// 지금까지 내용은 delta가 아니라 content에 싣는다(이슈 #413 결정 12) — delta에 실으면 이어 오는 조각과 겹쳐
-		// 글자가 두 번 보였다(S9). 화면은 content로 앞부분을 맞추고 조각은 위치(offset)로 이어 붙인다.
+		// 글자가 두 번 보였다(이슈 #413). 화면은 content로 앞부분을 맞추고 조각은 위치(offset)로 이어 붙인다.
 		// 이미 끝 프레임을 냈지만 다음 턴으로 넘어가기 전이면 그 끝 프레임으로 답한다 — 흐르는 중으로 답하면 끝 프레임이
-		// 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413 리뷰).
+		// 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413).
 		Optional<ThreadMessageDispatcher.LiveAnswer> live =
 				threadMessageDispatcher.liveAnswer(threadId, stored.agentMessageId());
 		if (live.isPresent()) {
