@@ -32,5 +32,8 @@
   "restrictedResultsOmitted" : false,
   "status" : "streaming",
   "groundingNotice" : "no_evidence",
-  "agent" : "fin"
+  "agent" : "fin",
+  "offset" : 12,
+  "content" : null,
+  "mine" : true
 }

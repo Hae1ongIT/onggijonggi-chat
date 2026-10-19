@@ -4,6 +4,7 @@
  *********************************************************/
 
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
+import type { TerminalStatus } from '@/lib/chat/room-state';
 import equal from 'fast-deep-equal';
 import { memo, useEffect, useRef, useState } from 'react';
 
@@ -17,8 +18,8 @@ interface MessagesProps {
   isLoading: boolean;
   messages: Array<RenderedMessage>;
   citationsByMessageId: Record<string, CitationsState>;
-  /** DIRECT 전용(이슈 #162, §3.2) — done이 아닌 message.id만 들어 있다. */
-  terminalStatusByMessageId: Record<string, 'cancelled' | 'denied'>;
+  /** 평범하게 끝나지 않은(중단·거부·실패) 답변의 message.id만 들어 있다(이슈 #162 §3.2·#413). */
+  terminalStatusByMessageId: Record<string, TerminalStatus>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;
   onAppendTurn: (content: string) => void;

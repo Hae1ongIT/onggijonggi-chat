@@ -47,8 +47,9 @@ export interface ChatAnswerFrame {
   delta: string;
   citations: Citation[];
   restrictedResultsOmitted: boolean;
-  /** cancelled·denied는 DIRECT 전용이다(이슈 #162) — COLLAB은 지금처럼 streaming·done만 쓴다. */
-  status: 'streaming' | 'done' | 'cancelled' | 'denied';
+  /** 협업방 중지도 cancelled다(이슈 #413) — 예전엔 done이었다. denied는 1:1 전용이다(이슈 #162). failed는 실패한
+   * 답이다(이슈 #413) — 받은 내용은 버려져 비고, 같은 실패의 오류 프레임(error)이 배너 문구를 따로 싣는다. */
+  status: 'streaming' | 'done' | 'cancelled' | 'denied' | 'failed';
   /** 방 문서 검색(#344)이 FOUND가 아니었을 때만 채워진다(이슈 #353). 재접속 복원 대상이
    * 아니라 그 턴에만 실려 오는 일시적 안내다. */
   groundingNotice: 'no_evidence' | 'unavailable' | null;
@@ -56,6 +57,14 @@ export interface ChatAnswerFrame {
    * #357). `@AI`로 답했거나 1:1 방이면 null이다. groundingNotice와 달리 메시지에 저장돼
    * 재접속 후에도 복원된다. */
   agent: 'sol' | 'fin' | 'law' | null;
+  /** streaming 조각의 delta가 답변의 몇 번째 글자(UTF-16 단위 — JS string.length와 같다)부터인지(이슈 #413). 화면은
+   * 이미 가진 범위를 버려 들어올 때 받은 내용과 겹쳐도 글자가 중복되지 않는다. 없으면(옛 서버) 이어 붙인다. */
+  offset?: number | null;
+  /** 답변 처음부터 그 시점까지 전체(이슈 #413) — 끝 프레임의 최종 내용, 방에 들어올 때의 지금까지 내용, 1:1 재전송.
+   * delta가 아니라 여기 싣는 것은 옛 화면이 delta를 이어 붙여 글자가 두 번 보이기 때문이다. */
+  content?: string | null;
+  /** 받는 사람이 이 턴을 요청한 사람인지(이슈 #413). 돌아온 요청자에게 중지 버튼을 띄운다. 모르면 null이다. */
+  mine?: boolean | null;
 }
 
 /**

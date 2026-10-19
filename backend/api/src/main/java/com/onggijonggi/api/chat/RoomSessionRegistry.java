@@ -225,15 +225,39 @@ public class RoomSessionRegistry {
 	}
 
 	/**
-	 * 그 세대의 화면 힌트(도구 진행 표시 등, 이슈 #397)를 보낸다. 방송처럼 현재 세대에만 넣지만 입퇴장·입력 중 통보와
-	 * 같은 부가 통보로 다룬다 — 듣는 사람이 없거나 통보 상한을 넘으면 버리고, 전송이 실패해도 그 세대를 닫지 않는다.
+	 * 지금 그 방에 붙어 있는 연결들에게 방송한다(이슈 #413). AI 턴은 연결과 떨어져 살아, 턴이 시작될 때의 세대가 아니라
+	 * 지금 세대로 보낸다 — 방이 비었다 다시 붙어 세대가 바뀌어도 이어지는 조각이 새 연결에 간다. 대기열·순서·완료 신호
+	 * 규칙은 broadcastIfCurrent와 같다.
+	 *
+	 * @return 대기열에 넣었으면 {@code true}. 방이 없거나(아무도 없음) 비활성이면 {@code false} — 호출자는 오류로 보지 않는다
+	 * @throws IllegalStateException 방송 대기열이 꽉 차 이 프레임을 넣지 못한 경우
+	 */
+	public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+		RoomState room = rooms.get(threadId);
+		return room != null && room.offerBroadcast(frame);
+	}
+
+	/**
+	 * 지금 그 방의 화면 힌트(도구 진행 표시 등, 이슈 #397)를 보낸다. 방송처럼 지금 세대에 넣지만 입퇴장·입력 중 통보와
+	 * 같은 부가 통보로 다룬다 — 듣는 사람이 없거나 통보 상한을 넘으면 버리고, 전송이 실패해도 방송 실패로 알리지 않는다.
 	 * 힌트 하나 때문에 답변이 끊기거나 방송 자리를 먹지 않게 하려는 것이다. 같은 대기열이라 방송과의 순서는 지켜진다.
 	 */
-	public void notifyIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
+	public void notifyRoom(UUID threadId, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
-		if (room != null && room.generation().equals(roomGeneration)) {
+		if (room != null) {
 			room.offerActiveNotice(frame);
 		}
+	}
+
+	/** 그 방에 붙은 연결이 하나라도 있는지(이슈 #413). 맵 읽기 하나라 잠금을 잡지 않는다 — dispatcher 잠금 안에서 불러도 된다. */
+	public boolean hasRoom(UUID threadId) {
+		return rooms.containsKey(threadId);
+	}
+
+	/** 그 방의 지금 세대(이슈 #413). 방송 실패 알림이 지금 세대의 것인지 가를 때 쓴다. 잠금을 잡지 않는다. */
+	public Optional<UUID> currentGeneration(UUID threadId) {
+		RoomState room = rooms.get(threadId);
+		return room == null ? Optional.empty() : Optional.of(room.generation());
 	}
 
 	/**
@@ -660,8 +684,16 @@ public class RoomSessionRegistry {
 		private void deliver(Outgoing item) {
 			try {
 				if (item instanceof Broadcast broadcast) {
+					// 듣는 사람이 없으면 버린다 — 방송 실패가 아니다(이슈 #413). AI 턴은 연결과 떨어져 이어지므로, 탭을 닫는
+					// 순간(구독이 먼저 끊기고 방 퇴장은 조금 뒤)에 나간 조각이 실패로 알려지면 답변이 실패로 닫힌다. 넣어 두면
+					// warm-up 버퍼에 남아 다음 구독자에게 낡은 프레임이 간다(#102). 구독자가 다 빠지는 중이거나 끝난 sink의
+					// 실패도 같은 까닭으로 알리지 않는다 — 통로가 막힌 실패(넘침·동시 내보내기)와 예외만 알린다.
+					if (frames.currentSubscriberCount() == 0) {
+						return;
+					}
 					Sinks.EmitResult result = frames.tryEmitNext(broadcast.frame());
-					if (result.isFailure()) {
+					if (result.isFailure() && result != Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER
+							&& result != Sinks.EmitResult.FAIL_TERMINATED && result != Sinks.EmitResult.FAIL_CANCELLED) {
 						log.warn("방 프레임 전송 실패 threadId={} generation={} result={}", threadId, generation, result);
 						failureReporter.broadcastFailed(threadId, generation);
 					}

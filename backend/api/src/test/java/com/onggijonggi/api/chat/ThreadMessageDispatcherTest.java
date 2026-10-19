@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.mockito.stubbing.OngoingStubbing;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.DefaultToolDefinition;
@@ -63,6 +64,9 @@ import static org.mockito.Mockito.when;
  */
 class ThreadMessageDispatcherTest {
 
+	/** 프레임 비교에서 무시하는 값 — id·seq는 전용 테스트가, 조각 위치·요청자·받는 사람별 mine은 #413 전용 테스트가 본다. */
+	private static final String[] IGNORED_FRAME_FIELDS = {"msgId", "seq", "offset", "requesterSubject", "mine"};
+
 	/** 워커가 직렬로 꺼내므로 방송 순서와 seq 순서가 같다 — #190이 지키려는 계약의 본체다. */
 	@Test
 	void assignsSeqInBroadcastOrder() {
@@ -70,9 +74,9 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "하나"), room.membership.generation());
-		dispatcher.dispatch(command(room, "둘"), room.membership.generation());
-		dispatcher.dispatch(command(room, "셋"), room.membership.generation());
+		dispatcher.dispatch(command(room, "하나"));
+		dispatcher.dispatch(command(room, "둘"));
+		dispatcher.dispatch(command(room, "셋"));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).extracting(frame -> ((ChatMessageFrame) frame).content(),
@@ -93,7 +97,7 @@ class ThreadMessageDispatcherTest {
 						invocation.getArgument(1)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 질문"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 질문"));
 
 		awaitFrameCount(room.frames, 4);
 		ArgumentCaptor<UUID> storedId = ArgumentCaptor.forClass(UUID.class);
@@ -117,7 +121,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
 				room.participant.subject(), room.participant.displayName(), "@AI 지금 몇 시야", List.of(), null,
-				"America/New_York", null, null, room.connectionId, "trace", null), room.membership.generation());
+				"America/New_York", null, null, room.connectionId, "trace", null));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -140,7 +144,7 @@ class ThreadMessageDispatcherTest {
 						Msg.system(room.threadId, 1L, "위험할 수 있는 발화가 감지되었습니다.")));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 요약해줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 요약해줘"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -166,7 +170,7 @@ class ThreadMessageDispatcherTest {
 		});
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI 서울 날씨"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
 
 		// 사람 발화 1 + 웹 검색 시작·끝 2 + 답변 조각 1 + 완료 1 — 현재 시각 도구는 세지 않는다.
 		awaitFrameCount(room.frames, 5);
@@ -197,8 +201,8 @@ class ThreadMessageDispatcherTest {
 		});
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public void notifyIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
-				super.notifyIfCurrent(threadId, generation, frame);
+			public void notifyRoom(UUID threadId, WsFrame frame) {
+				super.notifyRoom(threadId, frame);
 				if (frame instanceof ChatActivityFrame activity && activity.active()) {
 					onStart.getAndSet(() -> {
 					}).run();
@@ -216,9 +220,9 @@ class ThreadMessageDispatcherTest {
 		});
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
 		UUID turnId = UUID.randomUUID();
-		onStart.set(() -> dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId));
+		onStart.set(() -> dispatcher.cancel(room.threadId, turnId, room.participant.subject()));
 
-		dispatcher.dispatch(command(room, "@AI 서울 날씨", turnId), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 서울 날씨", turnId));
 
 		eventually(() -> assertThat(room.frames).filteredOn(ChatActivityFrame.class::isInstance)
 				.extracting(frame -> ((ChatActivityFrame) frame).active())
@@ -245,7 +249,7 @@ class ThreadMessageDispatcherTest {
 				.thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 서울 날씨"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
 
 		awaitFrameCount(room.frames, 3);
 		List<ChatAnswerFrame> answers = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
@@ -282,10 +286,10 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "일반 발화"))).isEmpty();
 
 		awaitFrameCount(room.frames, 1);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(message(room, "일반 발화"));
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(message(room, "일반 발화"));
 		verify(llm, times(0)).streamChat(any());
 	}
 
@@ -297,8 +301,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("second"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI one"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI two"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI one"));
+		dispatcher.dispatch(command(room, "@AI two"));
 		verify(llm, timeout(1000)).streamChat(any());
 		firstResponse.tryEmitValue("first");
 
@@ -310,16 +314,16 @@ class ThreadMessageDispatcherTest {
 		assertThat(requests.getAllValues().get(0).toolExecutions())
 				.isNotSameAs(requests.getAllValues().get(1).toolExecutions());
 		awaitFrameCount(room.frames, 7);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq")
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS)
 				.containsExactly(
 				message(room, "@AI one"),
 				message(room, "@AI two"),
 				// 앞 턴이 실행 중이라 두 번째 턴은 기다린다고 알린다(이슈 #160).
 				new ChatQueuedFrame(room.threadId, null, ChatQueuedStatus.QUEUED),
 				answer(room, "first", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE),
+				done(room, "first"),
 				answer(room, "second", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, "second"));
 	}
 
 	@Test
@@ -328,11 +332,11 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		ErrorFrame error = dispatcher.dispatch(command(room, "@AI   "), room.membership.generation()).orElseThrow();
+		ErrorFrame error = dispatcher.dispatch(command(room, "@AI   ")).orElseThrow();
 
 		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
 		awaitFrameCount(room.frames, 1);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(message(room, "@AI   "));
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(message(room, "@AI   "));
 		verify(llm, times(0)).streamChat(any());
 	}
 
@@ -344,7 +348,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@FIN 비용 관점에서 검토해줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@FIN 비용 관점에서 검토해줘"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -378,7 +382,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI 알려줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 알려줘"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -393,7 +397,7 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		ErrorFrame error = dispatcher.dispatch(command(room, "@FIN @LAW 같이 검토해줘"), room.membership.generation())
+		ErrorFrame error = dispatcher.dispatch(command(room, "@FIN @LAW 같이 검토해줘"))
 				.orElseThrow();
 
 		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
@@ -412,7 +416,7 @@ class ThreadMessageDispatcherTest {
 				.thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@LAW 유의할 점은?"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@LAW 유의할 점은?"));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -430,9 +434,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 0,
 				VirtualTimeScheduler.create());
 
-		assertThat(dispatcher.dispatch(command(room, "@AI first"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "@AI first"))).isEmpty();
 		verify(llm, timeout(1000)).streamChat(any());
-		assertThat(dispatcher.dispatch(command(room, "@AI second"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "@AI second"))).isEmpty();
 
 		// AI 대기열이 찼는지는 워커가 순서대로 처리해봐야 정확하다 — 동기 반환이 아니라 방송으로 온다(#190).
 		awaitFrameCount(room.frames, 3);
@@ -441,21 +445,101 @@ class ThreadMessageDispatcherTest {
 				.containsExactly("RATE_LIMITED");
 	}
 
+	/** 공백뿐인 출력은 실패다 — done 없이, 그 답을 가리키는 failed 끝 프레임(빈 내용)과 배너용 오류 프레임이 간다(이슈 #413). */
 	@Test
-	void emptyOrWhitespaceOnlyOutputBroadcastsModelUnavailableWithoutDone() {
+	void emptyOrWhitespaceOnlyOutputEndsAsFailedWithModelUnavailable() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("", "   "));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hello"));
 
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).hasSize(2);
+		awaitFrameCount(room.frames, 3);
+		assertThat(room.frames).hasSize(3);
 		assertThat(room.frames.get(0)).usingRecursiveComparison().ignoringFields("msgId", "seq")
 				.isEqualTo(message(room, "@AI hello"));
-		assertThat(room.frames.get(1)).isInstanceOf(ErrorFrame.class);
-		assertThat(((ErrorFrame) room.frames.get(1)).code()).isEqualTo("MODEL_UNAVAILABLE");
+		assertThat(room.frames.get(1)).isInstanceOfSatisfying(ChatAnswerFrame.class, failed -> {
+			assertThat(failed.status()).isEqualTo(ChatAnswerStatus.FAILED);
+			assertThat(failed.content()).isEmpty();
+		});
+		assertThat(room.frames.get(2)).isInstanceOf(ErrorFrame.class);
+		assertThat(((ErrorFrame) room.frames.get(2)).code()).isEqualTo("MODEL_UNAVAILABLE");
+	}
+
+	/**
+	* 끝 프레임을 낸 뒤 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송은 그 끝 프레임을 받는다 — 방에 붙고 구독을 걸기 전에
+	* 나간 방송은 받는 사람이 없어 버려진다(이슈 #413).
+	*/
+	@Test
+	void aConnectionJoiningRightAfterTheEndFrameGetsThatEndFrame() {
+		AtomicReference<ThreadMessageDispatcher> dispatcherRef = new AtomicReference<>();
+		AtomicReference<List<WsFrame>> snapshot = new AtomicReference<>();
+		AtomicReference<ThreadMessageDispatcher.LiveAnswer> replay = new AtomicReference<>();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+				boolean sent = super.broadcastToRoom(threadId, frame);
+				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE) {
+					snapshot.set(dispatcherRef.get().snapshotFor(threadId, "subject-someone-else"));
+					replay.set(dispatcherRef.get().liveAnswer(threadId, answer.msgId()).orElseThrow());
+				}
+				return sent;
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("끝난 답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		dispatcherRef.set(dispatcher);
+
+		dispatcher.dispatch(command(room, "@AI 질문"));
+
+		eventually(() -> assertThat(snapshot.get()).isNotNull());
+		assertThat(snapshot.get()).singleElement().isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> {
+			assertThat(frame.status()).isEqualTo(ChatAnswerStatus.DONE);
+			assertThat(frame.content()).isEqualTo("끝난 답");
+			assertThat(frame.mine()).isFalse();
+		});
+		assertThat(replay.get().endFrame().status()).isEqualTo(ChatAnswerStatus.DONE);
+	}
+
+	/** 다음 턴을 만들지 못하면(seq 블록 예약 실패) 방의 AI 작업을 실패로 닫는다 — 끝난 턴이 active로 남아 방이 영영 지워지지
+	 * 않던 것을 막는다(이슈 #413). */
+	@Test
+	void closesTheRoomAsFailedWhenTheNextTurnCannotBeCreated() {
+		TestRoom room = new TestRoom();
+		Sinks.Many<String> first = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(first.asFlux());
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		AtomicBoolean failSeq = new AtomicBoolean();
+		when(msgPersistenceService.allocateSeqBlockBlocking(eq(room.threadId), anyInt())).thenAnswer(invocation -> {
+			if (failSeq.get()) throw new IllegalStateException("db down");
+			return 0L;
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 첫째"));
+		dispatcher.dispatch(command(room, "@AI 둘째"));
+		verify(llm, timeout(1000)).streamChat(any());
+		awaitFrameCount(room.frames, 3);
+		// 예약해 둔 블록을 다 써서 다음 턴이 블록을 새로 받으려다 실패하게 한다.
+		failSeq.set(true);
+		for (int i = 0; i < 200; i++) {
+			try {
+				dispatcher.allocateSeqBlocking(room.threadId);
+			} catch (IllegalStateException exhausted) {
+				break;
+			}
+		}
+		first.tryEmitNext("답");
+		first.tryEmitComplete();
+
+		eventually(() -> assertThat(room.frames).filteredOn(ErrorFrame.class::isInstance)
+				.extracting(frame -> ((ErrorFrame) frame).code())
+				.contains("MESSAGE_DELIVERY_FAILED"));
+		verify(llm, times(1)).streamChat(any());
 	}
 
 	@Test
@@ -465,14 +549,14 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just(" ", "answer"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hello"));
 
 		awaitFrameCount(room.frames, 4);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(
 				message(room, "@AI hello"),
 				answer(room, " ", ChatAnswerStatus.STREAMING),
 				answer(room, "answer", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, " answer"));
 	}
 
 	@Test
@@ -484,8 +568,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)), Flux.just("next"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 20, scheduler);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		scheduler.advanceTimeBy(Duration.ofSeconds(120));
 
@@ -496,10 +580,41 @@ class ThreadMessageDispatcherTest {
 			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
 		}));
 		eventually(() -> assertThat(room.frames)
-				.usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").contains(
+				.usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
 						answer(room, "next", ChatAnswerStatus.STREAMING),
-						answer(room, "", ChatAnswerStatus.DONE)));
+						done(room, "next")));
 		verify(llm, times(2)).streamChat(any());
+	}
+
+	/** 턴 제한은 LLM 호출 앞 단계에도 걸린다 — 문서 목록 조회가 멈춰도 방 큐가 막히지 않고 다음 턴으로 간다(이슈 #413). */
+	@Test
+	void turnTimeoutAlsoCoversTheStepsBeforeTheModelCall() {
+		VirtualTimeScheduler scheduler = VirtualTimeScheduler.create();
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("next"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any()))
+				.thenReturn(Mono.never(), Mono.just(List.of()));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, scheduler);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
+		verify(documents, timeout(1000)).searchableDocuments(eq(room.threadId), any());
+		scheduler.advanceTimeBy(Duration.ofSeconds(120));
+
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> {
+			assertThat(frame).isInstanceOf(ErrorFrame.class);
+			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
+		}));
+		eventually(() -> assertThat(room.frames)
+				.usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
+						done(room, "next")));
+		verify(llm, times(1)).streamChat(any());
 	}
 
 	@Test
@@ -510,8 +625,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("next"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		firstResponse.tryEmitError(new IllegalStateException("gateway failure"));
 
@@ -521,13 +636,14 @@ class ThreadMessageDispatcherTest {
 			assertThat(frame).isInstanceOf(ErrorFrame.class);
 			assertThat(((ErrorFrame) frame).code()).isEqualTo("INTERNAL_ERROR");
 		});
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").contains(
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
 				answer(room, "next", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, "next"));
 	}
 
+	/** 방이 비었다 다시 붙어 세대가 바뀌어도 진행 중인 턴은 이어지고, 이어지는 조각은 새 연결로 간다(이슈 #413). */
 	@Test
-	void staleGenerationCancelsTheRunningTurnAndNeverEmitsAnErrorFrame() {
+	void aTurnContinuesIntoTheNewGenerationWhenTheRoomEmptiesAndIsRejoined() {
 		TestRoom oldRoom = new TestRoom();
 		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		AtomicBoolean cancelled = new AtomicBoolean();
@@ -535,10 +651,11 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(oldRoom.registry, llm);
 
-		dispatcher.dispatch(command(oldRoom, "@AI first"), oldRoom.membership.generation());
+		dispatcher.dispatch(command(oldRoom, "@AI first"));
 		verify(llm, timeout(1000)).streamChat(any());
-		oldRoom.registry.leave(oldRoom.threadId, oldRoom.connectionId, oldRoom.participant);
 		oldRoom.subscription.dispose();
+		oldRoom.registry.leave(oldRoom.threadId, oldRoom.connectionId, oldRoom.participant)
+				.ifPresent(generation -> dispatcher.roomVacated(oldRoom.threadId));
 		UUID newConnectionId = UUID.randomUUID();
 		RoomSessionRegistry.RoomMembership newMembership =
 				oldRoom.registry.join(oldRoom.threadId, newConnectionId, anonymous());
@@ -546,10 +663,12 @@ class ThreadMessageDispatcherTest {
 		Disposable newSubscription = newMembership.frames().subscribe(newFrames::add);
 		try {
 			source.tryEmitNext("late result");
+			source.tryEmitComplete();
 
-			awaitTrue(cancelled);
-		assertThat(cancelled).isTrue();
-			assertThat(newFrames).isEmpty();
+			eventually(() -> assertThat(newFrames).filteredOn(ChatAnswerFrame.class::isInstance)
+					.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status())
+					.containsExactly(tuple("late result", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE)));
+			assertThat(cancelled).isFalse();
 		} finally {
 			newSubscription.dispose();
 			oldRoom.registry.leave(oldRoom.threadId, newConnectionId, anonymous());
@@ -566,8 +685,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		registry.failBroadcasts = true;
 
@@ -599,13 +718,13 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		// 첫 턴은 평소대로 시작시킨다 — 이게 뒤에 방송 실패로 방을 닫는 쪽이다.
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		// 두 번째 발화를 워커가 에코 방송하는 자리에서 붙잡는다.
 		registry.blockOnContent = "@AI second";
 		try {
-			dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI second"));
 			assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
 
 			// 이 시점의 두 번째 발화는 pending에 없다. 여기서 첫 턴의 방송이 실패해 방이 닫힌다.
@@ -629,7 +748,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		registry.failBroadcasts = true;
 
-		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "일반 발화"))).isEmpty();
 
 		// 방송이 실패한 시점엔 보낸 사람에게 갈 통로(방 sink)가 이미 고장난 뒤라, 동기
 		// MESSAGE_DELIVERY_FAILED 대신 generation을 닫는 것으로 끝낸다(이슈 #190).
@@ -637,29 +756,98 @@ class ThreadMessageDispatcherTest {
 		assertThat(registry.attemptedFrames).hasSize(1);
 	}
 
+	/**
+	* 마지막 연결이 빠져도 진행 중인 턴과 대기 턴은 끝까지 답하고 저장한다(이슈 #413 결정 1·2). 할 일이 끝나고 방에 아무도
+	* 없으면 상태를 지운다 — 그 뒤 seq는 방의 블록이 아니라 DB에서 뽑는다.
+	*/
 	@Test
-	void cancelsTheRunningTurnWhenTheLastConnectionLeaves() throws InterruptedException {
+	void keepsAnsweringRunningAndQueuedTurnsAfterTheLastConnectionLeaves() {
 		TestRoom room = new TestRoom();
-		CountDownLatch subscribed = new CountDownLatch(1);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
-			subscribed.countDown();
-			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
-		}));
-		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)),
+				Flux.just("둘째 답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenAnswer(invocation -> Msg.pendingAgent(invocation.getArgument(0), room.threadId,
+						invocation.getArgument(1)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
+		verify(llm, timeout(1000)).streamChat(any());
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		source.tryEmitNext("첫 답");
+		source.tryEmitComplete();
 
-		awaitTrue(cancelled);
-		assertThat(cancelled).isTrue();
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("첫 답"), isNull(), isNull());
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("둘째 답"), isNull(), isNull());
+		assertThat(cancelled).isFalse();
+		eventually(() -> {
+			dispatcher.allocateSeqBlocking(room.threadId);
+			verify(msgPersistenceService, Mockito.atLeastOnce()).allocateSeqBlockBlocking(room.threadId, 1);
+		});
 	}
 
+	/** 사람이 멈춘 게 아니라 서버가 꺼지면 진행 턴은 "중지됨"이 아니라 실패로 남는다(이슈 #413 결정 10). */
 	@Test
-	void cancelsAllRunningTurnsWhenTheServerShutsDown() throws InterruptedException {
+	void marksRunningTurnsFailedWhenTheServerShutsDown() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 0);
+		CountDownLatch subscribed = new CountDownLatch(1);
+		AtomicBoolean cancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
+			subscribed.countDown();
+			return Flux.just("받은 내용").concatWith(Flux.<String>never()).doOnCancel(() -> cancelled.set(true));
+		}));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
+		dispatcher.closeAll();
+
+		awaitTrue(cancelled);
+		assertThat(cancelled).isTrue();
+		// 종료는 저장을 기다리고 돌아온다.
+		verify(msgPersistenceService).failBlocking(pending.getId(), MsgStatus.FAILED);
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+	}
+
+	/** 일반 협업 메시지도 워커가 꺼내야 방송·저장된다 — 방이 비는 순간 워커 앞에 있던 메시지도 저장된다(이슈 #413). */
+	@Test
+	void persistsMessagesTheWorkerHadNotProcessedWhenTheRoomEmpties() throws InterruptedException {
+		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
+		TestRoom room = new TestRoom(registry);
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, mock(LlmChatStreamService.class), msgPersistenceService);
+		registry.blockOnContent = "붙잡힌 발화";
+
+		try {
+			dispatcher.dispatch(command(room, "붙잡힌 발화"));
+			dispatcher.dispatch(command(room, "뒤의 발화"));
+			assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+			room.subscription.dispose();
+			room.registry.leave(room.threadId, room.connectionId, room.participant)
+					.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		} finally {
+			registry.releaseWorker.countDown();
+		}
+
+		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("붙잡힌 발화"), anyList());
+		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("뒤의 발화"), anyList());
+	}
+
+	/** 방이 지워지면 진행 턴을 저장 없이 끊는다 — 저장할 행이 cascade로 이미 없다(이슈 #413). */
+	@Test
+	void discardStopsTheRoomsTurnsWithoutPersisting() throws InterruptedException {
 		TestRoom room = new TestRoom();
 		CountDownLatch subscribed = new CountDownLatch(1);
 		AtomicBoolean cancelled = new AtomicBoolean();
@@ -668,14 +856,18 @@ class ThreadMessageDispatcherTest {
 			subscribed.countDown();
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
-		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
-		dispatcher.closeAllGenerations();
+		dispatcher.discard(room.threadId);
 
 		awaitTrue(cancelled);
 		assertThat(cancelled).isTrue();
+		verify(msgPersistenceService, never()).failBlocking(any(), any());
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+		verify(msgPersistenceService, never()).completeBlocking(any(), any(), any(), any());
 	}
 
 	@Test
@@ -695,9 +887,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		try {
-			dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI first"));
 			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.closeAllGenerations();
+			dispatcher.closeAll();
 		} finally {
 			releaseContext.countDown();
 		}
@@ -732,9 +924,9 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 
 		try {
-			dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI first", turnId));
 			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId);
+			dispatcher.cancel(room.threadId, turnId, room.participant.subject());
 		} finally {
 			releaseContext.countDown();
 		}
@@ -751,13 +943,13 @@ class ThreadMessageDispatcherTest {
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
-			dispatcherRef.get().closeGeneration(room.threadId, room.membership.generation());
+			dispatcherRef.get().discard(room.threadId);
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		dispatcherRef.set(dispatcher);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		awaitTrue(cancelled);
 		assertThat(cancelled).isTrue();
@@ -770,7 +962,7 @@ class ThreadMessageDispatcherTest {
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
+		dispatcher.dispatch(command(room, "일반 발화"));
 
 		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(),
 				eq(room.threadId), eq(room.userId), eq("일반 발화"), anyList());
@@ -785,7 +977,7 @@ class ThreadMessageDispatcherTest {
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
+		dispatcher.dispatch(command(room, "일반 발화"));
 
 		verify(msgPersistenceService, never()).persistHumanMessageBlocking(any(), anyLong(), any(), any(), any(), anyList());
 	}
@@ -800,7 +992,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI hi"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hi"));
 
 		verify(msgPersistenceService, timeout(1000)).completeBlocking(pending.getId(), "hello world", null, null);
 	}
@@ -820,7 +1012,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 이어서"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 이어서"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -851,7 +1043,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
 				room.participant.subject(), room.participant.displayName(), "@AI 요약해줘", List.of(currentFile), null,
-				null, null, null, room.connectionId, "trace", null), room.membership.generation());
+				null, null, null, room.connectionId, "trace", null));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -880,7 +1072,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.DIRECT, room.userId,
 				room.participant.subject(), room.participant.displayName(), "요약해줘", List.of(file), null, null, null, null,
-				room.connectionId, "trace", reserved), room.membership.generation());
+				room.connectionId, "trace", reserved));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -900,7 +1092,7 @@ class ThreadMessageDispatcherTest {
 				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -1083,7 +1275,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, revision);
 
-		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"));
 
 		awaitDone(room);
 		assertThat(toolResult).hasValue("등록했습니다");
@@ -1115,7 +1307,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, revision);
 
-		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"));
 
 		awaitDone(room);
 		verify(revision, times(2)).revise(eq(room.threadId), any(), eq("규정.docx"), eq(edits));
@@ -1149,7 +1341,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, null, creation);
 
-		dispatcher.dispatch(command(room, "@AI 보고서 만들어줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 보고서 만들어줘"));
 
 		awaitDone(room);
 		assertThat(toolResult).hasValue("등록했습니다");
@@ -1172,7 +1364,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -1192,7 +1384,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -1252,7 +1444,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
 				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled, null);
 
-		dispatcher.dispatch(command(room, content), room.membership.generation());
+		dispatcher.dispatch(command(room, content));
 
 		awaitDone(room);
 		return new ToolTurn(room, request.get(), toolResults, documents, msgPersistenceService, pending);
@@ -1296,7 +1488,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		awaitFrameCount(room.frames, 2);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -1317,14 +1509,15 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		firstResponse.tryEmitError(new IllegalStateException("gateway failure"));
 
 		verify(msgPersistenceService, timeout(1000)).failBlocking(pending.getId(), MsgStatus.FAILED);
 	}
 
+	/** 방송 통로가 고장 나 방을 닫으면 진행 턴은 사람이 멈춘 것이 아니라 실패로 남는다(이슈 #413 결정 10). */
 	@Test
-	void marksAgentMessageCancelledWhenRoomClosesDuringActiveTurn() {
+	void marksAgentMessageFailedWhenTheRoomClosesOnABroadcastFailure() {
 		TestRoom room = new TestRoom();
 		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 0);
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1333,13 +1526,30 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		// dispatch는 큐에 넣고 바로 돌아온다 — 턴이 실제로 시작된 뒤라야 취소할 대상이 있다(#190).
+		dispatcher.dispatch(command(room, "@AI first"));
+		// dispatch는 큐에 넣고 바로 돌아온다 — 턴이 실제로 시작된 뒤라야 닫을 대상이 있다(#190).
 		verify(llm, timeout(1000)).streamChat(any());
-		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+		dispatcher.closeAfterBroadcastFailure(room.threadId, room.membership.generation());
 
-		verify(msgPersistenceService, timeout(1000)).cancelBlocking(pending.getId(), "");
+		verify(msgPersistenceService, timeout(1000)).failBlocking(pending.getId(), MsgStatus.FAILED);
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+	}
+
+	/** 비었다 다시 생긴 방에 옛 세대의 늦은 실패 알림이 와도 이어지고 있는 턴을 닫지 않는다(이슈 #413). */
+	@Test
+	void ignoresABroadcastFailureOfAGenerationThatIsNoLongerCurrent() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean cancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.closeAfterBroadcastFailure(room.threadId, UUID.randomUUID());
+
+		assertThat(cancelled).isFalse();
+		assertThat(dispatcher.liveAnswer(room.threadId, UUID.randomUUID())).isEmpty();
 	}
 
 	@Test
@@ -1355,7 +1565,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
 		source.tryEmitNext("answer");
 		// 조각이 실제로 방송된 뒤에 방송을 고장 낸다. 구독 신호(subscribed)는 요청이 닿기 전에 올 수 있어,
@@ -1384,7 +1594,7 @@ class ThreadMessageDispatcherTest {
 		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI 질문", clientMsgId, turnId, null), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 질문", clientMsgId, turnId, null));
 
 		awaitFrameCount(room.frames, 3);
 		ChatMessageFrame echo = (ChatMessageFrame) room.frames.get(0);
@@ -1395,7 +1605,7 @@ class ThreadMessageDispatcherTest {
 				.containsOnly(tuple(turnId, "test-model"));
 	}
 
-	/** 실행 중인 턴을 멈추면 그때까지의 내용이 CANCELLED로 남고, done 뒤에 다음 턴이 시작된다. */
+	/** 실행 중인 턴을 멈추면 그때까지의 내용이 CANCELLED로 남고, cancelled 프레임에 그 내용이 실린 뒤 다음 턴이 시작된다. */
 	@Test
 	void cancelStopsTheActiveTurnKeepsItsPartialContentAndStartsTheNextTurn() {
 		TestRoom room = new TestRoom();
@@ -1411,12 +1621,12 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID first = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", first), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", first));
+		dispatcher.dispatch(command(room, "@AI second", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 		source.tryEmitNext("부분");
 		awaitFrameCount(room.frames, 4);
-		dispatcher.cancel(room.threadId, room.membership.generation(), first, room.connectionId);
+		dispatcher.cancel(room.threadId, first, room.participant.subject());
 
 		awaitTrue(upstreamCancelled);
 		assertThat(upstreamCancelled).isTrue();
@@ -1425,17 +1635,21 @@ class ThreadMessageDispatcherTest {
 		awaitFrameCount(room.frames, 7);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status())
-				.containsExactly(tuple("부분", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE),
+				.containsExactly(tuple("부분", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.CANCELLED),
 						tuple("next", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE));
-		// 취소는 done으로 끝난다 — 오류 프레임이 따라붙으면 화면은 "취소했는데 잠시 뒤 오류"가 된다.
+		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answer
+						&& answer.status() == ChatAnswerStatus.CANCELLED)
+				.extracting(frame -> ((ChatAnswerFrame) frame).content())
+				.containsExactly("부분");
+		// 취소는 cancelled로 끝난다(협업방도, 이슈 #413 결정 11) — 오류 프레임이 따라붙으면 화면은 "취소했는데 잠시 뒤 오류"가 된다.
 		// startTurn()이 버려진 턴에 Flux.empty()를 돌려주면 EmptyLlmOutputException을 거쳤
 		// MODEL_UNAVAILABLE이 여기 따라붙는다(이슈 #205).
 		assertThat(room.frames).noneMatch(ErrorFrame.class::isInstance);
 	}
 
-	/** turnId는 클라이언트가 만든 값이라 그 발화가 들어온 커넥션에서만 인정한다 — 다른 커넥션이 같은 값을 보내도 턴은 계속된다. */
+	/** turnId는 클라이언트가 만든 값이라 그 발화를 보낸 사람에게서만 인정한다 — 다른 사람이 같은 값을 보내도 턴은 계속된다. */
 	@Test
-	void ignoresACancelFromAnotherConnection() {
+	void ignoresACancelFromAnotherPerson() {
 		TestRoom room = new TestRoom();
 		AtomicBoolean upstreamCancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1443,10 +1657,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID turnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", turnId));
 		verify(llm, timeout(1000)).streamChat(any());
-		// 같은 사용자라도 다른 탭(다른 커넥션)이다.
-		dispatcher.cancel(room.threadId, room.membership.generation(), turnId, UUID.randomUUID());
+		dispatcher.cancel(room.threadId, turnId, "subject-someone-else");
 
 		assertThat(upstreamCancelled).isFalse();
 		assertThat(room.frames).noneMatch(ChatAnswerFrame.class::isInstance);
@@ -1461,7 +1674,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
@@ -1470,27 +1683,30 @@ class ThreadMessageDispatcherTest {
 		assertThat(upstreamCancelled).isTrue();
 		eventually(() -> assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).status())
-				.contains(ChatAnswerStatus.DONE));
+				.contains(ChatAnswerStatus.CANCELLED));
 	}
 
 	/**
-	* 방 프레임이 registry 대기열에서 나가다 sink에서 실패하면(여기서는 듣는 사람 없이 warm-up 버퍼 한 칸을 넘김) registry가
-	* 그 세대를 알려 오고, 그 세대의 AI 작업이 닫힌다(이슈 #405). 실패를 그 방의 다음 방송에 떠넘기지 않는다.
+	* 방 항목은 있지만 듣는 사람이 없을 때(탭을 닫는 순간 구독이 먼저 끊기고 방 퇴장은 조금 뒤) 나간 조각은 방송 실패가
+	* 아니다 — 턴은 이어져 저장된다(이슈 #413). 예전에는 warm-up 버퍼를 넘긴 조각이 실패로 알려져 세대가 닫혔다.
 	*/
 	@Test
-	void aFrameThatFailsInTheRoomQueueClosesItsOwnGeneration() {
+	void aTurnKeepsGoingWhileTheRoomHasNoListener() {
 		TestRoom room = new TestRoom();
 		room.subscription.dispose();
 		AtomicBoolean upstreamCancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.just("a", "b").concatWith(Flux.<String>never())
-				.doOnCancel(() -> upstreamCancelled.set(true)));
-		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		when(llm.streamChat(any())).thenReturn(Flux.just("a", "b", "c").doOnCancel(() -> upstreamCancelled.set(true)));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenAnswer(invocation -> Msg.pendingAgent(invocation.getArgument(0), room.threadId,
+						invocation.getArgument(1)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI fail", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 아무도 없음", UUID.randomUUID()));
 
-		awaitTrue(upstreamCancelled);
-		assertThat(upstreamCancelled).isTrue();
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("abc"), isNull(), isNull());
+		assertThat(upstreamCancelled).isFalse();
 	}
 
 	@Test
@@ -1499,8 +1715,8 @@ class ThreadMessageDispatcherTest {
 		AtomicBoolean triggered = new AtomicBoolean();
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
-				boolean broadcast = super.broadcastIfCurrent(threadId, generation, frame);
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+				boolean broadcast = super.broadcastToRoom(threadId, frame);
 				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE
 						&& triggered.compareAndSet(false, true)) revokeOnDone.get().run();
 				return broadcast;
@@ -1512,7 +1728,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
 		revokeOnDone.set(() -> dispatcher.cancelCollabTurnsFrom(room.participant.subject()));
 
-		dispatcher.dispatch(command(room, "@AI finish", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI finish", UUID.randomUUID()));
 
 		awaitTrue(triggered);
 		assertThat(triggered).isTrue();
@@ -1529,7 +1745,7 @@ class ThreadMessageDispatcherTest {
 		CountDownLatch revocationStarted = new CountDownLatch(1);
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
 				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.STREAMING) {
 					streamingEntered.countDown();
 					try {
@@ -1538,7 +1754,7 @@ class ThreadMessageDispatcherTest {
 						Thread.currentThread().interrupt();
 					}
 				}
-				return super.broadcastIfCurrent(threadId, generation, frame);
+				return super.broadcastToRoom(threadId, frame);
 			}
 		};
 		TestRoom room = new TestRoom(registry);
@@ -1548,7 +1764,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 		try {
-			dispatcher.dispatch(command(room, "@AI race", UUID.randomUUID()), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI race", UUID.randomUUID()));
 			verify(llm, timeout(1000)).streamChat(any());
 			Future<?> emission = executor.submit(() -> source.tryEmitNext("delta"));
 			assertThat(streamingEntered.await(1, TimeUnit.SECONDS)).isTrue();
@@ -1565,7 +1781,7 @@ class ThreadMessageDispatcherTest {
 			awaitFrameCount(room.frames, 3);
 			assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 					.extracting(frame -> ((ChatAnswerFrame) frame).status())
-					.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.DONE);
+					.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.CANCELLED);
 		} finally {
 			releaseStreaming.countDown();
 			executor.shutdownNow();
@@ -1583,7 +1799,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
@@ -1601,7 +1817,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom("someone-else");
@@ -1617,9 +1833,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID queuedTurnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(command(room, "@AI queued", queuedTurnId), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI queued", queuedTurnId));
 		awaitFrameCount(room.frames, 3);
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
@@ -1638,13 +1854,13 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID second = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second", second), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()));
+		dispatcher.dispatch(command(room, "@AI second", second));
 		verify(llm, timeout(1000)).streamChat(any());
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames.get(2)).isEqualTo(new ChatQueuedFrame(room.threadId, second, ChatQueuedStatus.QUEUED));
 
-		dispatcher.cancel(room.threadId, room.membership.generation(), second, room.connectionId);
+		dispatcher.cancel(room.threadId, second, room.participant.subject());
 		firstResponse.tryEmitValue("first");
 
 		awaitFrameCount(room.frames, 6);
@@ -1670,9 +1886,9 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 
 		try {
-			dispatcher.dispatch(command(room, "@AI stop me", turnId), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI stop me", turnId));
 			assertThat(workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId);
+			dispatcher.cancel(room.threadId, turnId, room.participant.subject());
 		} finally {
 			releaseWorker.countDown();
 		}
@@ -1699,7 +1915,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, mock(LlmChatStreamService.class),
 				msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "안녕하세요"), room.membership.generation());
+		dispatcher.dispatch(command(room, "안녕하세요"));
 		awaitFrameCount(room.frames, 1);
 
 		assertThat(((ChatMessageFrame) room.frames.get(0)).seq()).isEqualTo(500L);
@@ -1719,7 +1935,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "멘션 없는 발화", null, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "멘션 없는 발화", null, reserved));
 
 		awaitFrameCount(room.frames, 3);
 		verify(llm, timeout(1000)).streamChat(any());
@@ -1750,7 +1966,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "질문", null, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "질문", null, reserved));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -1771,9 +1987,9 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn second = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", null, first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", null, first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "second", null, second), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "second", null, second));
 
 		verify(msgPersistenceService, timeout(1000)).failBlocking(second.agentMsgId(), MsgStatus.DENIED);
 		awaitFrameCount(room.frames, 5);
@@ -1786,8 +2002,8 @@ class ThreadMessageDispatcherTest {
 				.containsExactly(ChatAnswerStatus.DENIED);
 	}
 
-	/** DIRECT는 turnId만으로 취소를 인정한다 — 다른 탭(다른 커넥션)의 재연결·OWNER도 멈출 수
-	 * 있어야 하기 때문이다(이슈 #162). COLLAB의 대비는 ignoresACancelFromAnotherConnection. */
+	/** DIRECT는 turnId만으로 취소를 인정한다 — 방의 OWNER만 구독할 수 있어 누구인지는 핸들러가 이미 확인했다(이슈 #162).
+	 * COLLAB의 대비는 ignoresACancelFromAnotherPerson. */
 	@Test
 	void directCancelFromAnotherConnectionStillCancelsTheActiveTurn() {
 		TestRoom room = new TestRoom();
@@ -1800,10 +2016,9 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", turnId, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", turnId, reserved));
 		verify(llm, timeout(1000)).streamChat(any());
-		// 같은 사용자의 다른 탭(다른 커넥션)이어도 DIRECT는 취소를 인정한다.
-		dispatcher.cancel(room.threadId, room.membership.generation(), turnId, UUID.randomUUID());
+		dispatcher.cancel(room.threadId, turnId, "subject-someone-else");
 
 		awaitTrue(upstreamCancelled);
 		assertThat(upstreamCancelled).isTrue();
@@ -1829,11 +2044,11 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn second = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
-		dispatcher.dispatch(directCommand(room, "second", secondTurnId, second), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
+		dispatcher.dispatch(directCommand(room, "second", secondTurnId, second));
 		verify(llm, timeout(1000)).streamChat(any());
 
-		dispatcher.cancel(room.threadId, room.membership.generation(), secondTurnId, room.connectionId);
+		dispatcher.cancel(room.threadId, secondTurnId, room.participant.subject());
 
 		verify(msgPersistenceService, timeout(1000)).cancelBlocking(second.agentMsgId(), "");
 		eventually(() -> assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
@@ -1846,14 +2061,14 @@ class ThreadMessageDispatcherTest {
 	}
 
 	/**
-	* 재검토로 확인한 버그(이슈 #233) — activeTurnContentIfMatches가 state.active만 보면, 아직
+	* 재검토로 확인한 버그(이슈 #233) — liveAnswer(예전 activeTurnContentIfMatches)가 state.active만 보면, 아직
 	* 시작 전이라 FIFO 대기 중인(state.pending) 정상 턴을 "고아"로 오판한다. DIRECT는 같은
 	* OWNER가 첫 턴이 스트리밍 중인 동안 다음 발화를 보낼 수 있고 그 발화도 정상적으로
 	* 큐잉된다 — 이 상태에서 재시도가 오면 그 턴을 FAILED로 잘못 닫고 중복 턴을 새로
 	* 시작하게 된다.
 	*/
 	@Test
-	void activeTurnContentIfMatchesRecognizesAQueuedDirectTurnAsStillAlive() {
+	void liveAnswerRecognizesAQueuedDirectTurnAsStillAlive() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1864,58 +2079,64 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn queued = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "second", UUID.randomUUID(), queued), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "second", UUID.randomUUID(), queued));
 
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId, room.membership.generation(),
-				queued.agentMsgId())).contains("");
+		assertThat(dispatcher.liveAnswer(room.threadId,
+				queued.agentMsgId()).map(ThreadMessageDispatcher.LiveAnswer::content)).contains("");
 		// active 쪽도 여전히 정상 동작해야 한다 — pending 지원을 더하면서 active 분기를
 		// 깨뜨리지 않았는지 같은 테스트에서 함께 확인한다.
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId, room.membership.generation(),
+		assertThat(dispatcher.liveAnswer(room.threadId,
 				first.agentMsgId())).isPresent();
 	}
 
+	/** 1:1에서 워커가 아직 꺼내지 않은 예약 턴도 마지막 연결이 빠진 뒤 끝까지 답한다(이슈 #413). */
 	@Test
-	void closingTheLastDirectConnectionCancelsReservedTurnsStillInTheInbox() throws InterruptedException {
+	void answersAReservedDirectTurnStillInTheInboxAfterTheLastConnectionLeaves() throws InterruptedException {
 		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
 		TestRoom room = new TestRoom(registry);
 		registry.blockOnContent = "blocked before pending";
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm, persistence);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved),
-				room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved));
 		assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
 		registry.releaseWorker.countDown();
 
-		verify(persistence, timeout(1000).times(1)).cancelBlocking(reserved.agentMsgId(), "");
-		verify(llm, never()).streamChat(any());
+		verify(persistence, timeout(1000)).completeBlocking(eq(reserved.agentMsgId()), eq("답"), isNull(), isNull());
+		verify(persistence, never()).cancelBlocking(any(), any());
 	}
 
 	@Test
-	void closingTheLastDirectConnectionCancelsQueuedReservedTurns() {
+	void answersQueuedReservedDirectTurnsAfterTheLastConnectionLeaves() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
+		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("둘째"));
 		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
 		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, persistence);
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn queued = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued));
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		firstResponse.tryEmitValue("첫째");
 
-		verify(persistence, timeout(1000).times(1)).cancelBlocking(queued.agentMsgId(), "");
+		verify(persistence, timeout(1000)).completeBlocking(eq(queued.agentMsgId()), eq("둘째"), isNull(), isNull());
+		verify(persistence, never()).cancelBlocking(any(), any());
 	}
 
 	@Test
@@ -1925,8 +2146,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("a"), Flux.just("b"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI one", null, null, "picked-model"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI two", null, null, " "), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI one", null, null, "picked-model"));
+		dispatcher.dispatch(command(room, "@AI two", null, null, " "));
 
 		ArgumentCaptor<ChatStreamRequest> requests = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000).times(2)).streamChat(requests.capture());
@@ -1936,6 +2157,210 @@ class ThreadMessageDispatcherTest {
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).model())
 				.containsExactly("picked-model", "picked-model", "test-model", "test-model");
+	}
+
+	/**
+	* 조각마다 답변의 몇 번째 글자(UTF-16 단위)부터인지를 싣고, 앞쪽 공백 조각도 제 위치를 든다. 끝 프레임은 delta를 비우고
+	* 최종 전체 내용을 content에 싣는다(이슈 #413 결정 3·12) — 화면은 이것으로 겹침을 버리고 빈틈을 메운다.
+	*/
+	@Test
+	void streamingChunksCarryTheirOffsetAndTheEndFrameCarriesTheWholeAnswer() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just(" ", "가😀", "나"));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 위치"));
+
+		awaitFrameCount(room.frames, 5);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).offset(),
+						frame -> ((ChatAnswerFrame) frame).content(), frame -> ((ChatAnswerFrame) frame).status())
+				.containsExactly(tuple(" ", 0, null, ChatAnswerStatus.STREAMING),
+						tuple("가😀", 1, null, ChatAnswerStatus.STREAMING),
+						tuple("나", 4, null, ChatAnswerStatus.STREAMING),
+						tuple("", null, " 가😀나", ChatAnswerStatus.DONE));
+		// 요청자는 서버 안에서만 들고(받는 사람마다 mine을 채울 때 쓴다), 방송 프레임의 mine은 비어 있다.
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).requesterSubject(), frame -> ((ChatAnswerFrame) frame).mine())
+				.containsOnly(tuple(room.participant.subject(), null));
+	}
+
+	/**
+	* 방에 막 들어온 연결에 보낼 진행 중인 답의 지금 모습(이슈 #413 결정 3·7·9) — 첫 글자 전이면 "생각 중"(THINKING), 도구가
+	* 돌면 그 도구, 글자가 있으면 지금까지 내용(delta가 아니라 content, 받는 사람이 요청자인지 mine). 진행 중인 턴이 없으면
+	* 아무것도 없다.
+	*/
+	@Test
+	void snapshotShowsThinkingTheRunningToolOrTheContentSoFar() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch streamRequested = new CountDownLatch(1);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			streamRequested.countDown();
+			return source.asFlux();
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).isEmpty();
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(streamRequested.await(1, TimeUnit.SECONDS)).isTrue();
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> assertThat(frame.kind()).isEqualTo("THINKING"));
+		source.tryEmitNext("지금까지");
+		awaitFrameCount(room.frames, 2);
+
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> {
+					assertThat(frame.status()).isEqualTo(ChatAnswerStatus.STREAMING);
+					assertThat(frame.delta()).isEmpty();
+					assertThat(frame.content()).isEqualTo("지금까지");
+					assertThat(frame.mine()).isTrue();
+					assertThat(frame.requesterSubject()).isNull();
+				});
+		assertThat(dispatcher.snapshotFor(room.threadId, "subject-someone-else")).singleElement()
+				.isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> assertThat(frame.mine()).isFalse());
+		source.tryEmitComplete();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).isEmpty());
+	}
+
+	/** 도구가 도는 중에 들어오면 그 도구의 진행 표시를 바로 받는다(이슈 #413 결정 7). 도구가 끝나면 다시 보내지 않는다. */
+	@Test
+	void snapshotIncludesTheToolThatIsRunningNow() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch toolRunning = new CountDownLatch(1);
+		CountDownLatch releaseTool = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		ToolCallback blocking = new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name("webSearch").description("d").inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String input) {
+				toolRunning.countDown();
+				try {
+					releaseTool.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+				return "결과";
+			}
+		};
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback search = toolExecutions.wrap(new ToolCallback[] { blocking })[0];
+			return Mono.fromCallable(() -> search.call("{\"query\":\"서울 날씨\"}"))
+					.subscribeOn(Schedulers.boundedElastic())
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(toolRunning.await(1, TimeUnit.SECONDS)).isTrue();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> {
+					assertThat(frame.kind()).isEqualTo("WEB_SEARCH");
+					assertThat(frame.target()).isEqualTo("서울 날씨");
+					assertThat(frame.active()).isTrue();
+				}));
+		releaseTool.countDown();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class,
+						frame -> assertThat(frame.kind()).isEqualTo("THINKING")));
+	}
+
+	/** 도구 둘이 겹쳐 돌 때 먼저 끝난 도구가 아직 도는 도구의 진행 표시를 지우지 않는다(이슈 #413 결정 7). */
+	@Test
+	void snapshotKeepsTheStillRunningToolWhenAnOverlappingToolFinishes() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch bothRunning = new CountDownLatch(2);
+		CountDownLatch releaseSearch = new CountDownLatch(1);
+		CountDownLatch releaseFetch = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback[] tools = toolExecutions.wrap(new ToolCallback[] {
+					blockingTool("webSearch", bothRunning, releaseSearch), blockingTool("webFetch", bothRunning, releaseFetch) });
+			return Flux.merge(
+					Mono.fromCallable(() -> tools[0].call("{\"query\":\"서울 날씨\"}")).subscribeOn(Schedulers.boundedElastic()),
+					Mono.fromCallable(() -> tools[1].call("{\"url\":\"https://example.com/a\"}"))
+							.subscribeOn(Schedulers.boundedElastic()))
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(bothRunning.await(1, TimeUnit.SECONDS)).isTrue();
+		AtomicReference<String> running = new AtomicReference<>();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> running.set(frame.kind())));
+		// 나중에 시작해 지금 기억된 도구가 아닌 쪽을 먼저 끝낸다.
+		boolean searchIsRemembered = running.get().equals("WEB_SEARCH");
+		(searchIsRemembered ? releaseFetch : releaseSearch).countDown();
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> assertThat(frame)
+				.isInstanceOfSatisfying(ChatActivityFrame.class, activity -> assertThat(activity.active()).isFalse())));
+
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> {
+					assertThat(frame.kind()).isEqualTo(running.get());
+					assertThat(frame.active()).isTrue();
+				});
+		(searchIsRemembered ? releaseSearch : releaseFetch).countDown();
+	}
+
+	private static ToolCallback blockingTool(String name, CountDownLatch running, CountDownLatch release) {
+		return new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name(name).description("d").inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String input) {
+				running.countDown();
+				try {
+					release.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+				return "결과";
+			}
+		};
+	}
+
+	/** 같은 사람이 다른 방에서 돌리는 답이 있으면 그 수를 남긴다 — 내용 없이 개수만(이슈 #413 결정 5). */
+	@Test
+	void logsHowManyOtherRoomsTheSamePersonIsRunningTurnsIn() {
+		ch.qos.logback.classic.Logger logger =
+				(ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(ThreadMessageDispatcher.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+				new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+			TestRoom first = new TestRoom(registry);
+			TestRoom second = new TestRoom(registry, first.userId);
+			LlmChatStreamService llm = mock(LlmChatStreamService.class);
+			when(llm.streamChat(any())).thenReturn(Flux.never());
+			ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+
+			dispatcher.dispatch(command(first, "@AI 하나"));
+			verify(llm, timeout(1000)).streamChat(any());
+			dispatcher.dispatch(command(second, "@AI 둘"));
+
+			eventually(() -> assertThat(appender.list).extracting(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+					.anyMatch(message -> message.startsWith("사람당 동시 AI 턴 threadId=" + second.threadId)
+							&& message.endsWith("others=1")));
+		} finally {
+			logger.detachAppender(appender);
+		}
 	}
 
 	@Test
@@ -2035,6 +2460,12 @@ class ThreadMessageDispatcherTest {
 				null);
 	}
 
+	/** 끝 프레임 — delta는 비고 최종 전체 내용이 content에 실린다(이슈 #413 결정 12). */
+	private static ChatAnswerFrame done(TestRoom room, String content) {
+		return new ChatAnswerFrame(room.threadId, null, null, "test-model", 0L, "", List.of(), false,
+				ChatAnswerStatus.DONE, null, null, null, content, null, null);
+	}
+
 	private static void awaitAttemptedDelta(FailingRoomSessionRegistry registry, String delta) {
 		long deadline = System.currentTimeMillis() + 2000;
 		while (registry.attemptedFrames.stream()
@@ -2087,11 +2518,10 @@ class ThreadMessageDispatcherTest {
 
 		private final UUID connectionId = UUID.randomUUID();
 
-		private final UUID userId = UUID.randomUUID();
+		private final UUID userId;
 
 		/** 저장은 내부 id(userId)로, 방송 프레임은 subject·표시 이름으로 사람을 가리킨다(이슈 #130). */
-		private final PresenceParticipant participant =
-				new PresenceParticipant("subject-" + userId, "발화자");
+		private final PresenceParticipant participant;
 
 		private final RoomSessionRegistry.RoomMembership membership;
 
@@ -2104,7 +2534,14 @@ class ThreadMessageDispatcherTest {
 		}
 
 		TestRoom(RoomSessionRegistry registry) {
+			this(registry, UUID.randomUUID());
+		}
+
+		/** 같은 사람이 여러 방에 있을 때 — 사람(userId)을 정해 방을 만든다. */
+		TestRoom(RoomSessionRegistry registry, UUID userId) {
 			this.registry = registry;
+			this.userId = userId;
+			this.participant = new PresenceParticipant("subject-" + userId, "발화자");
 			this.membership = registry.join(threadId, connectionId, participant);
 			this.subscription = membership.frames().subscribe(frames::add);
 		}
@@ -2132,7 +2569,7 @@ class ThreadMessageDispatcherTest {
 		}
 
 		@Override
-		public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
+		public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
 			attemptedFrames.add(frame);
 			if (frame instanceof ChatMessageFrame message && message.content().equals(blockOnContent)) {
 				workerBlocked.countDown();
@@ -2145,7 +2582,7 @@ class ThreadMessageDispatcherTest {
 			if (failBroadcasts) {
 				throw new IllegalStateException("sink failure");
 			}
-			return super.broadcastIfCurrent(threadId, roomGeneration, frame);
+			return super.broadcastToRoom(threadId, frame);
 		}
 	}
 

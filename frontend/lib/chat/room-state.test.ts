@@ -12,9 +12,11 @@ import {
   type RoomState,
   applyFrame,
   applyHistory,
+  catchUpCursor,
   clearActivity,
   clearRoomError,
   dismissNotice,
+  historyCursor,
   initialRoomState,
   isForbidden,
   isApprovalNotice,
@@ -87,7 +89,7 @@ function notice(
 
 function answer(
   delta: string,
-  status: 'streaming' | 'done' | 'cancelled' | 'denied',
+  status: 'streaming' | 'done' | 'cancelled' | 'denied' | 'failed',
   metadata: {
     citations?: Citation[];
     restrictedResultsOmitted?: boolean;
@@ -411,6 +413,7 @@ describe('applyFrame - chat.message', () => {
         streaming: false,
         terminalStatus: null,
         turnId: null,
+        mine: false,
         citations: [],
         restrictedResultsOmitted: false,
         groundingNotice: null,
@@ -666,7 +669,7 @@ describe('applyFrame - error', () => {
     expect(state.error?.code).toBe('RATE_LIMITED');
   });
 
-  it('AI 종결 오류는 부분 답변을 보존하고 streaming만 끝낸다', () => {
+  it('AI 종결 오류만 오면(실패 프레임을 모르는 옛 서버) 흐름만 끝낸다 — msgId가 없어 실패로 단정하지 않는다', () => {
     const state = fold([
       answer('부분 답변', 'streaming'),
       {
@@ -685,7 +688,7 @@ describe('applyFrame - error', () => {
     });
   });
 
-  it('턴 시간 제한 초과도 종결 오류다 — 부분 답변을 남기고 시간 초과 문구를 띄운다(이슈 #389)', () => {
+  it('턴 시간 제한 초과도 종결 오류다 — 흐름을 끝내고 시간 초과 문구를 띄운다(이슈 #389)', () => {
     const state = fold([
       answer('부분 답변', 'streaming'),
       {
@@ -892,11 +895,12 @@ describe('applyHistory - 방 진입 시 과거 대화(#190)', () => {
     expect(chats(state).map((m) => m.citations)).toEqual([[document, web], []]);
   });
 
-  it('FAILED는 사유로 남기지 않는다 — 사용자가 고른 결말이 아니다', () => {
+  it('FAILED는 빈 본문이어도 실패로 남긴다 — 자리를 비운 사이 실패한 답을 돌아와 알 수 있게(이슈 #413 결정 8)', () => {
     const state = applyHistory(initialRoomState, [
-      historyItem('a', 1, '끊긴 답', { athKind: 'AGENT', status: 'FAILED' }),
+      historyItem('a', 1, '', { athKind: 'AGENT', status: 'FAILED' }),
     ]);
-    expect(chats(state)[0].terminalStatus).toBeNull();
+    expect(chats(state)).toHaveLength(1);
+    expect(chats(state)[0].terminalStatus).toBe('failed');
   });
 
   it('seq가 띄엄띄엄해도 그대로 받는다 — 블록 예약이 남긴 구멍이다', () => {
@@ -1278,5 +1282,322 @@ describe('applyFrame - chat.activity(이슈 #397)', () => {
   it('연결이 끊기면 clearActivity로 지운다', () => {
     expect(clearActivity(fold([activity(true)])).activity).toBeNull();
     expect(clearActivity(initialRoomState)).toBe(initialRoomState);
+  });
+});
+
+/**
+ * AI 턴이 연결과 떨어진 뒤(이슈 #413) 답변을 이어 받는 규칙 — 조각 위치(offset)·전체 내용(content)·받는 사람별 mine,
+ * 실패 표시, 끊긴 사이 끝난 답의 마무리, 따라잡기 커서.
+ */
+describe('#413 답변 이어 받기', () => {
+  const at = (
+    delta: string,
+    offset: number | null,
+    extra: Partial<ChatAnswerFrame> = {},
+  ): WsFrame => ({
+    ...(answer(delta, 'streaming') as ChatAnswerFrame),
+    offset,
+    ...extra,
+  });
+  const content = (frame: RoomState) =>
+    (chats(frame)[0] as RoomMessage).content;
+  const historyRow = (
+    id: string,
+    seq: number,
+    body: string,
+    overrides: Partial<ThreadMessageItem> = {},
+  ): ThreadMessageItem => ({
+    id,
+    seq,
+    athKind: 'AGENT',
+    status: 'COMPLETE',
+    content: body,
+    authorSubject: null,
+    authorDisplayName: null,
+    createdAt: '2026-10-19T01:00:00Z',
+    completedAt: '2026-10-19T01:00:00Z',
+    attachments: [],
+    ...overrides,
+  });
+
+  it('들어올 때 받은 지금까지 내용(content)과 겹치는 조각은 위치로 잘라 붙인다 — 글자가 중복되지 않는다', () => {
+    const state = fold([
+      at('', null, { content: '안녕하세' }),
+      at('하세', 2),
+      at('세요', 3),
+      at('!', 5),
+    ]);
+    expect(content(state)).toBe('안녕하세요!');
+  });
+
+  it('빈틈 뒤 조각을 먼저 받아도 들고 있다가, 늦게 온 지금까지 내용이 앞을 채우면 이어 붙인다 — 그 뒤 조각도 계속 흐른다', () => {
+    // 들어올 때 받는 지금까지 내용('안녕', 길이 2)보다 그 뒤 방 프레임이 먼저 왔다.
+    const state = fold([
+      at('하', 2),
+      at('세요', 3),
+      at('', null, { content: '안녕' }),
+      at('!', 5),
+    ]);
+    expect(content(state)).toBe('안녕하세요!');
+    expect(chats(state)[0].heldChunks).toBeUndefined();
+  });
+
+  it('이미 가진 범위의 조각은 버리고, 빈틈이 메워지지 않으면 끝 프레임의 전체 내용이 메운다', () => {
+    const gap = fold([at('안녕', 0), at('요', 4)]);
+    expect(content(gap)).toBe('안녕');
+    const old = fold([at('안녕', 0), at('녕', 1)]);
+    expect(content(old)).toBe('안녕');
+    const done = applyFrame(gap, {
+      ...(answer('', 'done') as ChatAnswerFrame),
+      content: '안녕하세요',
+    });
+    expect(content(done)).toBe('안녕하세요');
+    expect(chats(done)[0].streaming).toBe(false);
+  });
+
+  it('위치가 없는 조각(옛 서버)은 예전처럼 이어 붙이고, 지금 것보다 짧은 content는 늦게 온 것이라 무시한다', () => {
+    const state = fold([
+      at('안녕', null),
+      at('하세요', null),
+      at('', null, { content: '안' }),
+    ]);
+    expect(content(state)).toBe('안녕하세요');
+  });
+
+  it('끝난 말풍선은 늦게 온 streaming 프레임이 다시 열지 않는다 — 들어올 때 내용과 방 프레임은 순서가 섞여 온다', () => {
+    const state = fold([
+      at('안녕', 0),
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '안녕하세요' },
+      at('', null, { content: '안녕하' }),
+    ]);
+    expect(chats(state)[0]).toMatchObject({
+      content: '안녕하세요',
+      streaming: false,
+    });
+  });
+
+  it('협업방 중지도 cancelled다 — 받은 내용과 "중지됨"이 남는다', () => {
+    const state = fold([
+      at('부분', 0),
+      { ...(answer('', 'cancelled') as ChatAnswerFrame), content: '부분' },
+    ]);
+    expect(chats(state)[0]).toMatchObject({
+      content: '부분',
+      terminalStatus: 'cancelled',
+      streaming: false,
+    });
+  });
+
+  it('실패는 그 msgId의 failed 끝 프레임으로 온다 — 받은 조각을 비우고 실패로 끝내며, 뒤따른 오류 프레임은 배너만 띄운다', () => {
+    const state = fold([
+      at('부분', 0, { msgId: 'mine-turn' }),
+      {
+        ...(answer('', 'failed', { msgId: 'mine-turn' }) as ChatAnswerFrame),
+        content: '',
+      },
+      {
+        type: 'error',
+        threadId: THREAD,
+        code: 'MODEL_UNAVAILABLE',
+        message: '모델 오류',
+        traceId: 'trace-ai',
+      },
+    ]);
+    expect(chats(state)[0]).toMatchObject({
+      content: '',
+      streaming: false,
+      terminalStatus: 'failed',
+    });
+    expect(state.error?.code).toBe('MODEL_UNAVAILABLE');
+    // 첫 글자 전에 실패해도 말풍선이 생겨 실패가 보인다.
+    const early = fold([
+      { ...(answer('', 'failed') as ChatAnswerFrame), content: '' },
+    ]);
+    expect(chats(early)[0].terminalStatus).toBe('failed');
+  });
+
+  it('끝난 말풍선의 상태는 늦게 온 끝 프레임이 바꾸지 않는다 — 더 긴 최종 내용만 받는다', () => {
+    const cancelled = fold([
+      at('부분', 0),
+      { ...(answer('', 'cancelled') as ChatAnswerFrame), content: '부분' },
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '부분과 더' },
+    ]);
+    expect(chats(cancelled)[0]).toMatchObject({
+      content: '부분과 더',
+      terminalStatus: 'cancelled',
+    });
+    const failed = fold([
+      { ...(answer('', 'failed') as ChatAnswerFrame), content: '' },
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '되살아난 글' },
+    ]);
+    expect(chats(failed)[0]).toMatchObject({
+      content: '',
+      terminalStatus: 'failed',
+    });
+  });
+
+  it('mine은 서버가 받는 사람마다 채운 값이고, 한 번 내 것이면 남는다', () => {
+    const state = fold([
+      at('', null, { content: '안녕', mine: true }),
+      at('하세요', 2, { mine: null }),
+    ]);
+    expect(chats(state)[0].mine).toBe(true);
+    expect(chats(fold([at('남의 답', 0, { mine: false })]))[0].mine).toBe(
+      false,
+    );
+  });
+
+  it('들어올 때 받은 답 말풍선은 이력으로 먼저 그린 뒤의 대기 질문보다 앞(seq 자리)에 놓인다', () => {
+    const base = applyHistory(initialRoomState, [
+      historyRow('q1', 1, '첫 질문', {
+        athKind: 'HUMAN',
+        authorSubject: 'sujin',
+      }),
+      historyRow('a1', 2, '', { status: 'PENDING', completedAt: null }),
+      historyRow('q2', 3, '둘째 질문', {
+        athKind: 'HUMAN',
+        authorSubject: 'sujin',
+      }),
+    ]);
+    const state = applyFrame(base, {
+      ...(answer('', 'streaming', { msgId: 'a1' }) as ChatAnswerFrame),
+      seq: 2,
+      content: '지금까지',
+    });
+    expect(chats(state).map((message) => message.id)).toEqual([
+      'q1',
+      'a1',
+      'q2',
+    ]);
+  });
+
+  it('첫 글자가 오면 "생각 중"(THINKING) 표시를 지우고, 도구 표시는 남긴다', () => {
+    const thinking: WsFrame = {
+      type: 'chat.activity',
+      threadId: THREAD,
+      msgId: 'agent-msg-1',
+      turnId: null,
+      kind: 'THINKING',
+      target: null,
+      active: true,
+      agent: null,
+    };
+    expect(fold([thinking]).activity?.kind).toBe('THINKING');
+    expect(fold([thinking, at('안녕', 0)]).activity).toBeNull();
+    // 들어올 때 받은 "생각 중"이 첫 조각보다 늦게 와도 남지 않는다.
+    expect(fold([at('안녕', 0), thinking]).activity).toBeNull();
+    const tool: WsFrame = { ...thinking, kind: 'WEB_SEARCH', target: '날씨' };
+    expect(fold([tool, at('안녕', 0)]).activity?.kind).toBe('WEB_SEARCH');
+  });
+
+  it('화면에서 흐르는 중인 답이 이력에서 끝나 있으면 이력의 내용·상태·근거로 마무리하고 진행 표시를 지운다', () => {
+    const citation: Citation = {
+      kind: 'WEB',
+      title: '출처',
+      snippet: '',
+      score: 0,
+      url: 'https://a.example/',
+    };
+    const streaming = fold([
+      at('부분', 0),
+      {
+        type: 'chat.activity',
+        threadId: THREAD,
+        msgId: 'agent-msg-1',
+        turnId: null,
+        kind: 'WEB_SEARCH',
+        target: null,
+        active: true,
+        agent: null,
+      },
+    ]);
+    const done = applyHistory(streaming, [
+      historyRow('agent-msg-1', 1000, '완성된 답', { citations: [citation] }),
+    ]);
+    expect(chats(done)[0]).toMatchObject({
+      content: '완성된 답',
+      streaming: false,
+      terminalStatus: null,
+      citations: [citation],
+    });
+    expect(done.activity).toBeNull();
+    const failed = applyHistory(streaming, [
+      historyRow('agent-msg-1', 1000, '', { status: 'FAILED' }),
+    ]);
+    expect(chats(failed)[0]).toMatchObject({
+      content: '',
+      streaming: false,
+      terminalStatus: 'failed',
+    });
+    const stillRunning = applyHistory(streaming, [
+      historyRow('agent-msg-1', 1000, '', {
+        status: 'PENDING',
+        completedAt: null,
+      }),
+    ]);
+    expect(chats(stillRunning)[0]).toMatchObject({
+      content: '부분',
+      streaming: true,
+    });
+  });
+
+  it('따라잡기 커서는 흐르는 AI 답변과 이력에서 PENDING이던 답변 앞에서 멈춘다 — 끊긴 사이 끝난 답을 다시 가져온다', () => {
+    const streaming = fold([say('sujin', '질문', 'q'), at('부분', 0)]);
+    expect(streaming.lastSeq).toBe(1000);
+    expect(catchUpCursor(streaming)).toBe(999);
+
+    const loaded = applyHistory(initialRoomState, [
+      historyRow('q1', 10, '질문', {
+        athKind: 'HUMAN',
+        authorSubject: 'sujin',
+      }),
+      historyRow('a1', 11, '', { status: 'PENDING', completedAt: null }),
+      historyRow('q2', 12, '다음 질문', {
+        athKind: 'HUMAN',
+        authorSubject: 'sujin',
+      }),
+    ]);
+    expect(loaded.lastSeq).toBe(12);
+    expect(catchUpCursor(loaded)).toBe(10);
+    expect(
+      historyCursor(null, [
+        historyRow('a1', 11, '', { status: 'PENDING', completedAt: null }),
+        historyRow('q2', 12, '다음', { athKind: 'HUMAN' }),
+      ]),
+    ).toBe(10);
+
+    // 실시간으로 말풍선이 생기면 이력의 PENDING으로는 더 멈추지 않는다(흐르는 말풍선으로 멈춘다).
+    const live = applyFrame(loaded, {
+      ...(answer('', 'streaming', { msgId: 'a1' }) as ChatAnswerFrame),
+      seq: 11,
+      content: '지금까지',
+    });
+    expect(live.pendingAnswers).toEqual({});
+    expect(catchUpCursor(live)).toBe(10);
+
+    // 다시 가져온 행이 끝나 있으면 그 답을 그리고 더는 멈추지 않는다.
+    const caughtUp = applyHistory(loaded, [historyRow('a1', 11, '완성')]);
+    expect(chats(caughtUp).map((message) => message.id)).toEqual([
+      'q1',
+      'a1',
+      'q2',
+    ]);
+    expect(catchUpCursor(caughtUp)).toBe(12);
+  });
+
+  it('옛 화면 방식(delta만 이어 붙이기)으로 새 서버 프레임을 받아도 글자가 두 번 보이지 않는다 — 전체 내용이 content에만 실린다(이슈 #413 결정 12)', () => {
+    const frames: ChatAnswerFrame[] = [
+      {
+        ...(answer('', 'streaming') as ChatAnswerFrame),
+        content: '지금까지',
+        offset: null,
+      },
+      { ...(answer('더', 'streaming') as ChatAnswerFrame), offset: 4 },
+      { ...(answer('', 'done') as ChatAnswerFrame), content: '지금까지더' },
+    ];
+    const oldScreen = frames.reduce((text, frame) => text + frame.delta, '');
+    expect(oldScreen).toBe('더');
+    expect(oldScreen).not.toContain('지금까지지금까지');
+    expect(content(fold(frames))).toBe('지금까지더');
   });
 });

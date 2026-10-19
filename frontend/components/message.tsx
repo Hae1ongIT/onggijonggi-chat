@@ -7,6 +7,7 @@
  *********************************************************/
 
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
+import type { TerminalStatus } from '@/lib/chat/room-state';
 import cx from 'classnames';
 import equal from 'fast-deep-equal';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -19,6 +20,7 @@ import { LoaderIcon, PencilEditIcon, SparklesIcon } from './icons';
 import { Markdown } from './markdown';
 import { MessageActions } from './message-actions';
 import { MessageEditor } from './message-editor';
+import { TerminalStatusNote } from './terminal-status-note';
 import { Button } from './ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -41,9 +43,9 @@ const PurePreviewMessage = ({
   isLoading: boolean;
   isLastMessage: boolean;
   citations?: CitationsState;
-  /** DIRECT 전용(이슈 #162, §3.2) — DENIED는 실패 안내, CANCELLED는 본문 유무에 따라
-   * "중단됨" 배지 또는 빈 말풍선 대신 중단 안내로 갈린다. */
-  terminalStatus?: 'cancelled' | 'denied';
+  /** 평범하게 끝나지 않은 사유(이슈 #162, §3.2·#413). 본문이 있으면 그 아래 덧붙고, 없으면(빈 채 중단·거부·실패) 빈
+   * 말풍선 대신 이 안내가 유일한 표시가 된다. */
+  terminalStatus?: TerminalStatus;
   failed?: boolean;
   onResend?: () => void;
   onAppendTurn: (content: string) => void;
@@ -115,20 +117,11 @@ const PurePreviewMessage = ({
               </div>
             )}
 
-            {/* CANCELLED — 본문이 있으면 위에서 이미 그린 말풍선에 "중단됨"만 덧붙이고, 본문이
-             * 없으면(위 블록은 message.content를 요구해 아무것도 안 그린다) 빈 말풍선 대신 이
-             * 안내가 유일한 표시가 된다(이슈 #162, §3.2). */}
-            {message.role === 'assistant' && terminalStatus === 'cancelled' && (
-              <span className="text-sm text-muted-foreground">
-                응답이 중단되었습니다.
-              </span>
-            )}
-
-            {/* DENIED는 AGENT 행 자체가 본문 없이 끝나 항상 이 안내로만 보인다(이슈 #162, §3.2). */}
-            {message.role === 'assistant' && terminalStatus === 'denied' && (
-              <span className="text-sm text-destructive">
-                요청이 많아 이번 응답은 처리되지 않았습니다. 다시 시도해 주세요.
-              </span>
+            {/* 중단 — 본문이 있으면 위에서 이미 그린 말풍선에 덧붙고, 본문이 없으면(위 블록은 message.content를
+             * 요구해 아무것도 안 그린다) 빈 말풍선 대신 이 안내가 유일한 표시가 된다(이슈 #162, §3.2). 거부·실패는 본문
+             * 없이 끝나 항상 이 안내로만 보인다(실패는 이슈 #413 결정 8). */}
+            {message.role === 'assistant' && (
+              <TerminalStatusNote status={terminalStatus} />
             )}
 
             {message.role === 'user' && citations && (

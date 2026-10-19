@@ -69,12 +69,14 @@ public class CollabThreadController {
 	private final CollabThreadCreationService collabThreadCreationService;
 	private final ThreadMessageQueryService threadMessageQueryService;
 	private final ThreadWorkspaceService threadWorkspaceService;
+	private final ThreadMessageDispatcher threadMessageDispatcher;
 
 	public CollabThreadController(CurrentActorProvider currentActorProvider, ThrRepository thrRepository,
 			ThrMbrRepository thrMbrRepository, ThreadMembershipService threadMembershipService,
 			ThreadParticipantService threadParticipantService, ThreadLifecycleService threadLifecycleService,
 			RankedDisplayNames rankedDisplayNames, CollabThreadCreationService collabThreadCreationService,
-			ThreadMessageQueryService threadMessageQueryService, ThreadWorkspaceService threadWorkspaceService) {
+			ThreadMessageQueryService threadMessageQueryService, ThreadWorkspaceService threadWorkspaceService,
+			ThreadMessageDispatcher threadMessageDispatcher) {
 		this.currentActorProvider = currentActorProvider;
 		this.thrRepository = thrRepository;
 		this.thrMbrRepository = thrMbrRepository;
@@ -85,6 +87,7 @@ public class CollabThreadController {
 		this.collabThreadCreationService = collabThreadCreationService;
 		this.threadMessageQueryService = threadMessageQueryService;
 		this.threadWorkspaceService = threadWorkspaceService;
+		this.threadMessageDispatcher = threadMessageDispatcher;
 	}
 
 	/**
@@ -230,7 +233,9 @@ public class CollabThreadController {
 	@DeleteMapping("/api/collab/threads/{threadId}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
 	public Mono<Void> deleteThread(@PathVariable UUID threadId) {
-		return actorUserIdIn(threadId).flatMap(userId -> threadLifecycleService.delete(threadId, userId));
+		return actorUserIdIn(threadId).flatMap(userId -> threadLifecycleService.delete(threadId, userId))
+				// AI 턴은 연결과 떨어져 돌아(이슈 #413) 지운 방에 답을 계속 만들지 않게 끊는다.
+				.then(Mono.fromRunnable(() -> threadMessageDispatcher.discard(threadId)));
 	}
 
 	/**

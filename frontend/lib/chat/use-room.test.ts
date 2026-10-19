@@ -229,3 +229,53 @@ describe('useRoom — 입력 중 알림', () => {
     }
   });
 });
+
+/** 이슈 #413 — 방을 떠났다 돌아온 화면. 이 화면은 보낸 적이 없어도 서버가 알려 준 mine으로 중지할 수 있고,
+ * 다시 붙을 때 따라잡기는 흐르는 중인 답 앞에서 시작한다. */
+describe('useRoom — 돌아온 화면(이슈 #413)', () => {
+  const streamingAnswer = (mine: boolean | null): WsFrame => ({
+    type: 'chat.answer',
+    threadId: THREAD,
+    msgId: 'answer-1',
+    turnId: 'turn-1',
+    model: 'm',
+    seq: 7,
+    delta: '',
+    citations: [],
+    restrictedResultsOmitted: false,
+    status: 'streaming',
+    groundingNotice: null,
+    agent: null,
+    offset: null,
+    content: '지금까지',
+    mine,
+  });
+
+  it('보낸 적 없는 턴도 서버가 내 것(mine)이라 하면 중지할 수 있고, 남의 것이면 못 한다', () => {
+    const { result } = renderHook(() =>
+      useRoom(THREAD, { fetchHistory: emptyHistory }),
+    );
+    act(() => latestListener().onFrame(streamingAnswer(false)));
+    expect(result.current.cancellableTurnId).toBeNull();
+    act(() => latestListener().onFrame(streamingAnswer(true)));
+    expect(result.current.cancellableTurnId).toBe('turn-1');
+  });
+
+  it('다시 붙으면 흐르는 중인 답 앞에서부터 따라잡는다 — 끊긴 사이 끝난 답을 다시 가져온다', async () => {
+    const fetchHistory = vi.fn((_threadId: string, _afterSeq?: number) =>
+      Promise.resolve([]),
+    );
+    renderHook(() => useRoom(THREAD, { fetchHistory }));
+    await act(async () => {
+      latestListener().onOpenChange?.(true);
+      await Promise.resolve();
+    });
+    act(() => latestListener().onFrame(streamingAnswer(true)));
+    act(() => latestListener().onOpenChange?.(false));
+    await act(async () => {
+      latestListener().onOpenChange?.(true);
+      await Promise.resolve();
+    });
+    expect(fetchHistory).toHaveBeenLastCalledWith(THREAD, 6);
+  });
+});

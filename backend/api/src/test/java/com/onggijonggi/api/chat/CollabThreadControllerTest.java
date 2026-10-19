@@ -1,6 +1,8 @@
 package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import com.onggijonggi.api.auth.UserIdentityService;
 import com.onggijonggi.common.chat.domain.Msg;
@@ -23,6 +25,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
 /**
@@ -52,6 +55,10 @@ class CollabThreadControllerTest {
 
 	@Autowired
 	private UserIdentityService userIdentityService;
+
+	/** 방을 지우면 그 방의 AI 작업도 끊는지(이슈 #413) 보려고 감싼다. */
+	@MockitoSpyBean
+	private ThreadMessageDispatcher threadMessageDispatcher;
 
 	private RestTestClient restTestClient;
 
@@ -235,6 +242,7 @@ class CollabThreadControllerTest {
 				.expectStatus().isNoContent();
 
 		assertThat(thrRepository.findById(thrId)).isEmpty();
+		verify(threadMessageDispatcher).discard(thrId);
 	}
 
 	@Test
@@ -247,6 +255,7 @@ class CollabThreadControllerTest {
 						"Bearer " + TestJwtSupport.signedJwt("delete-member-2", List.of("USER")))
 				.exchange()
 				.expectStatus().isForbidden();
+		verify(threadMessageDispatcher, never()).discard(thrId);
 	}
 
 	@Test
