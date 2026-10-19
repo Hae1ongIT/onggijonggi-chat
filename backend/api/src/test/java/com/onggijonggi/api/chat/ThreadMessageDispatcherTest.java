@@ -586,6 +586,37 @@ class ThreadMessageDispatcherTest {
 		verify(llm, times(2)).streamChat(any());
 	}
 
+	/** 턴 제한은 LLM 호출 앞 단계에도 걸린다 — 문서 목록 조회가 멈춰도 방 큐가 막히지 않고 다음 턴으로 간다(이슈 #413). */
+	@Test
+	void turnTimeoutAlsoCoversTheStepsBeforeTheModelCall() {
+		VirtualTimeScheduler scheduler = VirtualTimeScheduler.create();
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("next"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any()))
+				.thenReturn(Mono.never(), Mono.just(List.of()));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, scheduler);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
+		verify(documents, timeout(1000)).searchableDocuments(eq(room.threadId), any());
+		scheduler.advanceTimeBy(Duration.ofSeconds(120));
+
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> {
+			assertThat(frame).isInstanceOf(ErrorFrame.class);
+			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
+		}));
+		eventually(() -> assertThat(room.frames)
+				.usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
+						done(room, "next")));
+		verify(llm, times(1)).streamChat(any());
+	}
+
 	@Test
 	void failedTurnBroadcastsInternalErrorAndStartsTheNextQueuedTurn() {
 		TestRoom room = new TestRoom();
@@ -2241,6 +2272,66 @@ class ThreadMessageDispatcherTest {
 				.singleElement()
 				.isInstanceOfSatisfying(ChatActivityFrame.class,
 						frame -> assertThat(frame.kind()).isEqualTo("THINKING")));
+	}
+
+	/** 도구 둘이 겹쳐 돌 때 먼저 끝난 도구가 아직 도는 도구의 진행 표시를 지우지 않는다(이슈 #413 결정 7). */
+	@Test
+	void snapshotKeepsTheStillRunningToolWhenAnOverlappingToolFinishes() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch bothRunning = new CountDownLatch(2);
+		CountDownLatch releaseSearch = new CountDownLatch(1);
+		CountDownLatch releaseFetch = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback[] tools = toolExecutions.wrap(new ToolCallback[] {
+					blockingTool("webSearch", bothRunning, releaseSearch), blockingTool("webFetch", bothRunning, releaseFetch) });
+			return Flux.merge(
+					Mono.fromCallable(() -> tools[0].call("{\"query\":\"서울 날씨\"}")).subscribeOn(Schedulers.boundedElastic()),
+					Mono.fromCallable(() -> tools[1].call("{\"url\":\"https://example.com/a\"}"))
+							.subscribeOn(Schedulers.boundedElastic()))
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(bothRunning.await(1, TimeUnit.SECONDS)).isTrue();
+		AtomicReference<String> running = new AtomicReference<>();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> running.set(frame.kind())));
+		// 나중에 시작해 지금 기억된 도구가 아닌 쪽을 먼저 끝낸다.
+		boolean searchIsRemembered = running.get().equals("WEB_SEARCH");
+		(searchIsRemembered ? releaseFetch : releaseSearch).countDown();
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> assertThat(frame)
+				.isInstanceOfSatisfying(ChatActivityFrame.class, activity -> assertThat(activity.active()).isFalse())));
+
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> {
+					assertThat(frame.kind()).isEqualTo(running.get());
+					assertThat(frame.active()).isTrue();
+				});
+		(searchIsRemembered ? releaseSearch : releaseFetch).countDown();
+	}
+
+	private static ToolCallback blockingTool(String name, CountDownLatch running, CountDownLatch release) {
+		return new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name(name).description("d").inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String input) {
+				running.countDown();
+				try {
+					release.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+				return "결과";
+			}
+		};
 	}
 
 	/** 같은 사람이 다른 방에서 돌리는 답이 있으면 그 수를 남긴다 — 내용 없이 개수만(이슈 #413 결정 5). */

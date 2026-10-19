@@ -27,6 +27,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -524,7 +525,7 @@ public class ThreadMessageDispatcher {
 					List.of(), false, ChatAnswerStatus.STREAMING, activeTurn.groundingNotice, turn.agent(), null,
 					activeTurn.content.toString(), subject.equals(turn.fromSubject()), null));
 		}
-		ToolActivity activity = activeTurn.currentActivity;
+		ToolActivity activity = activeTurn.currentActivity.get();
 		if (activity != null) {
 			frames.add(new ChatActivityFrame(threadId, activeTurn.msgId, turn.turnId(), activity.kind(), activity.target(),
 					true, turn.agent()));
@@ -762,18 +763,20 @@ public class ThreadMessageDispatcher {
 		activeTurn.pendingMsgId.subscribe();
 		logConcurrentTurns(state, activeTurn);
 
-		Disposable subscription = activeTurn.turn.context()
+		// 턴 제한은 LLM 호출 앞 단계(문맥 조회·문서 목록)까지 덮는다 — 연결이 끊겨도 턴이 끝나지 않으므로(이슈 #413)
+		// 앞 단계가 멈추면 이 방의 다음 턴과 상태 정리가 영영 막힌다. 예전엔 방이 비면 세대를 닫아 끊겼다.
+		Disposable subscription = withTotalDeadline(activeTurn.turn.context()
 				.flatMap(context -> promptMessages(activeTurn.turn, context))
 				.flatMap(messages -> withDocumentTool(activeTurn, messages))
 				.flatMapMany(prompt -> {
 					if (abandoned(activeTurn)) {
 						return Flux.<String>never();
 					}
-					return withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
+					return Flux.defer(() -> llmChatStreamService.streamChat(
 							new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
 									prompt.messages(), activeTurn.turn.timeZone(), prompt.documentTool(),
-									activeTurn.toolExecutions, activeTurn.webSources, createTool(activeTurn)))));
-				})
+									activeTurn.toolExecutions, activeTurn.webSources, createTool(activeTurn))));
+				}))
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
 					synchronized (state) {
@@ -1499,7 +1502,7 @@ public class ThreadMessageDispatcher {
 
 		/** 지금 실행 중인 도구(이슈 #413 결정 7) — 들어온 화면에 진행 표시를 바로 보내려고 하나만 기억한다. 도구 실행
 		 * 스레드가 쓰고 구독 스레드가 읽는다. */
-		private volatile ToolActivity currentActivity;
+		private final AtomicReference<ToolActivity> currentActivity = new AtomicReference<>();
 
 		/** 지금까지 생성된 답변. 스트림 스레드가 쓰고 취소하는 스레드가 읽어서 StringBuffer다(이슈 #160). */
 		private final StringBuffer content = new StringBuffer();
@@ -1575,7 +1578,8 @@ public class ThreadMessageDispatcher {
 			}
 
 			private void broadcast(ToolActivity activity, boolean active) {
-				currentActivity = active ? activity : null;
+				// 끝난 도구가 지금 기억한 도구일 때만 비운다 — 도구가 둘 겹쳐 돌면 먼저 끝난 쪽이 다른 도구의 표시를 지웠다.
+				currentActivity.updateAndGet(current -> active ? activity : activity.equals(current) ? null : current);
 				if (terminalClaimed.get()) return;
 				send(activity, active);
 				// 위 확인과 넣기 사이에 턴이 끝났으면 "시작"이 종료 프레임 뒤에 들어갔을 수 있다 — 그러면 화면은 지울
