@@ -429,10 +429,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 돌려주는 것뿐이라 FIFO·레이트리밋(#74)을 소모하지 않는다.
 	*
 	* 그 턴이 아직 살아있으면(진행 중이거나 FIFO 대기 중이거나 워커가 아직 안 꺼낸 —
-	* ThreadMessageDispatcher.liveAnswer 참고) 지금까지 누적된 내용(대기
-	* 중이면 빈 문자열)을 그 turnId로 담아 보낸다 — mergeOtherTurnAnswer(프런트)의 "처음 본
-	* 프레임=시작 텍스트" 경로가 캐치업 역할을 한다. 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
-	* 저장된 결과를, FAILED면 ChatAnswerStatus에 FAILED가 없어 ErrorFrame을 대신 보낸다. DB는
+	* ThreadMessageDispatcher.liveAnswer 참고) 지금까지 누적된 내용(대기 중이면 빈 문자열)을 content에 담아 보낸다 —
+	* 화면은 content로 앞부분을 맞추고 이어 오는 조각은 위치로 붙인다(이슈 #413). 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
+	* 저장된 결과를, FAILED면 failed 프레임과 배너용 ErrorFrame을 함께 보낸다(옛 화면은 failed를 몰라 ErrorFrame만 본다). DB는
 	* PENDING인데 메모리 어디에도(활성·대기·인플라이트) 없으면(서버 재시작 등으로 진짜 고아)
 	* 새 발화로 복구한다.
 	*/
@@ -479,8 +478,15 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 					List.of(), false, ChatAnswerStatus.DENIED, null, null));
 			// 실패 원인을 저장하지 않아 여기서는 모델 오류인지 턴 제한 초과인지 모른다 — MODEL_UNAVAILABLE이면
 			// 화면이 API 키 안내를 띄우므로 원인을 단정하지 않는 INTERNAL_ERROR로 알린다(이슈 #389).
-			case FAILED -> Mono.<WsFrame>just(new ErrorFrame(threadId, "INTERNAL_ERROR",
-					"이전 시도에서 응답을 만들지 못했습니다.", traceId));
+			case FAILED -> {
+				// 그 답이 실패였다는 것은 msgId를 단 failed 프레임으로 이 연결에 알린다(이슈 #413) — 말풍선에 "답변을 만들지
+				// 못했습니다"가 뜬다. 배너 문구는 아래 ErrorFrame이 맡는다.
+				connection.send(new ChatAnswerFrame(threadId, stored.agentMessageId(), inbound.turnId(),
+						threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "", List.of(), false,
+						ChatAnswerStatus.FAILED, null, null, null, "", true, null));
+				yield Mono.<WsFrame>just(new ErrorFrame(threadId, "INTERNAL_ERROR",
+						"이전 시도에서 응답을 만들지 못했습니다.", traceId));
+			}
 			case PENDING -> recoverOrphanedDirect(threadId, roomGeneration, connection, actor, inbound, files,
 					traceId, stored);
 		};

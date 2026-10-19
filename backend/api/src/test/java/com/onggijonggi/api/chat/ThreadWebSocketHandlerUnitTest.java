@@ -562,6 +562,9 @@ class ThreadWebSocketHandlerUnitTest {
 		assertThat(sent).anyMatch(frame -> frame.contains("\"type\":\"error\"")
 				&& frame.contains("\"code\":\"INTERNAL_ERROR\""));
 		assertThat(sent).noneMatch(frame -> frame.contains("MODEL_UNAVAILABLE"));
+		// 그 답이 실패였다는 것은 msgId를 단 failed 프레임으로도 온다(이슈 #413) — 말풍선에 실패가 뜬다.
+		assertThat(sent).anyMatch(frame -> frame.contains("\"type\":\"chat.answer\"")
+				&& frame.contains("\"status\":\"failed\""));
 		verify(llm, never()).streamChat(any());
 	}
 

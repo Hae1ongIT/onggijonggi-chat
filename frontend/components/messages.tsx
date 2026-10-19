@@ -18,7 +18,7 @@ interface MessagesProps {
   isLoading: boolean;
   messages: Array<RenderedMessage>;
   citationsByMessageId: Record<string, CitationsState>;
-  /** DIRECT 전용(이슈 #162, §3.2) — done이 아닌 message.id만 들어 있다. */
+  /** 평범하게 끝나지 않은(중단·거부·실패) 답변의 message.id만 들어 있다(이슈 #162 §3.2·#413). */
   terminalStatusByMessageId: Record<string, TerminalStatus>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;

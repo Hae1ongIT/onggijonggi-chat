@@ -1257,6 +1257,8 @@ public class ThreadMessageDispatcher {
 		List<Mono<Void>> persistences = new ArrayList<>();
 		if (activeTurn != null && activeTurn.claimTerminal()) {
 			persistences.add(persistAgentFailure(activeTurn, MsgStatus.FAILED));
+			// 붙어 있는 화면의 말풍선이 "생성 중"에 남지 않게 실패를 한 번 알린다 — 통로가 고장이면 이것도 못 갈 수 있다.
+			broadcastQuietly(state.threadId, endFrame(activeTurn, ChatAnswerStatus.FAILED, "", List.of()));
 		}
 		if (state.kind == ThrKind.DIRECT) {
 			pendingTurns.forEach(turn -> {

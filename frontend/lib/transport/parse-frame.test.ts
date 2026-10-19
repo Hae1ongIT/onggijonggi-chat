@@ -2,6 +2,35 @@ import { describe, expect, it } from 'vitest';
 import { parseFrame, parseFrameFromText } from './parse-frame';
 
 describe('parseFrame', () => {
+  it('chat.answer의 실패 상태와 전체 내용·위치·mine을 받는다(이슈 #413)', () => {
+    const failed = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'failed',
+      groundingNotice: null,
+      agent: null,
+      offset: null,
+      content: '',
+      mine: true,
+    };
+    expect(parseFrame(failed)).toEqual(failed);
+    const done = {
+      ...failed,
+      status: 'done',
+      content: '최종 답',
+      offset: 3,
+      mine: false,
+    };
+    expect(parseFrame(done)).toEqual(done);
+  });
+
   it('chat.answer를 파싱한다 (delta만)', () => {
     const frame = parseFrame({
       type: 'chat.answer',
