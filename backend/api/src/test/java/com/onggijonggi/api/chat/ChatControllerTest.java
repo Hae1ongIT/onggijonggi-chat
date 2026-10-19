@@ -14,10 +14,13 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.client.EntityExchangeResult;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * Class Name : ChatControllerTest.java
@@ -43,6 +46,10 @@ class ChatControllerTest {
 
 	@Autowired
 	private DirectChatTurnService directChatTurnService;
+
+	/** 방을 지우면 그 방의 AI 작업도 끊는지(이슈 #413) 보려고 감싼다. */
+	@MockitoSpyBean
+	private ThreadMessageDispatcher threadMessageDispatcher;
 
 	private RestTestClient restTestClient;
 
@@ -228,6 +235,7 @@ class ChatControllerTest {
 				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("testuser", List.of("USER")))
 				.exchange()
 				.expectStatus().isEqualTo(HttpStatus.NO_CONTENT);
+		verify(threadMessageDispatcher).discard(UUID.fromString(sessionId));
 
 		restTestClient.get()
 				.uri("/api/chat/sessions/{sessionId}/messages", sessionId)
@@ -247,6 +255,7 @@ class ChatControllerTest {
 				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("otheruser", List.of("USER")))
 				.exchange()
 				.expectStatus().isEqualTo(HttpStatus.NOT_FOUND);
+		verify(threadMessageDispatcher, never()).discard(UUID.fromString(sessionId));
 
 		restTestClient.get()
 				.uri("/api/chat/sessions/{sessionId}/messages", sessionId)
@@ -353,6 +362,7 @@ class ChatControllerTest {
 				.header(HttpHeaders.AUTHORIZATION, token)
 				.exchange()
 				.expectStatus().isNoContent();
+		verify(threadMessageDispatcher).discard(UUID.fromString(sessionId));
 
 		restTestClient.get()
 				.uri("/api/chat/sessions/{sessionId}/messages", sessionId)
