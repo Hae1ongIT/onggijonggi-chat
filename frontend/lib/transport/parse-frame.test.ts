@@ -2,6 +2,35 @@ import { describe, expect, it } from 'vitest';
 import { parseFrame, parseFrameFromText } from './parse-frame';
 
 describe('parseFrame', () => {
+  it('chat.answer의 실패 상태와 전체 내용·위치·mine을 받는다(이슈 #413)', () => {
+    const failed = {
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [],
+      restrictedResultsOmitted: false,
+      status: 'failed',
+      groundingNotice: null,
+      agent: null,
+      offset: null,
+      content: '',
+      mine: true,
+    };
+    expect(parseFrame(failed)).toEqual(failed);
+    const done = {
+      ...failed,
+      status: 'done',
+      content: '최종 답',
+      offset: 3,
+      mine: false,
+    };
+    expect(parseFrame(done)).toEqual(done);
+  });
+
   it('chat.answer를 파싱한다 (delta만)', () => {
     const frame = parseFrame({
       type: 'chat.answer',
@@ -55,6 +84,41 @@ describe('parseFrame', () => {
     }
   });
 
+  it('chat.answer의 웹 출처(docId·chunkId·loc null)와 kind 없는 과거 근거, read가 null인 근거를 함께 받는다(이슈 #401)', () => {
+    const web = {
+      kind: 'WEB',
+      docId: null,
+      title: 'Guides',
+      snippet: '요약',
+      score: 0,
+      chunkId: null,
+      loc: null,
+      url: 'https://spring.io/guides',
+      query: '스프링',
+      read: true,
+    };
+    const legacy = { docId: 'd1', title: '제목', snippet: '발췌', score: 0.9 };
+    const readUnknown = { ...web, url: 'https://b.com/', read: null };
+    const frame = parseFrame({
+      type: 'chat.answer',
+      threadId: 's1',
+      msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
+      seq: 1,
+      delta: '',
+      citations: [legacy, web, readUnknown],
+      restrictedResultsOmitted: false,
+      status: 'done',
+      groundingNotice: null,
+      agent: null,
+    });
+    expect(frame?.type).toBe('chat.answer');
+    if (frame?.type === 'chat.answer') {
+      expect(frame.citations).toEqual([legacy, web, readUnknown]);
+    }
+  });
+
   it('citations가 빈 배열이어도 restrictedResultsOmitted가 true일 수 있다(전부 걸러진 경우)', () => {
     const frame = parseFrame({
       type: 'chat.answer',
@@ -91,12 +155,12 @@ describe('parseFrame', () => {
       status: 'streaming',
       agent: null,
     };
-    expect(
-      parseFrame({ ...base, groundingNotice: 'no_evidence' })?.type,
-    ).toBe('chat.answer');
-    expect(
-      parseFrame({ ...base, groundingNotice: 'unavailable' })?.type,
-    ).toBe('chat.answer');
+    expect(parseFrame({ ...base, groundingNotice: 'no_evidence' })?.type).toBe(
+      'chat.answer',
+    );
+    expect(parseFrame({ ...base, groundingNotice: 'unavailable' })?.type).toBe(
+      'chat.answer',
+    );
   });
 
   it('groundingNotice가 빠지거나 모르는 값이면 null(필수 필드)', () => {
@@ -114,7 +178,9 @@ describe('parseFrame', () => {
       agent: null,
     };
     expect(parseFrame(base)).toBeNull();
-    expect(parseFrame({ ...base, groundingNotice: 'something_else' })).toBeNull();
+    expect(
+      parseFrame({ ...base, groundingNotice: 'something_else' }),
+    ).toBeNull();
   });
 
   it('chat.answer의 status:"done"을 파싱한다', () => {
@@ -566,4 +632,25 @@ describe('parseFrame — system.notice(#29)', () => {
     });
   });
 
+  it('chat.activity를 파싱하고, 모르는 kind도 받는다(이슈 #397)', () => {
+    const frame = {
+      type: 'chat.activity',
+      threadId: 't',
+      msgId: 'm',
+      turnId: null,
+      kind: 'SOMETHING_NEW',
+      target: null,
+      active: true,
+      agent: 'fin',
+    };
+    expect(parseFrame(frame)).toEqual(frame);
+    const { active: _active, ...withoutActive } = frame;
+    expect(parseFrame(withoutActive)).toBeNull();
+    expect(parseFrame({ ...frame, target: '서울 날씨' })).toEqual({
+      ...frame,
+      target: '서울 날씨',
+    });
+    expect(parseFrame({ ...frame, active: 'true' })).toBeNull();
+    expect(parseFrame({ ...frame, agent: 'xyz' })).toBeNull();
+  });
 });

@@ -7,6 +7,7 @@
  *********************************************************/
 
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
+import type { TerminalStatus } from '@/lib/chat/room-state';
 import cx from 'classnames';
 import equal from 'fast-deep-equal';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -15,10 +16,11 @@ import { memo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { MessageAttachments } from './attachments';
 import { CitationsPanel, type CitationsState } from './citations-panel';
-import { PencilEditIcon, SparklesIcon } from './icons';
+import { LoaderIcon, PencilEditIcon, SparklesIcon } from './icons';
 import { Markdown } from './markdown';
 import { MessageActions } from './message-actions';
 import { MessageEditor } from './message-editor';
+import { TerminalStatusNote } from './terminal-status-note';
 import { Button } from './ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -41,9 +43,9 @@ const PurePreviewMessage = ({
   isLoading: boolean;
   isLastMessage: boolean;
   citations?: CitationsState;
-  /** DIRECT 전용(이슈 #162, §3.2) — DENIED는 실패 안내, CANCELLED는 본문 유무에 따라
-   * "중단됨" 배지 또는 빈 말풍선 대신 중단 안내로 갈린다. */
-  terminalStatus?: 'cancelled' | 'denied';
+  /** 평범하게 끝나지 않은 사유(이슈 #162, §3.2·#413). 본문이 있으면 그 아래 덧붙고, 없으면(빈 채 중단·거부·실패) 빈
+   * 말풍선 대신 이 안내가 유일한 표시가 된다. */
+  terminalStatus?: TerminalStatus;
   failed?: boolean;
   onResend?: () => void;
   onAppendTurn: (content: string) => void;
@@ -115,20 +117,11 @@ const PurePreviewMessage = ({
               </div>
             )}
 
-            {/* CANCELLED — 본문이 있으면 위에서 이미 그린 말풍선에 "중단됨"만 덧붙이고, 본문이
-             * 없으면(위 블록은 message.content를 요구해 아무것도 안 그린다) 빈 말풍선 대신 이
-             * 안내가 유일한 표시가 된다(이슈 #162, §3.2). */}
-            {message.role === 'assistant' && terminalStatus === 'cancelled' && (
-              <span className="text-sm text-muted-foreground">
-                응답이 중단되었습니다.
-              </span>
-            )}
-
-            {/* DENIED는 AGENT 행 자체가 본문 없이 끝나 항상 이 안내로만 보인다(이슈 #162, §3.2). */}
-            {message.role === 'assistant' && terminalStatus === 'denied' && (
-              <span className="text-sm text-destructive">
-                요청이 많아 이번 응답은 처리되지 않았습니다. 다시 시도해 주세요.
-              </span>
+            {/* 중단 — 본문이 있으면 위에서 이미 그린 말풍선에 덧붙고, 본문이 없으면(위 블록은 message.content를
+             * 요구해 아무것도 안 그린다) 빈 말풍선 대신 이 안내가 유일한 표시가 된다(이슈 #162, §3.2). 거부·실패는 본문
+             * 없이 끝나 항상 이 안내로만 보인다(실패는 이슈 #413 결정 8). */}
+            {message.role === 'assistant' && (
+              <TerminalStatusNote status={terminalStatus} />
             )}
 
             {message.role === 'user' && citations && (
@@ -196,7 +189,8 @@ export const PreviewMessage = memo(
   },
 );
 
-export const ThinkingMessage = () => {
+/** 답변 첫 조각을 기다리는 동안의 자리. AI가 도구를 실행 중이면 그 문구를 대신 보인다(이슈 #397). */
+export const ThinkingMessage = ({ label }: { label?: string | null }) => {
   const role = 'assistant';
 
   return (
@@ -219,11 +213,41 @@ export const ThinkingMessage = () => {
         </div>
 
         <div className="flex flex-col gap-2 w-full">
-          <div className="flex flex-col gap-4 text-muted-foreground">
-            Thinking...
-          </div>
+          {/* 도구가 돌면 그 문구를 스피너와 함께 보인다 — 답변 아래 진행 줄(ActivityLine)과 같은 모양. */}
+          {label ? (
+            <ActivityLine label={label} className="" />
+          ) : (
+            <div className="text-muted-foreground">생각 중…</div>
+          )}
         </div>
       </div>
     </motion.div>
   );
 };
+
+/** 흐르는 AI 답변 아래에 붙는 도구 실행 중 한 줄(이슈 #397). */
+export const ActivityLine = ({
+  label,
+  className = 'w-full mx-auto max-w-3xl px-4',
+}: {
+  label: string;
+  /** 자리 잡기. 1:1 목록 폭이 기본이고, 협업방처럼 말풍선 안에 넣을 때는 비운다. */
+  className?: string;
+}) => (
+  <div
+    className={cn(
+      className,
+      'flex items-center gap-2 text-sm text-muted-foreground',
+    )}
+    role="status"
+  >
+    <span
+      className="shrink-0 animate-spin motion-reduce:animate-none"
+      aria-hidden="true"
+    >
+      <LoaderIcon size={14} />
+    </span>
+    {/* 대상은 공백 없는 긴 주소·파일 이름일 수 있다 — 줄을 넘기지 않으면 좁은 화면에서 말풍선이 옆으로 넘친다. */}
+    <span className="min-w-0 break-words">{label}</span>
+  </div>
+);

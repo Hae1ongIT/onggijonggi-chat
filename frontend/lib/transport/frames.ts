@@ -47,8 +47,9 @@ export interface ChatAnswerFrame {
   delta: string;
   citations: Citation[];
   restrictedResultsOmitted: boolean;
-  /** cancelled·denied는 DIRECT 전용이다(이슈 #162) — COLLAB은 지금처럼 streaming·done만 쓴다. */
-  status: 'streaming' | 'done' | 'cancelled' | 'denied';
+  /** 협업방 중지도 cancelled다(이슈 #413) — 예전엔 done이었다. denied는 1:1 전용이다(이슈 #162). failed는 실패한
+   * 답이다(이슈 #413) — 받은 내용은 버려져 비고, 같은 실패의 오류 프레임(error)이 배너 문구를 따로 싣는다. */
+  status: 'streaming' | 'done' | 'cancelled' | 'denied' | 'failed';
   /** 방 문서 검색(#344)이 FOUND가 아니었을 때만 채워진다(이슈 #353). 재접속 복원 대상이
    * 아니라 그 턴에만 실려 오는 일시적 안내다. */
   groundingNotice: 'no_evidence' | 'unavailable' | null;
@@ -56,6 +57,14 @@ export interface ChatAnswerFrame {
    * #357). `@AI`로 답했거나 1:1 방이면 null이다. groundingNotice와 달리 메시지에 저장돼
    * 재접속 후에도 복원된다. */
   agent: 'sol' | 'fin' | 'law' | null;
+  /** streaming 조각의 delta가 답변의 몇 번째 글자(UTF-16 단위 — JS string.length와 같다)부터인지(이슈 #413). 화면은
+   * 이미 가진 범위를 버려 들어올 때 받은 내용과 겹쳐도 글자가 중복되지 않는다. 없으면(옛 서버) 이어 붙인다. */
+  offset?: number | null;
+  /** 답변 처음부터 그 시점까지 전체(이슈 #413) — 끝 프레임의 최종 내용, 방에 들어올 때의 지금까지 내용, 1:1 재전송.
+   * delta가 아니라 여기 싣는 것은 옛 화면이 delta를 이어 붙여 글자가 두 번 보이기 때문이다. */
+  content?: string | null;
+  /** 받는 사람이 이 턴을 요청한 사람인지(이슈 #413). 돌아온 요청자에게 중지 버튼을 띄운다. 모르면 null이다. */
+  mine?: boolean | null;
 }
 
 /**
@@ -185,9 +194,9 @@ export interface SystemNoticeFrame {
  * 있는가"를 다루는 것과 달리 이쪽은 "이 방의 참여자인가"다 — 접속 중이 아닌 사람이 초대되는
  * 경우처럼 presence로는 표현되지 않는 변화가 있어 타입이 따로 있다.
  *
- * action으로 분기하지 않고 명단 재조회 트리거로만 쓴다. 서버가 값을 다섯으로 나눈 것은
- * 나중에 액션별 시스템 메시지가 필요해졌을 때를 위한 것이라, 지금 화면이 그 값을 해석할
- * 이유가 없다 — 어느 액션이든 "다시 불러와"가 정답이다.
+ * 명단은 action과 상관없이 다시 불러온다 — 어느 액션이든 "다시 불러와"가 정답이다. 다만
+ * 참가자가 되거나 빠진 변경(INVITED·REMOVED)은 서버가 대화 흐름에 입퇴장 줄을 남기고 그 줄의
+ * msgId·seq를 함께 싣는다. 화면은 이력을 다시 읽지 않고 그 자리에 줄을 넣는다.
  */
 export interface ParticipantChangedFrame {
   type: 'participant.changed';
@@ -200,6 +209,39 @@ export interface ParticipantChangedFrame {
   action: string;
   subject: string;
   displayName: string;
+  /** 이 변경으로 남은 입퇴장 줄의 id(이력 MsgItem.id와 같다). 줄을 남기지 않은 변경이면 null이다. */
+  msgId: string | null;
+  /** 그 줄의 seq. msgId와 함께 채워진다. */
+  seq: number | null;
+}
+
+/**
+ * 승인 요청이 생겼거나 승인·반려로 처리됐음을 방 전체에 알린다(이슈 #407). 요청한 메시지의 내용은 싣지 않는다 —
+ * 토스트·모달은 화면이 requesterSubject·targetSubject가 자기 자신인지로 띄울지 정하고, 내용은 REST 목록에서 읽는다.
+ * 저장하지 않으므로 접속하지 않았던 사람은 목록 조회로 대기 중인 요청을 본다. 사건마다 대화 흐름에 승인 줄이
+ * 남고, 그 줄의 msgId·seq를 함께 싣는다.
+ */
+export interface ApprovalChangedFrame {
+  type: 'approval.changed';
+  threadId: string;
+  approvalId: string;
+  /**
+   * 서버가 지금 보내는 값은 REQUESTED·APPROVED·REJECTED 셋이지만 union으로 좁히지 않는다 —
+   * participant.changed의 action과 같은 판단이다.
+   */
+  event: string;
+  requesterSubject: string;
+  requesterDisplayName: string;
+  targetSubject: string;
+  targetDisplayName: string;
+  /** 이 사건으로 남은 승인 줄의 id. 줄을 남기지 못했으면 null이다. */
+  msgId: string | null;
+  /** 그 줄의 seq. msgId와 함께 채워진다. */
+  seq: number | null;
+  /** 승인을 요청한 원글의 id(이슈 #416). 이 필드가 없던 서버가 보낸 줄이면 null이다. */
+  originMsgId: string | null;
+  /** 반려 사유(이슈 #416). 반려가 아니거나 사유를 적지 않았으면 null이다. */
+  reason: string | null;
 }
 
 /**
@@ -241,6 +283,33 @@ export interface ChatTypingFrame {
   active: boolean;
 }
 
+/**
+ * presence가 없는 방(DIRECT)의 구독이 걸렸다는 답(이슈 #382). COLLAB 방의 presence.snapshot과 같은
+ * 자리에 오고, 방 상태에 접을 것은 없다 — 선제 갱신이 새 소켓의 구독 완료를 아는 데만 쓴다
+ * (ws-connection.ts).
+ */
+export interface RoomSubscribedFrame {
+  type: 'room.subscribed';
+  threadId: string;
+}
+
+/**
+ * AI 턴이 도구를 실행하기 시작했거나(active=true) 끝냈음(false)을 알린다(이슈 #397). 서버는 저장하지 않고,
+ * 이미 끝난 턴의 늦은 알림은 보내지 않는다(시작이 턴 종료와 엇갈리면 끝을 바로 이어 보낸다). msgId는 chat.answer의 msgId와 같은 턴 식별자다. kind는 종류
+ * 코드이고 문구는 화면이 고른다(lib/chat/activity.ts) — 모르는 코드도 받는다. target은 검색어·주소·파일
+ * 이름처럼 그 도구가 다루는 대상이다.
+ */
+export interface ChatActivityFrame {
+  type: 'chat.activity';
+  threadId: string;
+  msgId: string;
+  turnId: string | null;
+  kind: string;
+  target: string | null;
+  active: boolean;
+  agent: ChatAnswerFrame['agent'];
+}
+
 /** 서버 WsFrame과 대응하는 전체 유니온. 새 타입이 추가되면 여기 한 곳만 넓히면 되고,
  * frame-router.ts의 exhaustive switch가 미처리 케이스를 컴파일 타임에 잡아준다. */
 export type WsFrame =
@@ -254,7 +323,10 @@ export type WsFrame =
   | WsErrorFrame
   | ChatQueuedFrame
   | PongFrame
-  | ChatTypingFrame;
+  | ChatTypingFrame
+  | RoomSubscribedFrame
+  | ApprovalChangedFrame
+  | ChatActivityFrame;
 
 /** WsFrame 서브타입의 type 태그 리터럴만 뽑은 유니온. parse-frame.ts의 태그 검증에 쓴다. */
 export type WsFrameType = WsFrame['type'];

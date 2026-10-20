@@ -70,7 +70,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	private static final int TYPING_PER_WINDOW = 60;
 
 	private static final Set<String> SERVER_ONLY_TYPES = Set.of("chat.answer", "presence.join",
-			"presence.leave", "presence.snapshot", "error", "system.notice", "chat.queued", "pong");
+			"presence.leave", "presence.snapshot", "error", "system.notice", "chat.queued", "pong",
+			"room.subscribed");
 
 	private final ObjectMapper objectMapper;
 
@@ -222,9 +223,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 							connection.id(), signal, Duration.between(now, Instant.now()).toMillis());
 					// 닫힘 표시를 먼저 한다 — 이 뒤에 끝나는 구독 요청은 스스로 방에서 빠진다(subscribe).
 					connection.markClosed();
+					// 비게 된 방을 알리기만 한다 — AI 작업은 연결과 떨어져 끝까지 간다(이슈 #413).
 					roomSessionRegistry.leaveAll(connection.id(), connection.actor())
-							.forEach((threadId, generation) -> threadMessageDispatcher.closeGeneration(threadId,
-									generation));
+							.forEach((threadId, generation) -> threadMessageDispatcher.roomVacated(threadId));
 				});
 	}
 
@@ -367,7 +368,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 														files, inbound.model(), inbound.timeZone(),
 														inbound.clientMsgId(), inbound.turnId(), connection.id(), traceId,
 														toReservedTurn(stored)),
-												roomGeneration.get(), traceId))
+												traceId))
 								.onErrorResume(IdempotencyKeyConflictException.class,
 										error -> Mono.just(idempotencyConflict(threadId, traceId)))
 								.onErrorResume(error -> reportDirectReserveFailure(threadId, roomGeneration.get(),
@@ -381,7 +382,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 					// 구독 뒤에 워크스페이스를 못 보게 된 사람(인사이동 등)도 참가자 재확인과 같은 이유로 여기서 막는다.
 					return threadMembershipService.canEnterWorkspace(threadId, actor.subject())
 							.flatMap(inWorkspace -> inWorkspace
-									? rejectIfLocked(command, roomGeneration.get(), traceId, authorizationEpoch)
+									? rejectIfLocked(command, traceId, authorizationEpoch)
 									: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
 											"이 방에 메시지를 보낼 권한이 없습니다.", traceId)));
 				})
@@ -428,10 +429,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 돌려주는 것뿐이라 FIFO·레이트리밋(#74)을 소모하지 않는다.
 	*
 	* 그 턴이 아직 살아있으면(진행 중이거나 FIFO 대기 중이거나 워커가 아직 안 꺼낸 —
-	* ThreadMessageDispatcher.activeTurnContentIfMatches 참고) 지금까지 누적된 내용(대기
-	* 중이면 빈 문자열)을 그 turnId로 담아 보낸다 — mergeOtherTurnAnswer(프런트)의 "처음 본
-	* 프레임=시작 텍스트" 경로가 캐치업 역할을 한다. 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
-	* 저장된 결과를, FAILED면 ChatAnswerStatus에 FAILED가 없어 ErrorFrame을 대신 보낸다. DB는
+	* ThreadMessageDispatcher.liveAnswer 참고) 지금까지 누적된 내용(대기 중이면 빈 문자열)을 content에 담아 보낸다 —
+	* 화면은 content로 앞부분을 맞추고 이어 오는 조각은 위치로 붙인다(이슈 #413). 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
+	* 저장된 결과를, FAILED면 failed 프레임과 배너용 ErrorFrame을 함께 보낸다(옛 화면은 failed를 몰라 ErrorFrame만 본다). DB는
 	* PENDING인데 메모리 어디에도(활성·대기·인플라이트) 없으면(서버 재시작 등으로 진짜 고아)
 	* 새 발화로 복구한다.
 	*/
@@ -447,12 +447,19 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 			// echo 재방송 실패는 무시한다 — 낙관적 렌더링이 이미 화면에 있어 치명적이지 않다.
 		}
 
-		Optional<String> streaming = threadMessageDispatcher.activeTurnContentIfMatches(threadId, roomGeneration,
-				stored.agentMessageId());
-		if (streaming.isPresent()) {
+		// 지금까지 내용은 delta가 아니라 content에 싣는다(이슈 #413 결정 12) — delta에 실으면 이어 오는 조각과 겹쳐
+		// 글자가 두 번 보였다(이슈 #413). 화면은 content로 앞부분을 맞추고 조각은 위치(offset)로 이어 붙인다.
+		// 이미 끝 프레임을 냈지만 다음 턴으로 넘어가기 전이면 그 끝 프레임으로 답한다 — 흐르는 중으로 답하면 끝 프레임이
+		// 이미 지나가 화면이 "생성 중"에 머문다(이슈 #413).
+		Optional<ThreadMessageDispatcher.LiveAnswer> live =
+				threadMessageDispatcher.liveAnswer(threadId, stored.agentMessageId());
+		if (live.isPresent()) {
+			if (live.get().endFrame() != null) {
+				return Mono.<WsFrame>just(live.get().endFrame().forRecipient(actor.subject()));
+			}
 			return Mono.<WsFrame>just(new ChatAnswerFrame(threadId, stored.agentMessageId(), inbound.turnId(),
-					threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), streaming.get(),
-					List.of(), false, ChatAnswerStatus.STREAMING, null, null));
+					threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "", List.of(), false,
+					ChatAnswerStatus.STREAMING, null, null, null, live.get().content(), true, null));
 		}
 
 		return switch (stored.agentStatus()) {
@@ -460,18 +467,26 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 					.fromCallable(() -> directChatTurnService.findAgentMessage(stored.agentMessageId()))
 					.subscribeOn(Schedulers.boundedElastic())
 					.map(msg -> (WsFrame) new ChatAnswerFrame(threadId, stored.agentMessageId(), inbound.turnId(),
-							threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(),
-							msg.map(Msg::getContent).orElse(""),
+							threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "",
 							msg.map(m -> Citation.fromSrcJson(objectMapper, m.getSrcJson())).orElse(List.of()), false,
-							ChatAnswerStatus.DONE, null, null));
+							ChatAnswerStatus.DONE, null, null, null, msg.map(Msg::getContent).orElse(""), true, null));
 			case CANCELLED -> Mono.<WsFrame>just(new ChatAnswerFrame(threadId, stored.agentMessageId(),
 					inbound.turnId(), threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "",
 					List.of(), false, ChatAnswerStatus.CANCELLED, null, null));
 			case DENIED -> Mono.<WsFrame>just(new ChatAnswerFrame(threadId, stored.agentMessageId(),
 					inbound.turnId(), threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "",
 					List.of(), false, ChatAnswerStatus.DENIED, null, null));
-			case FAILED -> Mono.<WsFrame>just(new ErrorFrame(threadId, "MODEL_UNAVAILABLE",
-					"이전 시도에서 응답을 만들지 못했습니다.", traceId));
+			// 실패 원인을 저장하지 않아 여기서는 모델 오류인지 턴 제한 초과인지 모른다 — MODEL_UNAVAILABLE이면
+			// 화면이 API 키 안내를 띄우므로 원인을 단정하지 않는 INTERNAL_ERROR로 알린다(이슈 #389).
+			case FAILED -> {
+				// 그 답이 실패였다는 것은 msgId를 단 failed 프레임으로 이 연결에 알린다(이슈 #413) — 말풍선에 "답변을 만들지
+				// 못했습니다"가 뜬다. 배너 문구는 아래 ErrorFrame이 맡는다.
+				connection.send(new ChatAnswerFrame(threadId, stored.agentMessageId(), inbound.turnId(),
+						threadMessageDispatcher.resolveModelId(inbound.model()), stored.agentSeq(), "", List.of(), false,
+						ChatAnswerStatus.FAILED, null, null, null, "", true, null));
+				yield Mono.<WsFrame>just(new ErrorFrame(threadId, "INTERNAL_ERROR",
+						"이전 시도에서 응답을 만들지 못했습니다.", traceId));
+			}
 			case PENDING -> recoverOrphanedDirect(threadId, roomGeneration, connection, actor, inbound, files,
 					traceId, stored);
 		};
@@ -494,7 +509,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 						new ChatMessageCommand(threadId, ThrKind.DIRECT, connection.userId(), actor.subject(),
 								actor.displayName(), inbound.content(), files, inbound.model(), inbound.timeZone(),
 								inbound.clientMsgId(), inbound.turnId(), connection.id(), traceId, toReservedTurn(fresh)),
-						roomGeneration, traceId))
+						traceId))
 				.onErrorResume(error -> reportDirectReserveFailure(threadId, roomGeneration, inbound.turnId(),
 						traceId, error));
 	}
@@ -579,7 +594,7 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 				actor.subject(), actor.displayName(), inbound.content(), files, inbound.model(),
 				inbound.timeZone(), inbound.clientMsgId(), inbound.turnId(), connection.id(), traceId,
 				toReservedTurn(stored));
-		return rejectIfLocked(command, generation.get(), traceId);
+		return rejectIfLocked(command, traceId);
 	}
 
 	/** DIRECT 자동 생성 제목 — 첫 HUMAN 발화를 trim하고 50자를 넘으면 자른다(#158/#159와 동일 규칙). */
@@ -589,8 +604,8 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	}
 
 	/**
-	* 취소는 DB를 보지 않는다 — 멈출 대상은 메모리에 있는 턴이고, 어느 커넥션이 불렀는지도 디스패처가
-	* 들고 있다. 참가자 재확인을 하지 않는 이유도 같다: 방에서 빠진 사람이 자기가 띄운 턴을 거두는 것을
+	* 취소는 DB를 보지 않는다 — 멈출 대상은 메모리에 있는 턴이고, 누가 불렀는지도 디스패처가
+	* 들고 있다. 보낸 연결이 아니라 사람(subject)으로 찾아, 요청한 사람은 방을 떠났다 돌아와도 멈출 수 있다(이슈 #413). 참가자 재확인을 하지 않는 이유도 같다: 방에서 빠진 사람이 자기가 띄운 턴을 거두는 것을
 	* 막을 이유가 없다. 발화 빈도 제한(#74)에도 세지 않는다 — 발화가 아니고 비용도 없다.
 	*
 	* 이 커넥션이 구독하지 않은 방의 취소는 찾을 턴이 없는 것과 같다 — 조용히 넘어간다.
@@ -609,12 +624,12 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 						return threadMembershipService.isActiveDirectOwner(inbound.threadId(), connection.userId())
 								.flatMap(owner -> owner
 										? Mono.<WsFrame>fromRunnable(() -> threadMessageDispatcher.cancel(inbound.threadId(),
-												generation.get(), inbound.turnId(), connection.id()))
+												inbound.turnId(), connection.actor().subject()))
 										: Mono.just(new ErrorFrame(inbound.threadId(), "FORBIDDEN",
 												"이 방의 AI 응답을 취소할 권한이 없습니다.", traceId)));
 					}
 					if (kind.isPresent()) {
-						threadMessageDispatcher.cancel(inbound.threadId(), generation.get(), inbound.turnId(), connection.id());
+						threadMessageDispatcher.cancel(inbound.threadId(), inbound.turnId(), connection.actor().subject());
 					}
 					return Mono.empty();
 				});
@@ -685,9 +700,11 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 아니라 이 구독의 값이라 방 버퍼 밖에서 맨 앞에 붙인다 — 클라이언트는 이것을 구독 완료로 읽는다.
 	* presenceEnabled가 false면(DIRECT, 이슈 #162) presence 자체가 없는 방이라 스냅샷을 붙이지
 	* 않는다 — 붙이면 클라이언트가 참가자 0명짜리 presence 상태를 만들어야 하는 의미 없는 부담이 된다.
+	* 대신 구독 완료만 알리는 {@link RoomSubscribedFrame}을 붙인다(이슈 #382).
 	*
-	* 강제 해지(evict)와 버퍼 넘침 신호는 방송·evict를 부른 스레드가 방 상태 잠금을 쥔 채 낸다. 그
-	* 자리에서 곧장 leave를 부르면 순회 중인 연결 목록을 고치게 되므로 스레드를 옮겨 처리한다.
+	* 강제 해지(kicked)는 registry의 방 대기열을 비우는 스레드에서, 버퍼 넘침은 그 스레드가 방 프레임을
+	* 내보내는 중에 온다(이슈 #405 — registry는 잠금을 쥔 채 내보내지 않는다). 그 스레드가 이 방의 남은
+	* 대기열을 계속 비우도록 해지 처리는 스레드를 옮겨서 한다.
 	*/
 	private void subscribe(Connection connection, UUID threadId, boolean presenceEnabled) {
 		RoomSessionRegistry.RoomMembership membership =
@@ -700,20 +717,25 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 
 		Sinks.One<Void> overflow = Sinks.one();
 		// 입력 중 알림은 본인(같은 사람의 다른 탭 포함)에게 돌려보내지 않는다 — 방송은 sink 하나를 방 전체가
-		// 공유하므로 받는 쪽에서 거른다.
+		// 공유하므로 받는 쪽에서 거른다. 같은 까닭으로 답변 프레임의 "내가 요청한 턴인지"(mine)도 여기서 채운다(이슈 #413).
 		String subject = connection.actor().subject();
 		Flux<WsFrame> roomFrames = bufferForRoom(membership.frames()
-				.filter(frame -> !(frame instanceof ChatTypingFrame typing && typing.subject().equals(subject))),
+				.filter(frame -> !(frame instanceof ChatTypingFrame typing && typing.subject().equals(subject)))
+				.map(frame -> frame instanceof ChatAnswerFrame answer ? answer.forRecipient(subject) : frame),
 				overflow)
 				.takeUntilOther(Mono.firstWithSignal(membership.left(), membership.kicked()));
-		connection.attach(presenceEnabled ? roomFrames.startWith(membership.snapshot()) : roomFrames);
+		connection.attach(roomFrames.startWith(
+				presenceEnabled ? membership.snapshot() : new RoomSubscribedFrame(threadId)));
+		// 진행 중인 답의 지금 모습(지금까지 내용·실행 중 도구·생각 중)을 이 연결에만 보낸다(이슈 #413). 방 프레임을 건
+		// 뒤에 읽어야 그 사이 조각을 잃지 않는다 — 겹치는 범위는 화면이 위치로 버린다.
+		threadMessageDispatcher.snapshotFor(threadId, subject).forEach(connection::send);
 
 		membership.kicked()
 				.publishOn(Schedulers.parallel())
 				.doOnSuccess(ignored -> {
 					log.debug("Unsubscribing evicted connection threadId={} connectionId={}", threadId,
 							connection.id());
-					endSubscription(connection, threadId, new ErrorFrame(threadId, "FORBIDDEN",
+					endSubscription(connection, threadId, membership.left(), new ErrorFrame(threadId, "FORBIDDEN",
 							"참여자 명단에서 제외되어 이 방 구독이 해지됐습니다.", newTraceId()));
 				})
 				.subscribe();
@@ -722,15 +744,21 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 				.doOnSuccess(ignored -> {
 					log.warn("Unsubscribing slow room consumer threadId={} connectionId={}", threadId,
 							connection.id());
-					endSubscription(connection, threadId, notSubscribed(threadId, newTraceId()));
+					endSubscription(connection, threadId, membership.left(), notSubscribed(threadId, newTraceId()));
 				})
 				.subscribe();
 	}
 
-	/** 서버가 이 방 구독만 푼다(참여자 제거·버퍼 넘침). 방에서 뺀 뒤 사유를 그 방 threadId로 알린다. */
-	private void endSubscription(Connection connection, UUID threadId, ErrorFrame reason) {
+	/**
+	 * 서버가 이 방 구독만 푼다(참여자 제거·버퍼 넘침). 방에서 빼고, 그 연결의 left 신호가 실제로 온 뒤에
+	 * 사유를 그 방 threadId로 알린다. 버퍼 넘침이면 이 연결의 방 버퍼(bufferForRoom)에 아직 나가지 않은 프레임이
+	 * 남아 있고, 방 프레임은 left가 와야 끊긴다 — left는 방 대기열로 나가므로(이슈 #405) 사유를 먼저 보내면 끊기기
+	 * 전 방 프레임이 사유 뒤에 도착할 수 있다. 강퇴는 kicked가 이미 프레임을 끊어 순서 차이가 없지만 같은 길로
+	 * 보낸다. 순서는 "남은 방 프레임 → 해지(프레임 끊김) → 사유"다.
+	 */
+	private void endSubscription(Connection connection, UUID threadId, Mono<Void> left, ErrorFrame reason) {
+		left.subscribe(null, null, () -> connection.send(reason));
 		leaveRoom(connection, threadId);
-		connection.send(reason);
 	}
 
 	private Mono<WsFrame> handleUnsubscribe(UUID threadId, Connection connection, String traceId) {
@@ -741,10 +769,10 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		return Mono.empty();
 	}
 
-	/** 방의 마지막 연결이 빠지면 소켓이 끊길 때와 똑같이 그 방 세대의 AI 작업을 닫는다. */
+	/** 방의 마지막 연결이 빠지면 소켓이 끊길 때와 똑같이 방이 비었다고 알린다 — AI 작업은 끝까지 간다(이슈 #413). */
 	private void leaveRoom(Connection connection, UUID threadId) {
 		roomSessionRegistry.leave(threadId, connection.id(), connection.actor())
-				.ifPresent(generation -> threadMessageDispatcher.closeGeneration(threadId, generation));
+				.ifPresent(generation -> threadMessageDispatcher.roomVacated(threadId));
 	}
 
 	/**
@@ -754,15 +782,14 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 않는다 — 형식이 틀린 프레임을 에러 프레임만 돌려주고 넘어가는 것과 같은 처리다. 이미 걸린
 	* 구독으로 방송이 계속 가는 것(받기)은 이슈 #135가 다룬다.
 	*/
-	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, UUID roomGeneration, String traceId) {
-		return rejectIfLocked(command, roomGeneration, traceId, -1);
+	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, String traceId) {
+		return rejectIfLocked(command, traceId, -1);
 	}
 
-	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, UUID roomGeneration, String traceId,
-			long authorizationEpoch) {
+	private Mono<WsFrame> rejectIfLocked(ChatMessageCommand command, String traceId, long authorizationEpoch) {
 		return threadMembershipService.isOpenForWriting(command.threadId())
 				.flatMap(open -> open
-						? dispatch(command, roomGeneration, traceId, authorizationEpoch)
+						? dispatch(command, traceId, authorizationEpoch)
 						: Mono.just(new ErrorFrame(command.threadId(), "THREAD_LOCKED",
 								"잠기거나 보관된 방에는 메시지를 보낼 수 없습니다.", traceId)));
 	}
@@ -773,20 +800,19 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 흘려보내면 이 Mono가 합쳐지는 인바운드 처리 전체가 에러로 끝나 연결이 비정상 종료된다 —
 	* "형식 오류는 연결을 유지한다"는 위 설계 의도와 반대가 된다.
 	*/
-	private Mono<WsFrame> dispatch(ChatMessageCommand command, UUID roomGeneration, String traceId,
-			long authorizationEpoch) {
+	private Mono<WsFrame> dispatch(ChatMessageCommand command, String traceId, long authorizationEpoch) {
 		try {
 			if (command.kind() == ThrKind.COLLAB) {
 				CollabAuthorizationRevoker.GuardedResult<Optional<ErrorFrame>> result = collabAuthorizationRevoker.ifCurrent(
 						command.fromSubject(), authorizationEpoch,
-						() -> threadMessageDispatcher.dispatch(command, roomGeneration));
+						() -> threadMessageDispatcher.dispatch(command));
 				if (!result.current()) {
 					return Mono.just(new ErrorFrame(command.threadId(), "FORBIDDEN",
 							"이 방에 메시지를 보낼 권한이 없습니다.", traceId));
 				}
 				return Mono.justOrEmpty(result.value());
 			}
-			return Mono.justOrEmpty(threadMessageDispatcher.dispatch(command, roomGeneration));
+			return Mono.justOrEmpty(threadMessageDispatcher.dispatch(command));
 		} catch (RuntimeException error) {
 			log.error("WebSocket room broadcast failed threadId={} traceId={}",
 					command.threadId(), traceId, error);

@@ -43,6 +43,7 @@
 | `agent` | 에이전트 |
 | `answer` | 답변 |
 | `app` | 애플리케이션 |
+| `approval` | 승인 |
 | `author` | 작성자 |
 | `archived` | 보관됨 |
 | `at` | 시점 |
@@ -90,6 +91,7 @@
 | `next` | 다음 |
 | `original` | 원본 |
 | `outcome` | 결과 |
+| `output` | 출력 |
 | `owner` | 소유자 |
 | `path` | 경로 |
 | `payload` | 적재 데이터 |
@@ -126,6 +128,7 @@
 | 영문 | 축약 | 사유 |
 |---|---|---|
 | `authz` | `authz` | `author`의 `ath`와 충돌 |
+| `approval` | `apv` | 알고리즘 결과 `app`이 `app`(애플리케이션)과 충돌 |
 | `event` | `evt` | 기존 이벤트 식별자 관용 |
 | `identifier` | `id` | 관용어(팀 합의) |
 | `password` | `pw` | 관용어(팀 합의) |
@@ -159,6 +162,7 @@
 | `inactive` | `inactive` | 관용 유지 — 알고리즘 결과 `inc`는 increment·include와 혼동. `inactive_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
 | `ended` | `ended` | 알고리즘 결과가 `end`(원형)와 충돌. `ended_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
 | `completed` | `completed` | 알고리즘 결과 `cmp`는 compare·component와 혼동. `completed_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`/`inactive`/`ended`와 동일 패턴 |
+| `output` | `out` | 알고리즘 결과 `otp`는 일회용 비밀번호(OTP)와 혼동 |
 
 ### 복수형 정책
 

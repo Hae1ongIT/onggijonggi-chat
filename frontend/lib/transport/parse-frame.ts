@@ -9,16 +9,23 @@
 import { z } from 'zod';
 import type { WsFrame } from './frames';
 
+/** 방 문서 근거와 웹 출처(이슈 #401)를 함께 받는다. 웹 출처는 docId·chunkId·loc가 null이고, kind가 없던
+ * 과거 근거도 통과해야 한다 — 하나라도 어긋나면 chat.answer 프레임 전체가 버려진다. zod는 모르는 키를
+ * 버리므로 새 필드는 여기 적어야 화면까지 간다. */
 const citationSchema = z.object({
-  docId: z.string(),
+  kind: z.string().optional(),
+  docId: z.string().nullable().optional(),
   title: z.string(),
   snippet: z.string(),
   score: z.number(),
   /** 같은 문서에서 청크 여러 개가 근거로 쓰이면 docId가 같아지므로, 화면이 항목을 구분하는
    * 키로 쓴다. 위치가 없던 과거 메시지의 citations에는 없을 수 있다(이슈 #352). */
-  chunkId: z.string().optional(),
+  chunkId: z.string().nullable().optional(),
   /** 위치가 없던 과거 메시지의 citations에는 없을 수 있다(이슈 #352). */
-  loc: z.string().optional(),
+  loc: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+  query: z.string().nullable().optional(),
+  read: z.boolean().nullable().optional(),
 });
 
 /** 이슈 #10 코멘트에서 확정된 통합 답변 패킷 — chat.token/chat.done/(제안했던)chat.citation을
@@ -39,9 +46,23 @@ const chatAnswerFrameSchema = z.object({
     z.literal('done'),
     z.literal('cancelled'),
     z.literal('denied'),
+    z.literal('failed'),
   ]),
-  groundingNotice: z.union([z.literal('no_evidence'), z.literal('unavailable'), z.null()]),
-  agent: z.union([z.literal('sol'), z.literal('fin'), z.literal('law'), z.null()]),
+  groundingNotice: z.union([
+    z.literal('no_evidence'),
+    z.literal('unavailable'),
+    z.null(),
+  ]),
+  agent: z.union([
+    z.literal('sol'),
+    z.literal('fin'),
+    z.literal('law'),
+    z.null(),
+  ]),
+  // 이슈 #413 — 옛 서버는 보내지 않는다. 모르는 키는 zod가 버리므로 여기 적어야 화면까지 간다.
+  offset: z.number().nullable().optional(),
+  content: z.string().nullable().optional(),
+  mine: z.boolean().nullable().optional(),
 });
 
 const chatMessageFrameSchema = z.object({
@@ -97,9 +118,9 @@ const systemNoticeFrameSchema = z.object({
 
 /**
  * 참여자 명단 변경 통지(#129·#172). action을 union으로 좁히지 않고 무엇이 와도 문자열로
- * 받는다 — 화면은 이 값으로 분기하지 않고 "명단을 다시 불러와"로만 쓰는데, 좁혀 두면 서버가
- * 새 액션을 추가한 순간 프론트를 배포하기 전까지 통지가 통째로 사라진다. system.notice의
- * severity와 같은 판단이다.
+ * 받는다 — 화면은 어느 액션이든 "명단을 다시 불러와"로 쓰고 입퇴장 줄만 INVITED·REMOVED로
+ * 가르는데, 좁혀 두면 서버가 새 액션을 추가한 순간 프론트를 배포하기 전까지 통지가 통째로
+ * 사라진다. system.notice의 severity와 같은 판단이다.
  */
 const participantChangedFrameSchema = z.object({
   type: z.literal('participant.changed'),
@@ -107,6 +128,45 @@ const participantChangedFrameSchema = z.object({
   action: z.string(),
   subject: z.string(),
   displayName: z.string(),
+  // 입퇴장 줄이 없는 변경은 null이다. 필드가 없던 서버와도 맞물리도록 없으면 null로 받는다.
+  msgId: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null),
+  seq: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null),
+});
+
+/** 승인 요청의 생성·처리(이슈 #407). event를 좁히지 않는 이유는 participant.changed의 action과 같다. */
+const approvalChangedFrameSchema = z.object({
+  type: z.literal('approval.changed'),
+  threadId: z.string(),
+  approvalId: z.string(),
+  event: z.string(),
+  requesterSubject: z.string(),
+  requesterDisplayName: z.string(),
+  targetSubject: z.string(),
+  targetDisplayName: z.string(),
+  // 승인 줄을 남기지 못한 사건은 null이다.
+  msgId: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null),
+  seq: z
+    .number()
+    .nullish()
+    .transform((value) => value ?? null),
+  // 원글 id와 반려 사유(이슈 #416). 이 필드가 없던 서버와도 맞물리도록 없으면 null로 읽는다.
+  originMsgId: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null),
+  reason: z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null),
 });
 
 /** 시작 전 @AI 턴의 대기·취소(이슈 #160). */
@@ -129,6 +189,29 @@ const chatTypingFrameSchema = presenceParticipantSchema.extend({
   active: z.boolean(),
 });
 
+/** presence가 없는 방(DIRECT)의 구독 완료(이슈 #382). */
+const roomSubscribedFrameSchema = z.object({
+  type: z.literal('room.subscribed'),
+  threadId: z.string(),
+});
+
+/** AI 턴의 도구 실행 시작·끝(이슈 #397). kind는 모르는 코드도 받는다 — 문구는 화면이 고르고 모르면 일반 문구다. */
+const chatActivityFrameSchema = z.object({
+  type: z.literal('chat.activity'),
+  threadId: z.string(),
+  msgId: z.string(),
+  turnId: z.string().nullable(),
+  kind: z.string(),
+  target: z.string().nullable(),
+  active: z.boolean(),
+  agent: z.union([
+    z.literal('sol'),
+    z.literal('fin'),
+    z.literal('law'),
+    z.null(),
+  ]),
+});
+
 /** 연결 수립 자체가 실패하는 경우처럼 특정 방에 속하지 않는 오류는 threadId가 null일 수
  * 있다(ErrorFrame.java 주석과 동일 계약). */
 const wsErrorFrameSchema = z.object({
@@ -139,7 +222,7 @@ const wsErrorFrameSchema = z.object({
   traceId: z.string(),
 });
 
-/** type 필드로 판별하는 유니온. 알려진 11개 타입 중 하나와 정확히 일치하지 않으면(미지 타입
+/** type 필드로 판별하는 유니온. 알려진 14개 타입 중 하나와 정확히 일치하지 않으면(미지 타입
  * 포함) 파싱이 실패한다 — parseFrame이 그 실패를 null로 흡수한다. frames.ts의 WsFrame 유니온에
  * 타입을 더하면 여기 스키마도 함께 더해야 한다 — 빠뜨리면 컴파일은 통과하고 그 프레임만
  * 조용히 버려진다. */
@@ -155,6 +238,9 @@ const wsFrameSchema = z.discriminatedUnion('type', [
   chatQueuedFrameSchema,
   pongFrameSchema,
   chatTypingFrameSchema,
+  roomSubscribedFrameSchema,
+  approvalChangedFrameSchema,
+  chatActivityFrameSchema,
 ]);
 
 /** 이미 JSON.parse된 값을 검증한다. 객체가 아니거나, type이 없거나, 알려지지 않은 type이거나,

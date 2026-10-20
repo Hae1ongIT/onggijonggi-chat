@@ -10,6 +10,8 @@ import com.onggijonggi.common.chat.domain.ThrMbrStatus;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import com.onggijonggi.common.document.TagIndexContract;
+import com.onggijonggi.common.document.TagPrompt;
 import com.onggijonggi.common.document.ThreadDocumentStates;
 import com.onggijonggi.common.user.AppUserRepository;
 import com.onggijonggi.common.user.AppUserStatus;
@@ -21,9 +23,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -43,6 +47,7 @@ import org.springframework.web.server.ResponseStatusException;
  * Class Name : ThreadDocumentService.java
  * Description : Thread 문서의 원본 예약·등록·고정·삭제·업무 이력을 처리한다. 호출부는 boundedElastic에서 실행한다.
  *               원본 통신은 DB 예약 뒤에 수행하고, 늦은 업로드·방 삭제에도 정리 참조를 잃지 않는다.
+ *               이 방에 보낸 채팅 첨부(msg_file)도 같은 방 접근 규칙으로 목록·원본을 내주고, 방 문서로 등록한다.
  */
 @Service
 public class ThreadDocumentService {
@@ -93,6 +98,7 @@ public class ThreadDocumentService {
 			String digest, UUID attempt, String status, boolean pinned, Instant created, Instant updated) { }
 	public record Original(String fileName, byte[] bytes) { }
 	private record CleanupJob(UUID tenant, UUID thread, String digest, UUID attempt) { }
+	private record Tag(String category, List<String> keywords, String summary) { }
 
 	private Access access(UUID threadId, CurrentActor actor, boolean write) {
 		// Tenant 범위 권한 변경과 동일한 잠금 순서다. 읽기·원본 전송도 최신 판정 뒤 진행한다.
@@ -127,8 +133,47 @@ public class ThreadDocumentService {
 					"select doc_id from thr_doc_evt where thr_id = ? and evt_kind = 'REGISTERED'", UUID.class, thread));
 			List<ThreadDocumentView> values = jdbc.query("select * from thr_doc where thr_id = ? and status <> 'DELETED' order by created_at, id",
 					this::document, thread).stream().map(doc -> view(doc, access, registered.contains(doc.id()))).toList();
-			return new ThreadDocumentView.Listing(access.thread().getStatus().name(), access.writable(), values);
+			List<ThreadDocumentView.Attachment> attachments = jdbc.query("""
+					select f.id, f.file_name, f.user_id, u.keycloak_subj, f.created_at, octet_length(o.content)::bigint as file_size,
+					  exists(select 1 from thr_doc d where d.id = f.id) as registered
+					from msg_file f join msg m on m.id = f.msg_id
+					join app_user u on u.id = f.user_id
+					left join msg_file_org o on o.file_id = f.id
+					where m.thr_id = ? order by f.created_at, f.id""",
+					(rs, row) -> {
+						Long size = rs.getObject("file_size", Long.class);
+						boolean kept = size != null;
+						boolean asDocument = rs.getBoolean("registered");
+						return new ThreadDocumentView.Attachment(rs.getObject("id", UUID.class), rs.getString("file_name"),
+								size, rs.getString("keycloak_subj"), access.user().equals(rs.getObject("user_id", UUID.class)), kept,
+								kept && access.writable() && !asDocument, asDocument, rs.getTimestamp("created_at").toInstant());
+					}, thread);
+			return new ThreadDocumentView.Listing(access.thread().getStatus().name(), access.writable(), values, attachments);
 		});
+	}
+
+	/** 이 방 메시지에 실린 채팅 첨부의 원본. 방 문서 원본과 같은 방 접근 확인을 거치고, 원본이 없거나 다른 방 첨부면 404다. */
+	public Original attachmentOriginal(UUID thread, UUID file, CurrentActor actor) {
+		return transactions.execute(tx -> {
+			access(thread, actor, false);
+			var rows = jdbc.query("""
+					select f.file_name, o.content from msg_file f
+					join msg m on m.id = f.msg_id
+					join msg_file_org o on o.file_id = f.id
+					where f.id = ? and m.thr_id = ?""",
+					(rs, row) -> new Original(rs.getString("file_name"), rs.getBytes("content")), file, thread);
+			if (rows.isEmpty()) throw notFound();
+			return rows.get(0);
+		});
+	}
+
+	/**
+	 * 채팅 첨부를 요청한 사람 이름으로 방 문서로 등록한다(고정하지 않음). 첨부 id를 문서 id로 써서 같은 요청을 다시 보내도
+	 * 문서가 하나만 생긴다. 쓰기 권한·파일 검사·원본 저장은 직접 올린 방 문서와 같다(upload).
+	 */
+	public ThreadDocumentView registerAttachment(UUID thread, UUID file, CurrentActor actor) {
+		Original original = attachmentOriginal(thread, file, actor);
+		return upload(thread, file, actor, original.fileName(), original.bytes());
 	}
 
 	/**
@@ -152,6 +197,26 @@ public class ThreadDocumentService {
 					thread);
 			return new ThreadDocumentScope(access.thread().getTenantId(), ThreadScopeFilter.of(List.of(thread)), targets);
 		});
+	}
+
+	/**
+	 * 검색 범위(searchScope)의 문서와 각 문서의 현재 회차 태그(#362). 답변 턴이 모델에 어떤 문서가 있는지 알릴 때 쓴다.
+	 * 태그는 현재 회차의 DONE 행만 쓴다 — 태깅이 꺼졌거나 대기·실패인 문서, 이전 회차의 태그는 파일 이름만 남는다.
+	 */
+	public List<SearchableDocument> searchableDocuments(UUID thread, CurrentActor actor) {
+		List<ThreadDocumentScope.Target> targets = searchScope(thread, actor).targets();
+		if (targets.isEmpty()) return List.of();
+		Map<String, Tag> tags = new HashMap<>();
+		jdbc.query("select doc_id, run_seq, ctg, kyw, smm from thr_doc_tag where thr_id = ? and status = 'DONE'", (ResultSet rs) -> {
+			String category = rs.getString("ctg");
+			tags.put(TagIndexContract.tagId(rs.getObject("doc_id", UUID.class), rs.getInt("run_seq")), new Tag(TagPrompt.UNCLASSIFIED.equals(category) ? null : category,
+					List.of((String[]) rs.getArray("kyw").getArray()), rs.getString("smm")));
+		}, thread);
+		return targets.stream().map(target -> {
+			Tag tag = tags.get(TagIndexContract.tagId(target.document(), target.runSeq()));
+			return tag == null ? SearchableDocument.untagged(target.fileName())
+					: new SearchableDocument(target.fileName(), tag.category(), tag.keywords(), tag.summary());
+		}).toList();
 	}
 
 	public ThreadDocumentView upload(UUID thread, UUID id, CurrentActor actor, String fileName, byte[] content) {

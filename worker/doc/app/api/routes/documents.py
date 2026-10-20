@@ -2,17 +2,21 @@ import hmac
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
+from pydantic import TypeAdapter, ValidationError
 
 from app.core.config import Settings
 from app.core.request_context import request_id
 from app.errors import WorkerError
 from app.models.document import DocumentRequest, DocumentResponse, TemplateResponse
+from app.renderers.docx import DOCX_CONTENT_TYPE
 from app.services.document_service import DocumentService
+from app.services.docx_revision import DocumentEdit, revise
 
 _TENANT_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
+_EDITS = TypeAdapter(list[DocumentEdit])
 
 
 def get_settings() -> Settings:
@@ -44,6 +48,23 @@ def create_document(
     return service.create(document_request, tenant_id, request_id(request))
 
 
+@router.get("/files")
+def read_generated_document(
+    settings: Annotated[Settings, Depends(get_settings)],
+    service: Annotated[DocumentService, Depends(get_document_service)],
+    internal_api_key: Annotated[str, Header(alias="X-Internal-Api-Key")],
+    tenant_id: Annotated[str, Header(alias="X-Tenant-Id")],
+    object_key: Annotated[str, Query(alias="objectKey", min_length=1, max_length=1024)],
+) -> Response:
+    """생성 응답의 objectKey로 저장된 문서를 돌려준다. 방 권한과 내려받는 이름은 BFF가 정한다 — 내부 API가 업로드 내용을 실행하게 하지 않는다."""
+    authorize(settings, internal_api_key, tenant_id)
+    return Response(
+        content=service.read_output(object_key, tenant_id),
+        media_type="application/octet-stream",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )
+
+
 @router.post("/templates", status_code=201, response_model=TemplateResponse)
 async def save_template(
     request: Request,
@@ -55,3 +76,29 @@ async def save_template(
 ) -> TemplateResponse:
     authorize(settings, internal_api_key, tenant_id)
     return await service.save_template(template, tenant_id, request_id(request))
+
+
+@router.post("/revisions")
+def revise_document(
+    settings: Annotated[Settings, Depends(get_settings)],
+    internal_api_key: Annotated[str, Header(alias="X-Internal-Api-Key")],
+    tenant_id: Annotated[str, Header(alias="X-Tenant-Id")],
+    file: Annotated[UploadFile, File()],
+    edits: Annotated[str, Form()],
+) -> Response:
+    """원본 docx의 지정한 문장만 바꾸고 신구조문 대비표를 붙인 docx를 돌려준다. 저장하지 않는다 — 방 문서 등록은 BFF가 한다."""
+    authorize(settings, internal_api_key, tenant_id)
+    content = file.file.read(settings.max_source_bytes + 1)
+    if not content:
+        raise WorkerError(400, "EMPTY_SOURCE", "Document source must not be empty")
+    if len(content) > settings.max_source_bytes:
+        raise WorkerError(413, "FILE_TOO_LARGE", "Document source exceeds upload limit")
+    try:
+        parsed = _EDITS.validate_json(edits)
+    except ValidationError as error:
+        raise WorkerError(400, "VALIDATION_ERROR", "edits must be a JSON list of {before, after}") from error
+    return Response(
+        content=revise(content, parsed),
+        media_type=DOCX_CONTENT_TYPE,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )

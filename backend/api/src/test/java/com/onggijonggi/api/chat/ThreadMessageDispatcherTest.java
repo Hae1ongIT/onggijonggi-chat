@@ -1,12 +1,16 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.rag.SearchResult;
 import com.onggijonggi.api.rag.ThreadDocumentSearch;
+import com.onggijonggi.api.web.WebSources;
+import com.onggijonggi.api.web.WebSourcesFixture;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
 import com.onggijonggi.common.chat.domain.MsgStatus;
 import com.onggijonggi.common.chat.domain.ThrKind;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,13 +26,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
+import org.mockito.stubbing.OngoingStubbing;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.DefaultToolDefinition;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.scheduler.VirtualTimeScheduler;
 import tools.jackson.databind.ObjectMapper;
 
+import static com.onggijonggi.api.chat.Eventually.awaitIdle;
+import static com.onggijonggi.api.chat.Eventually.eventually;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
@@ -36,6 +48,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -51,6 +64,9 @@ import static org.mockito.Mockito.when;
  */
 class ThreadMessageDispatcherTest {
 
+	/** 프레임 비교에서 무시하는 값 — id·seq는 전용 테스트가, 조각 위치·요청자·받는 사람별 mine은 #413 전용 테스트가 본다. */
+	private static final String[] IGNORED_FRAME_FIELDS = {"msgId", "seq", "offset", "requesterSubject", "mine"};
+
 	/** 워커가 직렬로 꺼내므로 방송 순서와 seq 순서가 같다 — #190이 지키려는 계약의 본체다. */
 	@Test
 	void assignsSeqInBroadcastOrder() {
@@ -58,9 +74,9 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "하나"), room.membership.generation());
-		dispatcher.dispatch(command(room, "둘"), room.membership.generation());
-		dispatcher.dispatch(command(room, "셋"), room.membership.generation());
+		dispatcher.dispatch(command(room, "하나"));
+		dispatcher.dispatch(command(room, "둘"));
+		dispatcher.dispatch(command(room, "셋"));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).extracting(frame -> ((ChatMessageFrame) frame).content(),
@@ -81,7 +97,7 @@ class ThreadMessageDispatcherTest {
 						invocation.getArgument(1)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 질문"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 질문"));
 
 		awaitFrameCount(room.frames, 4);
 		ArgumentCaptor<UUID> storedId = ArgumentCaptor.forClass(UUID.class);
@@ -105,11 +121,163 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
 				room.participant.subject(), room.participant.displayName(), "@AI 지금 몇 시야", List.of(), null,
-				"America/New_York", null, null, room.connectionId, "trace", null), room.membership.generation());
+				"America/New_York", null, null, room.connectionId, "trace", null));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
 		assertThat(request.getValue().timeZone()).isEqualTo("America/New_York");
+		// 도구는 이 턴의 공통 지점을 지난다(이슈 #390).
+		assertThat(request.getValue().toolExecutions()).isNotNull();
+	}
+
+	/** 입퇴장 줄은 대화가 아니라 모델 문맥에 넣지 않는다. 같은 SYSTEM이라도 위험 알림처럼 본문이 있는 줄은 그대로 간다. */
+	@Test
+	void leavesMembershipLinesOutOfTheLlmContext() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.persistHumanMessageAndFetchContextBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("@AI 요약해줘"), anyList(), anyInt())).thenReturn(List.of(
+						MembershipNoticeService.newNotice(room.threadId, 0L, MembershipNotice.Event.JOINED, "kc-9",
+								new ObjectMapper()),
+						Msg.system(room.threadId, 1L, "위험할 수 있는 발화가 감지되었습니다.")));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 요약해줘"));
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().messages()).extracting(ChatMessage::content)
+				.containsExactly("위험할 수 있는 발화가 감지되었습니다.", "요약해줘");
+	}
+
+	/**
+	* 도구가 실행되는 동안 방에 활동 프레임(시작 → 끝)이 가고, 현재 시각 도구는 알리지 않는다(이슈 #397).
+	* 턴이 끝난 뒤 늦게 끝난 도구는 알리지 않는다.
+	*/
+	@Test
+	void broadcastsToolActivityWhileTheTurnRuns() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		AtomicReference<ToolCallback> search = new AtomicReference<>();
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			search.set(toolExecutions.wrap(new ToolCallback[] { fakeTool("webSearch") })[0]);
+			search.get().call("{\"query\":\"서울 날씨\"}");
+			toolExecutions.wrap(new ToolCallback[] { fakeTool("currentDateTime") })[0].call("{}");
+			return Flux.just("답");
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+
+		// 사람 발화 1 + 웹 검색 시작·끝 2 + 답변 조각 1 + 완료 1 — 현재 시각 도구는 세지 않는다.
+		awaitFrameCount(room.frames, 5);
+		List<ChatActivityFrame> activities = room.frames.stream()
+				.filter(ChatActivityFrame.class::isInstance).map(ChatActivityFrame.class::cast).toList();
+		assertThat(activities).extracting(ChatActivityFrame::kind, ChatActivityFrame::target, ChatActivityFrame::active)
+				.containsExactly(tuple("WEB_SEARCH", "서울 날씨", true), tuple("WEB_SEARCH", "서울 날씨", false));
+		ChatAnswerFrame done = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast).filter(frame -> frame.status() == ChatAnswerStatus.DONE)
+				.findFirst().orElseThrow();
+		assertThat(activities.get(0).msgId()).isEqualTo(done.msgId());
+
+		awaitIdle(room.registry, room.threadId);
+		int before = room.frames.size();
+		search.get().call("{\"query\":\"늦은 검색\"}");
+		// 방 프레임은 대기열로 나가므로(이슈 #405) 다 빠질 때까지 기다린 뒤 본다.
+		awaitIdle(room.registry, room.threadId);
+		assertThat(room.frames).hasSize(before);
+	}
+
+	/**
+	* 도구 "시작"을 넣는 사이에 턴이 끝나면(여기서는 시작을 방송하는 순간 중지) 그 시작이 종료 프레임 뒤에 들어갈 수 있다 —
+	* 그 뒤 "끝"은 끝난 턴이라 막히므로, 서버가 "끝"을 바로 이어 화면에 진행 표시가 남지 않게 한다(이슈 #397 리뷰).
+	*/
+	@Test
+	void anActivityStartRacingTheTurnEndIsFollowedByAnEnd() {
+		AtomicReference<Runnable> onStart = new AtomicReference<>(() -> {
+		});
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public void notifyRoom(UUID threadId, WsFrame frame) {
+				super.notifyRoom(threadId, frame);
+				if (frame instanceof ChatActivityFrame activity && activity.active()) {
+					onStart.getAndSet(() -> {
+					}).run();
+				}
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback search = toolExecutions.wrap(new ToolCallback[] { fakeTool("webSearch") })[0];
+			return Mono.fromCallable(() -> search.call("{\"query\":\"서울 날씨\"}"))
+					.subscribeOn(Schedulers.boundedElastic())
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		UUID turnId = UUID.randomUUID();
+		onStart.set(() -> dispatcher.cancel(room.threadId, turnId, room.participant.subject()));
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨", turnId));
+
+		eventually(() -> assertThat(room.frames).filteredOn(ChatActivityFrame.class::isInstance)
+				.extracting(frame -> ((ChatActivityFrame) frame).active())
+				.containsExactly(true, false));
+	}
+
+	/**
+	 * 웹 도구가 이 턴의 웹 출처 모음에 남긴 것이 완료 프레임과 저장 둘 다에 WEB 근거로 실린다(이슈 #401). 흐르는 동안의
+	 * STREAMING 프레임에는 싣지 않는다. 웹을 쓰지 않은 답변은 그대로다(persistsAndBroadcastsTheMentionedAgentOnCompletion).
+	 */
+	@Test
+	void includesWebSourcesOfTheTurnInTheAnswer() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			WebSources sources = ((ChatStreamRequest) invocation.getArgument(0)).webSources();
+			WebSourcesFixture.searched(sources, "서울 날씨", "날씨누리", "https://weather.example/seoul", "맑음");
+			WebSourcesFixture.read(sources, "https://weather.example/seoul", "서울 날씨 — 날씨누리");
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1L);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+
+		awaitFrameCount(room.frames, 3);
+		List<ChatAnswerFrame> answers = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
+				.map(ChatAnswerFrame.class::cast).toList();
+		Citation web = Citation.web("https://weather.example/seoul", "서울 날씨 — 날씨누리", "맑음", "서울 날씨", true);
+		assertThat(answers).filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE).singleElement()
+				.satisfies(done -> assertThat(done.citations()).containsExactly(web));
+		assertThat(answers).filteredOn(frame -> frame.status() == ChatAnswerStatus.STREAMING)
+				.allSatisfy(frame -> assertThat(frame.citations()).isEmpty());
+		ArgumentCaptor<String> citationsJson = ArgumentCaptor.forClass(String.class);
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(eq(pending.getId()), eq("답"),
+				citationsJson.capture(), isNull());
+		assertThat(Citation.fromSrcJson(new ObjectMapper(), citationsJson.getValue())).containsExactly(web);
+	}
+
+	private static ToolCallback fakeTool(String name) {
+		return new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name(name)
+						.description(name).inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String toolInput) {
+				return "결과";
+			}
+		};
 	}
 
 	@Test
@@ -118,10 +286,10 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "일반 발화"))).isEmpty();
 
 		awaitFrameCount(room.frames, 1);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(message(room, "일반 발화"));
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(message(room, "일반 발화"));
 		verify(llm, times(0)).streamChat(any());
 	}
 
@@ -133,8 +301,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("second"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI one"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI two"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI one"));
+		dispatcher.dispatch(command(room, "@AI two"));
 		verify(llm, timeout(1000)).streamChat(any());
 		firstResponse.tryEmitValue("first");
 
@@ -142,17 +310,20 @@ class ThreadMessageDispatcherTest {
 		verify(llm, timeout(1000).times(2)).streamChat(requests.capture());
 		assertThat(requests.getAllValues()).extracting(request -> request.messages().get(0).content())
 				.containsExactly("one", "two");
+		// 턴마다 도구 실행 기록이 따로라 앞 턴의 도구가 뒤 턴에 섞이지 않는다(이슈 #390).
+		assertThat(requests.getAllValues().get(0).toolExecutions())
+				.isNotSameAs(requests.getAllValues().get(1).toolExecutions());
 		awaitFrameCount(room.frames, 7);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq")
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS)
 				.containsExactly(
 				message(room, "@AI one"),
 				message(room, "@AI two"),
 				// 앞 턴이 실행 중이라 두 번째 턴은 기다린다고 알린다(이슈 #160).
 				new ChatQueuedFrame(room.threadId, null, ChatQueuedStatus.QUEUED),
 				answer(room, "first", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE),
+				done(room, "first"),
 				answer(room, "second", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, "second"));
 	}
 
 	@Test
@@ -161,11 +332,11 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		ErrorFrame error = dispatcher.dispatch(command(room, "@AI   "), room.membership.generation()).orElseThrow();
+		ErrorFrame error = dispatcher.dispatch(command(room, "@AI   ")).orElseThrow();
 
 		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
 		awaitFrameCount(room.frames, 1);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(message(room, "@AI   "));
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(message(room, "@AI   "));
 		verify(llm, times(0)).streamChat(any());
 	}
 
@@ -177,7 +348,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@FIN 비용 관점에서 검토해줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@FIN 비용 관점에서 검토해줘"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -195,9 +366,9 @@ class ThreadMessageDispatcherTest {
 		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
 				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "출장 일비는 하루 4만 원이다.", 0.9, null)));
 
-		List<ChatMessage> messages = promptFor(Mono.just(found), true, "@FIN 출장 일비를 웹에서 찾은 기준과 비교해줘");
-		assertThat(messages.get(0).content()).isEqualTo(Agent.FIN.systemPrompt());
-		assertThat(systemBeforeLastUser(messages)).contains(ThreadMessageDispatcher.FOUND_WEB_RULE);
+		ToolTurn turn = toolTurn(true, "@FIN 출장 일비를 웹에서 찾은 기준과 비교해줘", List.of("출장 일비"), List.of(Mono.just(found)));
+		assertThat(turn.request().messages().get(0).content()).isEqualTo(Agent.FIN.systemPrompt());
+		assertThat(turn.onlyToolResult()).contains(ThreadMessageDispatcher.FOUND_WEB_RULE);
 		for (Agent agent : Agent.values()) {
 			assertThat(agent.systemPrompt()).as(agent.name()).doesNotContain("문서만").doesNotContain("웹");
 		}
@@ -211,7 +382,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI 알려줘"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 알려줘"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -226,7 +397,7 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		ErrorFrame error = dispatcher.dispatch(command(room, "@FIN @LAW 같이 검토해줘"), room.membership.generation())
+		ErrorFrame error = dispatcher.dispatch(command(room, "@FIN @LAW 같이 검토해줘"))
 				.orElseThrow();
 
 		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
@@ -245,7 +416,7 @@ class ThreadMessageDispatcherTest {
 				.thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@LAW 유의할 점은?"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@LAW 유의할 점은?"));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -263,9 +434,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 0,
 				VirtualTimeScheduler.create());
 
-		assertThat(dispatcher.dispatch(command(room, "@AI first"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "@AI first"))).isEmpty();
 		verify(llm, timeout(1000)).streamChat(any());
-		assertThat(dispatcher.dispatch(command(room, "@AI second"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "@AI second"))).isEmpty();
 
 		// AI 대기열이 찼는지는 워커가 순서대로 처리해봐야 정확하다 — 동기 반환이 아니라 방송으로 온다(#190).
 		awaitFrameCount(room.frames, 3);
@@ -274,21 +445,101 @@ class ThreadMessageDispatcherTest {
 				.containsExactly("RATE_LIMITED");
 	}
 
+	/** 공백뿐인 출력은 실패다 — done 없이, 그 답을 가리키는 failed 끝 프레임(빈 내용)과 배너용 오류 프레임이 간다(이슈 #413). */
 	@Test
-	void emptyOrWhitespaceOnlyOutputBroadcastsModelUnavailableWithoutDone() {
+	void emptyOrWhitespaceOnlyOutputEndsAsFailedWithModelUnavailable() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("", "   "));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hello"));
 
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).hasSize(2);
+		awaitFrameCount(room.frames, 3);
+		assertThat(room.frames).hasSize(3);
 		assertThat(room.frames.get(0)).usingRecursiveComparison().ignoringFields("msgId", "seq")
 				.isEqualTo(message(room, "@AI hello"));
-		assertThat(room.frames.get(1)).isInstanceOf(ErrorFrame.class);
-		assertThat(((ErrorFrame) room.frames.get(1)).code()).isEqualTo("MODEL_UNAVAILABLE");
+		assertThat(room.frames.get(1)).isInstanceOfSatisfying(ChatAnswerFrame.class, failed -> {
+			assertThat(failed.status()).isEqualTo(ChatAnswerStatus.FAILED);
+			assertThat(failed.content()).isEmpty();
+		});
+		assertThat(room.frames.get(2)).isInstanceOf(ErrorFrame.class);
+		assertThat(((ErrorFrame) room.frames.get(2)).code()).isEqualTo("MODEL_UNAVAILABLE");
+	}
+
+	/**
+	* 끝 프레임을 낸 뒤 다음 턴으로 넘어가기 전에 들어온 연결·1:1 재전송은 그 끝 프레임을 받는다 — 방에 붙고 구독을 걸기 전에
+	* 나간 방송은 받는 사람이 없어 버려진다(이슈 #413).
+	*/
+	@Test
+	void aConnectionJoiningRightAfterTheEndFrameGetsThatEndFrame() {
+		AtomicReference<ThreadMessageDispatcher> dispatcherRef = new AtomicReference<>();
+		AtomicReference<List<WsFrame>> snapshot = new AtomicReference<>();
+		AtomicReference<ThreadMessageDispatcher.LiveAnswer> replay = new AtomicReference<>();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
+			@Override
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+				boolean sent = super.broadcastToRoom(threadId, frame);
+				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE) {
+					snapshot.set(dispatcherRef.get().snapshotFor(threadId, "subject-someone-else"));
+					replay.set(dispatcherRef.get().liveAnswer(threadId, answer.msgId()).orElseThrow());
+				}
+				return sent;
+			}
+		};
+		TestRoom room = new TestRoom(registry);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("끝난 답"));
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+		dispatcherRef.set(dispatcher);
+
+		dispatcher.dispatch(command(room, "@AI 질문"));
+
+		eventually(() -> assertThat(snapshot.get()).isNotNull());
+		assertThat(snapshot.get()).singleElement().isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> {
+			assertThat(frame.status()).isEqualTo(ChatAnswerStatus.DONE);
+			assertThat(frame.content()).isEqualTo("끝난 답");
+			assertThat(frame.mine()).isFalse();
+		});
+		assertThat(replay.get().endFrame().status()).isEqualTo(ChatAnswerStatus.DONE);
+	}
+
+	/** 다음 턴을 만들지 못하면(seq 블록 예약 실패) 방의 AI 작업을 실패로 닫는다 — 끝난 턴이 active로 남아 방이 영영 지워지지
+	 * 않던 것을 막는다(이슈 #413). */
+	@Test
+	void closesTheRoomAsFailedWhenTheNextTurnCannotBeCreated() {
+		TestRoom room = new TestRoom();
+		Sinks.Many<String> first = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(first.asFlux());
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		AtomicBoolean failSeq = new AtomicBoolean();
+		when(msgPersistenceService.allocateSeqBlockBlocking(eq(room.threadId), anyInt())).thenAnswer(invocation -> {
+			if (failSeq.get()) throw new IllegalStateException("db down");
+			return 0L;
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 첫째"));
+		dispatcher.dispatch(command(room, "@AI 둘째"));
+		verify(llm, timeout(1000)).streamChat(any());
+		awaitFrameCount(room.frames, 3);
+		// 예약해 둔 블록을 다 써서 다음 턴이 블록을 새로 받으려다 실패하게 한다.
+		failSeq.set(true);
+		for (int i = 0; i < 200; i++) {
+			try {
+				dispatcher.allocateSeqBlocking(room.threadId);
+			} catch (IllegalStateException exhausted) {
+				break;
+			}
+		}
+		first.tryEmitNext("답");
+		first.tryEmitComplete();
+
+		eventually(() -> assertThat(room.frames).filteredOn(ErrorFrame.class::isInstance)
+				.extracting(frame -> ((ErrorFrame) frame).code())
+				.contains("MESSAGE_DELIVERY_FAILED"));
+		verify(llm, times(1)).streamChat(any());
 	}
 
 	@Test
@@ -298,14 +549,14 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just(" ", "answer"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hello"));
 
 		awaitFrameCount(room.frames, 4);
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").containsExactly(
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).containsExactly(
 				message(room, "@AI hello"),
 				answer(room, " ", ChatAnswerStatus.STREAMING),
 				answer(room, "answer", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, " answer"));
 	}
 
 	@Test
@@ -317,21 +568,53 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)), Flux.just("next"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 20, scheduler);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		scheduler.advanceTimeBy(Duration.ofSeconds(120));
 
 		awaitTrue(cancelled);
 		assertThat(cancelled).isTrue();
-		assertThat(room.frames).anySatisfy(frame -> {
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> {
 			assertThat(frame).isInstanceOf(ErrorFrame.class);
-			assertThat(((ErrorFrame) frame).code()).isEqualTo("MODEL_UNAVAILABLE");
-		});
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").contains(
-				answer(room, "next", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
+		}));
+		eventually(() -> assertThat(room.frames)
+				.usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
+						answer(room, "next", ChatAnswerStatus.STREAMING),
+						done(room, "next")));
 		verify(llm, times(2)).streamChat(any());
+	}
+
+	/** 턴 제한은 LLM 호출 앞 단계에도 걸린다 — 문서 목록 조회가 멈춰도 방 큐가 막히지 않고 다음 턴으로 간다(이슈 #413). */
+	@Test
+	void turnTimeoutAlsoCoversTheStepsBeforeTheModelCall() {
+		VirtualTimeScheduler scheduler = VirtualTimeScheduler.create();
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("next"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any()))
+				.thenReturn(Mono.never(), Mono.just(List.of()));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, scheduler);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
+		verify(documents, timeout(1000)).searchableDocuments(eq(room.threadId), any());
+		scheduler.advanceTimeBy(Duration.ofSeconds(120));
+
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> {
+			assertThat(frame).isInstanceOf(ErrorFrame.class);
+			assertThat(((ErrorFrame) frame).code()).isEqualTo("AI_TURN_TIMEOUT");
+		}));
+		eventually(() -> assertThat(room.frames)
+				.usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
+						done(room, "next")));
+		verify(llm, times(1)).streamChat(any());
 	}
 
 	@Test
@@ -342,8 +625,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("next"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		firstResponse.tryEmitError(new IllegalStateException("gateway failure"));
 
@@ -353,13 +636,14 @@ class ThreadMessageDispatcherTest {
 			assertThat(frame).isInstanceOf(ErrorFrame.class);
 			assertThat(((ErrorFrame) frame).code()).isEqualTo("INTERNAL_ERROR");
 		});
-		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields("msgId", "seq").contains(
+		assertThat(room.frames).usingRecursiveFieldByFieldElementComparatorIgnoringFields(IGNORED_FRAME_FIELDS).contains(
 				answer(room, "next", ChatAnswerStatus.STREAMING),
-				answer(room, "", ChatAnswerStatus.DONE));
+				done(room, "next"));
 	}
 
+	/** 방이 비었다 다시 붙어 세대가 바뀌어도 진행 중인 턴은 이어지고, 이어지는 조각은 새 연결로 간다(이슈 #413). */
 	@Test
-	void staleGenerationCancelsTheRunningTurnAndNeverEmitsAnErrorFrame() {
+	void aTurnContinuesIntoTheNewGenerationWhenTheRoomEmptiesAndIsRejoined() {
 		TestRoom oldRoom = new TestRoom();
 		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		AtomicBoolean cancelled = new AtomicBoolean();
@@ -367,10 +651,11 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(oldRoom.registry, llm);
 
-		dispatcher.dispatch(command(oldRoom, "@AI first"), oldRoom.membership.generation());
+		dispatcher.dispatch(command(oldRoom, "@AI first"));
 		verify(llm, timeout(1000)).streamChat(any());
-		oldRoom.registry.leave(oldRoom.threadId, oldRoom.connectionId, oldRoom.participant);
 		oldRoom.subscription.dispose();
+		oldRoom.registry.leave(oldRoom.threadId, oldRoom.connectionId, oldRoom.participant)
+				.ifPresent(generation -> dispatcher.roomVacated(oldRoom.threadId));
 		UUID newConnectionId = UUID.randomUUID();
 		RoomSessionRegistry.RoomMembership newMembership =
 				oldRoom.registry.join(oldRoom.threadId, newConnectionId, anonymous());
@@ -378,10 +663,12 @@ class ThreadMessageDispatcherTest {
 		Disposable newSubscription = newMembership.frames().subscribe(newFrames::add);
 		try {
 			source.tryEmitNext("late result");
+			source.tryEmitComplete();
 
-			awaitTrue(cancelled);
-		assertThat(cancelled).isTrue();
-			assertThat(newFrames).isEmpty();
+			eventually(() -> assertThat(newFrames).filteredOn(ChatAnswerFrame.class::isInstance)
+					.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status())
+					.containsExactly(tuple("late result", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE)));
+			assertThat(cancelled).isFalse();
 		} finally {
 			newSubscription.dispose();
 			oldRoom.registry.leave(oldRoom.threadId, newConnectionId, anonymous());
@@ -398,8 +685,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
 		verify(llm, timeout(1000)).streamChat(any());
 		registry.failBroadcasts = true;
 
@@ -431,13 +718,13 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		// 첫 턴은 평소대로 시작시킨다 — 이게 뒤에 방송 실패로 방을 닫는 쪽이다.
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		// 두 번째 발화를 워커가 에코 방송하는 자리에서 붙잡는다.
 		registry.blockOnContent = "@AI second";
 		try {
-			dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI second"));
 			assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
 
 			// 이 시점의 두 번째 발화는 pending에 없다. 여기서 첫 턴의 방송이 실패해 방이 닫힌다.
@@ -461,7 +748,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		registry.failBroadcasts = true;
 
-		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
+		assertThat(dispatcher.dispatch(command(room, "일반 발화"))).isEmpty();
 
 		// 방송이 실패한 시점엔 보낸 사람에게 갈 통로(방 sink)가 이미 고장난 뒤라, 동기
 		// MESSAGE_DELIVERY_FAILED 대신 generation을 닫는 것으로 끝낸다(이슈 #190).
@@ -469,29 +756,98 @@ class ThreadMessageDispatcherTest {
 		assertThat(registry.attemptedFrames).hasSize(1);
 	}
 
+	/**
+	* 마지막 연결이 빠져도 진행 중인 턴과 대기 턴은 끝까지 답하고 저장한다(이슈 #413 결정 1·2). 할 일이 끝나고 방에 아무도
+	* 없으면 상태를 지운다 — 그 뒤 seq는 방의 블록이 아니라 DB에서 뽑는다.
+	*/
 	@Test
-	void cancelsTheRunningTurnWhenTheLastConnectionLeaves() throws InterruptedException {
+	void keepsAnsweringRunningAndQueuedTurnsAfterTheLastConnectionLeaves() {
 		TestRoom room = new TestRoom();
-		CountDownLatch subscribed = new CountDownLatch(1);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
-			subscribed.countDown();
-			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
-		}));
-		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)),
+				Flux.just("둘째 답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenAnswer(invocation -> Msg.pendingAgent(invocation.getArgument(0), room.threadId,
+						invocation.getArgument(1)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
+		dispatcher.dispatch(command(room, "@AI first"));
+		dispatcher.dispatch(command(room, "@AI second"));
+		verify(llm, timeout(1000)).streamChat(any());
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		source.tryEmitNext("첫 답");
+		source.tryEmitComplete();
 
-		awaitTrue(cancelled);
-		assertThat(cancelled).isTrue();
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("첫 답"), isNull(), isNull());
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("둘째 답"), isNull(), isNull());
+		assertThat(cancelled).isFalse();
+		eventually(() -> {
+			dispatcher.allocateSeqBlocking(room.threadId);
+			verify(msgPersistenceService, Mockito.atLeastOnce()).allocateSeqBlockBlocking(room.threadId, 1);
+		});
 	}
 
+	/** 사람이 멈춘 게 아니라 서버가 꺼지면 진행 턴은 "중지됨"이 아니라 실패로 남는다(이슈 #413 결정 10). */
 	@Test
-	void cancelsAllRunningTurnsWhenTheServerShutsDown() throws InterruptedException {
+	void marksRunningTurnsFailedWhenTheServerShutsDown() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 0);
+		CountDownLatch subscribed = new CountDownLatch(1);
+		AtomicBoolean cancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
+			subscribed.countDown();
+			return Flux.just("받은 내용").concatWith(Flux.<String>never()).doOnCancel(() -> cancelled.set(true));
+		}));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
+		dispatcher.closeAll();
+
+		awaitTrue(cancelled);
+		assertThat(cancelled).isTrue();
+		// 종료는 저장을 기다리고 돌아온다.
+		verify(msgPersistenceService).failBlocking(pending.getId(), MsgStatus.FAILED);
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+	}
+
+	/** 일반 협업 메시지도 워커가 꺼내야 방송·저장된다 — 방이 비는 순간 워커 앞에 있던 메시지도 저장된다(이슈 #413). */
+	@Test
+	void persistsMessagesTheWorkerHadNotProcessedWhenTheRoomEmpties() throws InterruptedException {
+		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
+		TestRoom room = new TestRoom(registry);
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, mock(LlmChatStreamService.class), msgPersistenceService);
+		registry.blockOnContent = "붙잡힌 발화";
+
+		try {
+			dispatcher.dispatch(command(room, "붙잡힌 발화"));
+			dispatcher.dispatch(command(room, "뒤의 발화"));
+			assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+			room.subscription.dispose();
+			room.registry.leave(room.threadId, room.connectionId, room.participant)
+					.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		} finally {
+			registry.releaseWorker.countDown();
+		}
+
+		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("붙잡힌 발화"), anyList());
+		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("뒤의 발화"), anyList());
+	}
+
+	/** 방이 지워지면 진행 턴을 저장 없이 끊는다 — 저장할 행이 cascade로 이미 없다(이슈 #413). */
+	@Test
+	void discardStopsTheRoomsTurnsWithoutPersisting() throws InterruptedException {
 		TestRoom room = new TestRoom();
 		CountDownLatch subscribed = new CountDownLatch(1);
 		AtomicBoolean cancelled = new AtomicBoolean();
@@ -500,14 +856,18 @@ class ThreadMessageDispatcherTest {
 			subscribed.countDown();
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
-		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
-		dispatcher.closeAllGenerations();
+		dispatcher.discard(room.threadId);
 
 		awaitTrue(cancelled);
 		assertThat(cancelled).isTrue();
+		verify(msgPersistenceService, never()).failBlocking(any(), any());
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+		verify(msgPersistenceService, never()).completeBlocking(any(), any(), any(), any());
 	}
 
 	@Test
@@ -527,9 +887,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		try {
-			dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI first"));
 			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.closeAllGenerations();
+			dispatcher.closeAll();
 		} finally {
 			releaseContext.countDown();
 		}
@@ -564,9 +924,9 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 
 		try {
-			dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI first", turnId));
 			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId);
+			dispatcher.cancel(room.threadId, turnId, room.participant.subject());
 		} finally {
 			releaseContext.countDown();
 		}
@@ -583,13 +943,13 @@ class ThreadMessageDispatcherTest {
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
-			dispatcherRef.get().closeGeneration(room.threadId, room.membership.generation());
+			dispatcherRef.get().discard(room.threadId);
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		dispatcherRef.set(dispatcher);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		awaitTrue(cancelled);
 		assertThat(cancelled).isTrue();
@@ -602,7 +962,7 @@ class ThreadMessageDispatcherTest {
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
+		dispatcher.dispatch(command(room, "일반 발화"));
 
 		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(),
 				eq(room.threadId), eq(room.userId), eq("일반 발화"), anyList());
@@ -617,7 +977,7 @@ class ThreadMessageDispatcherTest {
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
+		dispatcher.dispatch(command(room, "일반 발화"));
 
 		verify(msgPersistenceService, never()).persistHumanMessageBlocking(any(), anyLong(), any(), any(), any(), anyList());
 	}
@@ -632,7 +992,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI hi"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI hi"));
 
 		verify(msgPersistenceService, timeout(1000)).completeBlocking(pending.getId(), "hello world", null, null);
 	}
@@ -652,7 +1012,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI 이어서"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 이어서"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -683,16 +1043,16 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId,
 				room.participant.subject(), room.participant.displayName(), "@AI 요약해줘", List.of(currentFile), null,
-				null, null, null, room.connectionId, "trace", null), room.membership.generation());
+				null, null, null, room.connectionId, "trace", null));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
 		assertThat(request.getValue().messages()).containsExactly(
 				new ChatMessage("user", MsgFileService.withFiles("이 표 봐줘", List.of(earlierFile))),
 				new ChatMessage("user", MsgFileService.withFiles("요약해줘", List.of(currentFile))));
-		assertThat(room.frames).filteredOn(ChatMessageFrame.class::isInstance)
+		eventually(() -> assertThat(room.frames).filteredOn(ChatMessageFrame.class::isInstance)
 				.extracting(frame -> ((ChatMessageFrame) frame).attachments())
-				.containsExactly(List.of(new MsgFileView(currentFile.getId(), "규정.pdf")));
+				.containsExactly(List.of(new MsgFileView(currentFile.getId(), "규정.pdf"))));
 	}
 
 	/** 1:1은 이번 메시지가 이미 저장돼 문맥에 들어 있다 — 그쪽에서 첨부가 붙으므로 두 번 싣지 않는다. */
@@ -712,7 +1072,7 @@ class ThreadMessageDispatcherTest {
 
 		dispatcher.dispatch(new ChatMessageCommand(room.threadId, ThrKind.DIRECT, room.userId,
 				room.participant.subject(), room.participant.displayName(), "요약해줘", List.of(file), null, null, null, null,
-				room.connectionId, "trace", reserved), room.membership.generation());
+				room.connectionId, "trace", reserved));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
@@ -721,18 +1081,80 @@ class ThreadMessageDispatcherTest {
 				new ChatMessage("user", "요약해줘"));
 	}
 
+	/** 검색할 고정 문서가 없는 방에는 검색 도구도 문서 지시도 붙이지 않는다. */
+	@Test
+	void attachesNoDocumentToolWhenTheRoomHasNothingToSearch() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().documentTool()).isNull();
+		assertThat(request.getValue().messages()).noneSatisfy(message -> assertThat(message.role()).isEqualTo("system"));
+	}
+
 	/**
-	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹 검색을 요청받았으면 근거가 있어도 먼저 webSearch를 부르고, 요청하지 않았으면
-	 * 웹을 쓰지도 제안하지도 않음, 도구 결과가 없으면 웹에서 찾았다고 말하지 않음"을 한 system 메시지로 지시한다(이슈 #368).
+	 * 고정 문서가 있으면 검색 도구를 붙이고 어떤 문서가 있는지 알리지만, 검색은 모델이 부를 때만 한다. 모델이 부르지 않은 턴(첨부 요약·
+	 * 현재 시각 같은 질문)에는 출처도 안내도 붙지 않는다 — 예전에는 매 턴 미리 검색해 관련 없는 청크가 출처로 붙었다.
 	 */
 	@Test
-	void aFoundTurnPrefersTheDocumentsAndUsesTheWebOnlyWhenAsked() {
+	void searchesOnlyWhenTheModelCallsTheTool() {
+		ToolTurn turn = toolTurn(true, List.of(), List.of());
+
+		assertThat(turn.request().documentTool()).isNotNull();
+		assertThat(systemBeforeLastUser(turn.request().messages())).contains("규정.pdf").contains("취업규칙.docx")
+				.contains(ThreadDocumentTool.NAME).contains("필요 없는 질문에는 검색하지 마세요");
+		verify(turn.documents(), never()).search(any(), any(), any(), any(), any());
+		assertThat(turn.done()).satisfies(frame -> {
+			assertThat(frame.citations()).isEmpty();
+			assertThat(frame.groundingNotice()).isNull();
+		});
+	}
+
+	/**
+	 * 파일 이름만으로는 내용을 알기 어려워 태그(#362)가 있으면 카테고리·키워드·요약을 함께 알린다. 태그가 없는 문서(태깅 꺼짐·대기·실패)는
+	 * 파일 이름만, 미분류는 카테고리 없이 싣는다. 요약은 SUMMARY_MAX_CHARS자까지, 태그는 앞의 MAX_TAGGED_DOCUMENTS개 문서에만 싣는다.
+	 */
+	@Test
+	void listsTheDocumentTagsSoTheModelCanTellWhatEachDocumentIsAbout() {
+		String prompt = ThreadMessageDispatcher.documentsPrompt(List.of(
+				new SearchableDocument("규정_v3_최종.pdf", "인사·총무", List.of("급여 지급일", "수습 기간"), "급여 계산과 지급 기준"),
+				SearchableDocument.untagged("메모.txt"),
+				new SearchableDocument("안내.txt", null, List.of("도자기"), null)));
+
+		assertThat(prompt).contains("- 규정_v3_최종.pdf — 인사·총무 / 키워드: 급여 지급일, 수습 기간 / 요약: 급여 계산과 지급 기준\n")
+				.contains("- 메모.txt\n").contains("- 안내.txt — 키워드: 도자기\n").contains(ThreadDocumentTool.NAME)
+				.contains("목록만 보고 답하지 마세요");
+
+		String longSummary = "가".repeat(ThreadMessageDispatcher.SUMMARY_MAX_CHARS + 50);
+		List<SearchableDocument> many = new ArrayList<>();
+		for (int i = 0; i <= ThreadMessageDispatcher.MAX_TAGGED_DOCUMENTS; i++) {
+			many.add(new SearchableDocument("문서" + i + ".txt", "인사·총무", List.of(), longSummary));
+		}
+		String capped = ThreadMessageDispatcher.documentsPrompt(many);
+
+		assertThat(capped).contains("요약: " + "가".repeat(ThreadMessageDispatcher.SUMMARY_MAX_CHARS) + "…\n")
+				.doesNotContain("가".repeat(ThreadMessageDispatcher.SUMMARY_MAX_CHARS + 1))
+				.contains("- 문서" + ThreadMessageDispatcher.MAX_TAGGED_DOCUMENTS + ".txt\n");
+	}
+
+	/**
+	 * 근거를 찾으면(FOUND) 근거와 함께 "문서 우선, 웹 검색을 요청받았으면 근거가 있어도 먼저 webSearch를 부르고, 요청하지 않았으면
+	 * 웹을 쓰지도 제안하지도 않음, 도구 결과가 없으면 웹에서 찾았다고 말하지 않음"을 도구 결과로 돌려준다(이슈 #368).
+	 */
+	@Test
+	void aFoundSearchReturnsTheEvidenceAndUsesTheWebOnlyWhenAsked() {
 		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "q", false, List.of(new SearchResult.Chunk("doc:1:0",
 				UUID.randomUUID(), "규정.pdf", 1, 0, "page=1", "최저임금은 시간당 1만 원이다.", 0.9, null)));
 
-		List<ChatMessage> messages = promptFor(Mono.just(found), true);
-		assertThat(messages).filteredOn(message -> message.role().equals("system")).as("지시는 system 메시지 하나").hasSize(1);
-		String withWeb = systemBeforeLastUser(messages);
+		String withWeb = toolTurn(true, List.of("최저임금"), List.of(Mono.just(found))).onlyToolResult();
 		assertThat(withWeb).contains("최저임금은 시간당 1만 원이다.").contains("문서 근거를 우선")
 				.contains(ThreadMessageDispatcher.FOUND_WEB_RULE).doesNotContain(ThreadMessageDispatcher.WEB_TOOL_HONESTY);
 		assertThat(ThreadMessageDispatcher.FOUND_WEB_RULE).contains("먼저 webSearch 도구를 호출")
@@ -740,48 +1162,197 @@ class ThreadMessageDispatcherTest {
 		assertThat(withWeb.indexOf(ThreadMessageDispatcher.FOUND_WEB_RULE)).as("웹 규칙은 근거 목록 뒤에 둔다")
 				.isGreaterThan(withWeb.indexOf("최저임금은 시간당 1만 원이다."));
 
-		assertThat(systemBeforeLastUser(promptFor(Mono.just(found), false))).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
+		assertThat(toolTurn(false, List.of("최저임금"), List.of(Mono.just(found))).onlyToolResult()).as("웹이 꺼진 배포에서는 웹을 말하지 않는다")
 				.contains("문서 근거를 우선").doesNotContain("웹");
 	}
 
-	/** 근거가 없으면(고정 문서 없음·맞는 내용 없음) 지시를 넣지 않는다 — 웹을 쓸지는 모델이 판단한다(이슈 #368). */
+	/** 근거가 없으면 찾지 못했다는 사실만 돌려준다 — 웹을 쓸지는 모델이 판단한다(이슈 #368). */
 	@Test
-	void aNoEvidenceTurnAddsNoInstruction() {
-		for (SearchResult.Reason reason : List.of(SearchResult.Reason.NO_PINNED_DOCUMENTS, SearchResult.Reason.NO_MATCH)) {
-			List<ChatMessage> messages = promptFor(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, reason, "q", false, List.of())), true);
-			assertThat(messages).as(reason.name()).noneSatisfy(message -> assertThat(message.role()).isEqualTo("system"));
-		}
+	void aNoEvidenceSearchOnlySaysNothingWasFound() {
+		SearchResult noMatch = new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_MATCH, "q", false, List.of());
+
+		assertThat(toolTurn(true, List.of("최저임금"), List.of(Mono.just(noMatch))).onlyToolResult())
+				.isEqualTo(ThreadMessageDispatcher.NO_EVIDENCE_RESULT).doesNotContain("웹");
 	}
 
 	/**
 	 * 문서 검색을 하지 못하면(UNAVAILABLE·검색 호출 예외) 알리게 하고, 웹은 쓰지 말고 웹 검색 여부를 묻게 한다. 답변은 계속된다.
-	 * 고장 원인은 지시에 넣지 않고, 웹이 꺼진 배포에서는 웹을 제안하지 않는다(이슈 #368).
+	 * 고장 원인은 넣지 않고, 웹이 꺼진 배포에서는 웹을 제안하지 않는다(이슈 #368).
 	 */
 	@Test
 	void anUnavailableSearchIsToldToTheModelAndOffersTheWebOnlyWhenAvailable() {
 		for (SearchResult.Reason reason : List.of(SearchResult.Reason.BACKEND_ERROR, SearchResult.Reason.MODEL_MISMATCH,
 				SearchResult.Reason.NOT_CONFIGURED, SearchResult.Reason.OVERLOADED)) {
-			String prompt = systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, reason, "q", false,
-					List.of())), true));
-			assertThat(prompt).as(reason.name()).contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지 물어보세요")
-					.contains("앞선 제안에 응했으면").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY).doesNotContain(reason.name()).doesNotContain("Elasticsearch");
+			String result = toolTurn(true, List.of("q"), List.of(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE, reason, "q",
+					false, List.of())))).onlyToolResult();
+			assertThat(result).as(reason.name()).contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지 물어보세요")
+					.contains("앞선 제안에 응했으면").contains(ThreadMessageDispatcher.WEB_TOOL_HONESTY).doesNotContain(reason.name())
+					.doesNotContain("Elasticsearch");
 		}
-		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), true)))
-				.as("검색 호출 예외도 같은 지시").contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지").doesNotContain("끊김");
-		assertThat(systemBeforeLastUser(promptFor(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE,
-				SearchResult.Reason.BACKEND_ERROR, "q", false, List.of())), false)))
+		assertThat(toolTurn(true, List.of("q"), List.of(Mono.error(new IllegalStateException("검색 서버 끊김")))).onlyToolResult())
+				.as("검색 호출 예외도 같은 결과").contains("검색하지 못했습니다").contains("웹 검색으로 답변해 드릴지").doesNotContain("끊김");
+		assertThat(toolTurn(false, List.of("q"), List.of(Mono.just(new SearchResult(SearchResult.Status.UNAVAILABLE,
+				SearchResult.Reason.BACKEND_ERROR, "q", false, List.of())))).onlyToolResult())
 				.as("웹이 꺼진 배포").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
-		assertThat(systemBeforeLastUser(promptFor(Mono.error(new IllegalStateException("검색 서버 끊김")), false)))
-				.as("웹이 꺼진 배포의 검색 호출 예외").contains("확인할 수 없다고 알리세요").doesNotContain("웹");
 	}
 
-	/** 검색 결과를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
-	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled) {
-		return promptFor(search, webEnabled, "@AI 올해 최저임금 얼마야?");
+	/**
+	 * 모델이 검색해 근거를 찾으면(FOUND) 완료 프레임·저장 둘 다에 citations가 채워진다(이슈 #347). 검색어는 모델이 쓴 문장 그대로이고,
+	 * 이미 독립 문장이라 이력을 넘기지 않는다(다시 쓰기 생략).
+	 */
+	@Test
+	void includesDocumentSearchCitationsWhenTheModelSearches() {
+		UUID docId = UUID.randomUUID();
+		SearchResult.Chunk chunk = new SearchResult.Chunk("doc:1:0", docId, "규정.pdf", 1, 0, "page=1",
+				"연차는 사흘 전에 신청한다.", 0.9, null);
+		ToolTurn turn = toolTurn(true, List.of("연차 신청 기한"),
+				List.of(Mono.just(new SearchResult(SearchResult.Status.FOUND, null, "연차 신청 기한", false, List.of(chunk)))));
+
+		assertThat(turn.done().citations()).containsExactly(
+				new Citation(docId.toString(), "규정.pdf", "연차는 사흘 전에 신청한다.", 0.9, "doc:1:0", "page=1"));
+		verify(turn.documents()).search(eq(turn.room().threadId), any(), eq("연차 신청 기한"), eq(List.of()), eq("test-model"));
+		ArgumentCaptor<String> citationsJson = ArgumentCaptor.forClass(String.class);
+		verify(turn.persistence(), timeout(1000)).completeBlocking(eq(turn.pending().getId()), eq("답"),
+				citationsJson.capture(), isNull());
+		assertThat(citationsJson.getValue()).contains(docId.toString()).contains("규정.pdf");
 	}
 
-	/** 검색 결과와 발화를 주고 한 턴을 돌려, 모델에 보낸 메시지를 돌려준다. */
-	private static List<ChatMessage> promptFor(Mono<SearchResult> search, boolean webEnabled, String content) {
+	/** 모델이 검색했지만 맞는 근거가 없을 때(NO_MATCH) 사용자에게 안내를 보낸다(이슈 #353) — 일반 답변은 그대로 허용한다. */
+	@Test
+	void sendsNoEvidenceNoticeWhenSearchFindsNoMatchingChunks() {
+		ToolTurn turn = toolTurn(true, List.of("q"), List.of(Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE,
+				SearchResult.Reason.NO_MATCH, "q", false, List.of()))));
+
+		assertThat(turn.done()).satisfies(frame -> {
+			assertThat(frame.groundingNotice()).isEqualTo(GroundingNotice.NO_EVIDENCE);
+			assertThat(frame.citations()).isEmpty();
+		});
+	}
+
+	/** 방 문서 검색 자체가 실패하면 근거 없이 답하면서도 "검색을 하지 못했다"는 안내를 보낸다(이슈 #353). */
+	@Test
+	void sendsUnavailableNoticeWhenDocumentSearchFails() {
+		ToolTurn turn = toolTurn(true, List.of("q"), List.of(Mono.error(new IllegalStateException("elasticsearch down"))));
+
+		assertThat(turn.done().groundingNotice()).isEqualTo(GroundingNotice.UNAVAILABLE);
+	}
+
+	/** 모델이 검색어를 바꿔 다시 불러 한 번이라도 근거를 찾으면 근거 없음 안내를 보내지 않는다. */
+	@Test
+	void aLaterFoundSearchClearsTheNoEvidenceNotice() {
+		SearchResult.Chunk chunk = new SearchResult.Chunk("doc:1:0", UUID.randomUUID(), "규정.pdf", 1, 0, "page=1",
+				"연차는 사흘 전에 신청한다.", 0.9, null);
+		ToolTurn turn = toolTurn(true, List.of("휴가", "연차 신청 기한"), List.of(
+				Mono.just(new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_MATCH, "휴가", false, List.of())),
+				Mono.just(new SearchResult(SearchResult.Status.FOUND, null, "연차 신청 기한", false, List.of(chunk)))));
+
+		assertThat(turn.done()).satisfies(frame -> {
+			assertThat(frame.groundingNotice()).isNull();
+			assertThat(frame.citations()).extracting(Citation::chunkId).containsExactly("doc:1:0");
+		});
+	}
+
+	/** 고정 문서 목록을 읽지 못하면 도구 없이 검색 실패와 같은 지시·안내로 답한다 — 장애를 조용히 넘기지 않는다. */
+	/** 모델이 개정본 도구를 부르면 이 턴의 방·요청자로 ThreadDocumentRevision에 넘기고, 그 문장을 모델에 돌려준다. */
+	@Test
+	void theRevisionToolRunsForTheTurnsRoomAndRequester() {
+		TestRoom room = new TestRoom();
+		AtomicReference<String> toolResult = new AtomicReference<>();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		List<ThreadDocumentTool.Edit> edits = List.of(new ThreadDocumentTool.Edit("주 12시간", "주 18시간"));
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			ChatStreamRequest sent = invocation.getArgument(0);
+			toolResult.set(sent.documentTool().reviseThreadDocument("규정.docx", edits));
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.just(List.of(SearchableDocument.untagged("규정.docx"))));
+		ThreadDocumentRevision revision = mock(ThreadDocumentRevision.class);
+		when(revision.revise(eq(room.threadId), any(), eq("규정.docx"), eq(edits))).thenReturn("등록했습니다");
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, revision);
+
+		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"));
+
+		awaitDone(room);
+		assertThat(toolResult).hasValue("등록했습니다");
+		ArgumentCaptor<CurrentActor> actor = ArgumentCaptor.forClass(CurrentActor.class);
+		verify(revision).revise(eq(room.threadId), actor.capture(), eq("규정.docx"), eq(edits));
+		assertThat(actor.getValue().userId()).isEqualTo(room.userId);
+	}
+
+	/** 한 답변에서 개정본 등록은 한 번뿐이다. 실패한 호출은 등록이 아니라 다시 부를 수 있고, 성공한 뒤 부르면 새 파일 없이 앞선 결과를 돌려준다. */
+	@Test
+	void theRevisionToolRegistersAtMostOneFilePerTurn() {
+		TestRoom room = new TestRoom();
+		List<String> toolResults = new ArrayList<>();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		List<ThreadDocumentTool.Edit> edits = List.of(new ThreadDocumentTool.Edit("주 12시간", "주 18시간"));
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			ChatStreamRequest sent = invocation.getArgument(0);
+			for (int i = 0; i < 3; i++) toolResults.add(sent.documentTool().reviseThreadDocument("규정.docx", edits));
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.just(List.of(SearchableDocument.untagged("규정.docx"))));
+		ThreadDocumentRevision revision = mock(ThreadDocumentRevision.class);
+		when(revision.revise(eq(room.threadId), any(), eq("규정.docx"), eq(edits)))
+				.thenReturn(ThreadDocumentRevision.FAILED + "원래 문장을 문서에서 찾지 못했습니다.", "'규정_v1.docx'을 방 문서에 등록했습니다.");
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, revision);
+
+		dispatcher.dispatch(command(room, "@AI 개정본 만들어줘"));
+
+		awaitDone(room);
+		verify(revision, times(2)).revise(eq(room.threadId), any(), eq("규정.docx"), eq(edits));
+		assertThat(toolResults).containsExactly(ThreadDocumentRevision.FAILED + "원래 문장을 문서에서 찾지 못했습니다.",
+				"'규정_v1.docx'을 방 문서에 등록했습니다.",
+				ThreadMessageDispatcher.ALREADY_REVISED + "'규정_v1.docx'을 방 문서에 등록했습니다.");
+	}
+
+	/** 새 문서 만들기 도구는 고정 문서가 없는 방에서도 붙고, 이 턴의 방·요청자·턴 id로 ThreadDocumentCreation에 넘긴다(#415). */
+	@Test
+	void theCreateToolIsGivenEvenWhenNoDocumentIsPinned() {
+		TestRoom room = new TestRoom();
+		AtomicReference<String> toolResult = new AtomicReference<>();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		ThreadDocumentPlan plan = new ThreadDocumentPlan("주간 보고", "DOCX",
+				List.of(new ThreadDocumentPlan.Block("paragraph", null, "내용", null, null, null)));
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			ChatStreamRequest sent = invocation.getArgument(0);
+			assertThat(sent.documentTool()).isNull();
+			toolResult.set(sent.createTool().createThreadDocument(plan.title(), plan.format(), plan.blocks()));
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.just(List.of()));
+		ThreadDocumentCreation creation = mock(ThreadDocumentCreation.class);
+		when(creation.create(eq(room.threadId), any(), anyString(), eq(plan), any()))
+				.thenReturn(new ThreadDocumentCreation.Result(true, "등록했습니다"));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), true, null, creation);
+
+		dispatcher.dispatch(command(room, "@AI 보고서 만들어줘"));
+
+		awaitDone(room);
+		assertThat(toolResult).hasValue("등록했습니다");
+		ArgumentCaptor<CurrentActor> actor = ArgumentCaptor.forClass(CurrentActor.class);
+		verify(creation).create(eq(room.threadId), actor.capture(), anyString(), eq(plan), any());
+		assertThat(actor.getValue().userId()).isEqualTo(room.userId);
+	}
+
+	/** 문서 만들기를 쓰지 않는 배포(ThreadDocumentCreation 없음)에서는 도구를 붙이지 않는다. */
+	@Test
+	void theCreateToolIsLeftOutWhenTheDeploymentHasNoCreation() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
@@ -789,15 +1360,113 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
 				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
 		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
-		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(search);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.just(List.of()));
 		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
-				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled);
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
 
-		dispatcher.dispatch(command(room, content), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000)).streamChat(request.capture());
-		return request.getValue().messages();
+		assertThat(request.getValue().createTool()).isNull();
+	}
+
+	@Test
+	void answersWithoutTheToolWhenTheDocumentListFails() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenReturn(Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1));
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.error(new IllegalStateException("db down")));
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
+
+		dispatcher.dispatch(command(room, "@AI first"));
+
+		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
+		verify(llm, timeout(1000)).streamChat(request.capture());
+		assertThat(request.getValue().documentTool()).isNull();
+		assertThat(systemBeforeLastUser(request.getValue().messages())).contains("검색하지 못했습니다").doesNotContain("db down");
+		assertThat(awaitDone(room).groundingNotice()).isEqualTo(GroundingNotice.UNAVAILABLE);
+	}
+
+	/** 검색 도구가 붙은 한 턴의 결과. */
+	private record ToolTurn(TestRoom room, ChatStreamRequest request, List<String> toolResults, ThreadDocumentSearch documents,
+			MsgPersistenceService persistence, Msg pending) {
+
+		ChatAnswerFrame done() {
+			return awaitDone(room);
+		}
+
+		String onlyToolResult() {
+			done();
+			assertThat(toolResults).hasSize(1);
+			return toolResults.get(0);
+		}
+	}
+
+	/**
+	 * 검색할 고정 문서(규정.pdf, 취업규칙.docx)가 있는 방에서 한 턴을 돌린다. 모델은 queries를 차례로 검색 도구에 넘긴 뒤 "답"을 내고,
+	 * 검색은 results를 차례로 돌려준다.
+	 */
+	private static ToolTurn toolTurn(boolean webEnabled, List<String> queries, List<Mono<SearchResult>> results) {
+		return toolTurn(webEnabled, "@AI 올해 최저임금 얼마야?", queries, results);
+	}
+
+	private static ToolTurn toolTurn(boolean webEnabled, String content, List<String> queries, List<Mono<SearchResult>> results) {
+		TestRoom room = new TestRoom();
+		AtomicReference<ChatStreamRequest> request = new AtomicReference<>();
+		List<String> toolResults = new CopyOnWriteArrayList<>();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			ChatStreamRequest sent = invocation.getArgument(0);
+			request.set(sent);
+			for (String query : queries) {
+				toolResults.add(sent.documentTool().searchThreadDocuments(query));
+			}
+			return Flux.just("답");
+		});
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
+		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
+		when(documents.searchableDocuments(eq(room.threadId), any())).thenReturn(Mono.just(List.of(SearchableDocument.untagged("규정.pdf"),
+				SearchableDocument.untagged("취업규칙.docx"))));
+		if (!results.isEmpty()) {
+			OngoingStubbing<Mono<SearchResult>> stub = when(documents.search(eq(room.threadId), any(), any(), any(), any()));
+			for (Mono<SearchResult> result : results) {
+				stub = stub.thenReturn(result);
+			}
+		}
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService, documents,
+				new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create(), webEnabled, null);
+
+		dispatcher.dispatch(command(room, content));
+
+		awaitDone(room);
+		return new ToolTurn(room, request.get(), toolResults, documents, msgPersistenceService, pending);
+	}
+
+	/** 답변 완료(DONE) 프레임을 기다린다. */
+	private static ChatAnswerFrame awaitDone(TestRoom room) {
+		long deadline = System.currentTimeMillis() + 2000;
+		while (System.currentTimeMillis() < deadline) {
+			Optional<ChatAnswerFrame> done = room.frames.stream().filter(ChatAnswerFrame.class::isInstance)
+					.map(ChatAnswerFrame.class::cast).filter(frame -> frame.status() == ChatAnswerStatus.DONE).findFirst();
+			if (done.isPresent()) {
+				return done.get();
+			}
+			try {
+				Thread.sleep(10);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+		}
+		throw new AssertionError("DONE 프레임이 오지 않았다");
 	}
 
 	/** 이번 발화(맨 끝 user) 바로 앞의 system 지시. */
@@ -808,113 +1477,7 @@ class ThreadMessageDispatcherTest {
 		return instruction.content();
 	}
 
-	/** 방 문서 검색(#344)이 FOUND면 근거가 프롬프트에 끼워 들어가고, 완료 프레임·저장 둘 다에
-	 * citations가 채워진다(이슈 #347). */
-	@Test
-	void includesDocumentSearchCitationsWhenFound() {
-		TestRoom room = new TestRoom();
-		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
-		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
-		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
-		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
-				.thenReturn(pending);
-		UUID docId = UUID.randomUUID();
-		SearchResult.Chunk chunk = new SearchResult.Chunk("doc:1:0", docId, "규정.pdf", 1, 0, "page=1",
-				"연차는 사흘 전에 신청한다.", 0.9, null);
-		SearchResult found = new SearchResult(SearchResult.Status.FOUND, null, "first", false, List.of(chunk));
-		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
-		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(Mono.just(found));
-		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
-				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
-				VirtualTimeScheduler.create());
-
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-
-		ArgumentCaptor<ChatStreamRequest> request = ArgumentCaptor.forClass(ChatStreamRequest.class);
-		verify(llm, timeout(1000)).streamChat(request.capture());
-		assertThat(request.getValue().messages()).anySatisfy(message -> {
-			assertThat(message.role()).isEqualTo("system");
-			assertThat(message.content()).contains("규정.pdf").contains("연차는 사흘 전에 신청한다.");
-		});
-
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
-				.map(ChatAnswerFrame.class::cast)
-				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
-				.extracting(frame -> frame.citations())
-				.first()
-				.satisfies(citations -> assertThat((List<Citation>) citations).containsExactly(
-						new Citation(docId.toString(), "규정.pdf", "연차는 사흘 전에 신청한다.", 0.9, "doc:1:0", "page=1")));
-
-		ArgumentCaptor<String> citationsJson = ArgumentCaptor.forClass(String.class);
-		verify(msgPersistenceService, timeout(1000)).completeBlocking(eq(pending.getId()), eq("답"),
-				citationsJson.capture(), isNull());
-		assertThat(citationsJson.getValue()).contains(docId.toString()).contains("규정.pdf");
-	}
-
-	/** 고정 문서는 있지만 이번 질문과 맞는 근거가 없을 때(NO_MATCH) 사용자에게 안내를 보낸다
-	 * (이슈 #353) — 근거 없이도 일반 답변은 그대로 허용한다. */
-	@Test
-	void sendsNoEvidenceNoticeWhenSearchFindsNoMatchingChunks() {
-		TestRoom room = new TestRoom();
-		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
-		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
-		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
-		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
-				.thenReturn(pending);
-		SearchResult noMatch = new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_MATCH,
-				"first", false, List.of());
-		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
-		when(documents.search(eq(room.threadId), any(), any(), any(), any())).thenReturn(Mono.just(noMatch));
-		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
-				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
-				VirtualTimeScheduler.create());
-
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
-				.map(ChatAnswerFrame.class::cast)
-				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
-				.first()
-				.satisfies(frame -> {
-					assertThat(frame.groundingNotice()).isEqualTo(GroundingNotice.NO_EVIDENCE);
-					assertThat(frame.citations()).isEmpty();
-				});
-	}
-
-	/** 방 문서 검색 자체가 실패하면(UNAVAILABLE) 근거 없이 평소처럼 답하면서도 사용자에게는
-	 * "검색을 하지 못했다"는 안내를 보낸다(이슈 #353) — #347의 "로그만 남긴다" 방침을 확장한다. */
-	@Test
-	void sendsUnavailableNoticeWhenDocumentSearchFails() {
-		TestRoom room = new TestRoom();
-		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
-		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
-		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 1);
-		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
-				.thenReturn(pending);
-		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
-		when(documents.search(eq(room.threadId), any(), any(), any(), any()))
-				.thenReturn(Mono.error(new IllegalStateException("elasticsearch down")));
-		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(room.registry, llm, msgPersistenceService,
-				documents, new ObjectMapper(), "test-model", Duration.ofSeconds(120), 20, 20,
-				VirtualTimeScheduler.create());
-
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-
-		awaitFrameCount(room.frames, 2);
-		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
-				.map(ChatAnswerFrame.class::cast)
-				.filteredOn(frame -> frame.status() == ChatAnswerStatus.DONE)
-				.first()
-				.satisfies(frame -> assertThat(frame.groundingNotice()).isEqualTo(GroundingNotice.UNAVAILABLE));
-	}
-
-	/** 고정 문서가 없는 방(NO_PINNED_DOCUMENTS)은 검색을 안 부른 것과 같다 — 안내도 나오지
-	 * 않는다(이슈 #353). dispatcher()의 기본 noOpDocumentSearch가 이 사유를 쓴다. */
+	/** 고정 문서가 없는 방은 검색 도구가 없어 안내도 나오지 않는다(이슈 #353). dispatcher()의 기본 noOpDocumentSearch가 그런 방이다. */
 	@Test
 	void sendsNoNoticeWhenRoomHasNoPinnedDocuments() {
 		TestRoom room = new TestRoom();
@@ -925,7 +1488,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 
 		awaitFrameCount(room.frames, 2);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -946,14 +1509,15 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		firstResponse.tryEmitError(new IllegalStateException("gateway failure"));
 
 		verify(msgPersistenceService, timeout(1000)).failBlocking(pending.getId(), MsgStatus.FAILED);
 	}
 
+	/** 방송 통로가 고장 나 방을 닫으면 진행 턴은 사람이 멈춘 것이 아니라 실패로 남는다(이슈 #413 결정 10). */
 	@Test
-	void marksAgentMessageCancelledWhenRoomClosesDuringActiveTurn() {
+	void marksAgentMessageFailedWhenTheRoomClosesOnABroadcastFailure() {
 		TestRoom room = new TestRoom();
 		Msg pending = Msg.pendingAgent(UUID.randomUUID(), room.threadId, 0);
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -962,13 +1526,30 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
-		// dispatch는 큐에 넣고 바로 돌아온다 — 턴이 실제로 시작된 뒤라야 취소할 대상이 있다(#190).
+		dispatcher.dispatch(command(room, "@AI first"));
+		// dispatch는 큐에 넣고 바로 돌아온다 — 턴이 실제로 시작된 뒤라야 닫을 대상이 있다(#190).
 		verify(llm, timeout(1000)).streamChat(any());
-		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+		dispatcher.closeAfterBroadcastFailure(room.threadId, room.membership.generation());
 
-		verify(msgPersistenceService, timeout(1000)).cancelBlocking(pending.getId(), "");
+		verify(msgPersistenceService, timeout(1000)).failBlocking(pending.getId(), MsgStatus.FAILED);
+		verify(msgPersistenceService, never()).cancelBlocking(any(), any());
+	}
+
+	/** 비었다 다시 생긴 방에 옛 세대의 늦은 실패 알림이 와도 이어지고 있는 턴을 닫지 않는다(이슈 #413). */
+	@Test
+	void ignoresABroadcastFailureOfAGenerationThatIsNoLongerCurrent() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean cancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI first"));
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.closeAfterBroadcastFailure(room.threadId, UUID.randomUUID());
+
+		assertThat(cancelled).isFalse();
+		assertThat(dispatcher.liveAnswer(room.threadId, UUID.randomUUID())).isEmpty();
 	}
 
 	@Test
@@ -984,7 +1565,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first"));
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
 		source.tryEmitNext("answer");
 		// 조각이 실제로 방송된 뒤에 방송을 고장 낸다. 구독 신호(subscribed)는 요청이 닿기 전에 올 수 있어,
@@ -1013,7 +1594,7 @@ class ThreadMessageDispatcherTest {
 		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI 질문", clientMsgId, turnId, null), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI 질문", clientMsgId, turnId, null));
 
 		awaitFrameCount(room.frames, 3);
 		ChatMessageFrame echo = (ChatMessageFrame) room.frames.get(0);
@@ -1024,7 +1605,7 @@ class ThreadMessageDispatcherTest {
 				.containsOnly(tuple(turnId, "test-model"));
 	}
 
-	/** 실행 중인 턴을 멈추면 그때까지의 내용이 CANCELLED로 남고, done 뒤에 다음 턴이 시작된다. */
+	/** 실행 중인 턴을 멈추면 그때까지의 내용이 CANCELLED로 남고, cancelled 프레임에 그 내용이 실린 뒤 다음 턴이 시작된다. */
 	@Test
 	void cancelStopsTheActiveTurnKeepsItsPartialContentAndStartsTheNextTurn() {
 		TestRoom room = new TestRoom();
@@ -1040,12 +1621,12 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID first = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", first), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", first));
+		dispatcher.dispatch(command(room, "@AI second", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 		source.tryEmitNext("부분");
 		awaitFrameCount(room.frames, 4);
-		dispatcher.cancel(room.threadId, room.membership.generation(), first, room.connectionId);
+		dispatcher.cancel(room.threadId, first, room.participant.subject());
 
 		awaitTrue(upstreamCancelled);
 		assertThat(upstreamCancelled).isTrue();
@@ -1054,17 +1635,21 @@ class ThreadMessageDispatcherTest {
 		awaitFrameCount(room.frames, 7);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status())
-				.containsExactly(tuple("부분", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE),
+				.containsExactly(tuple("부분", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.CANCELLED),
 						tuple("next", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE));
-		// 취소는 done으로 끝난다 — 오류 프레임이 따라붙으면 화면은 "취소했는데 잠시 뒤 오류"가 된다.
+		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answer
+						&& answer.status() == ChatAnswerStatus.CANCELLED)
+				.extracting(frame -> ((ChatAnswerFrame) frame).content())
+				.containsExactly("부분");
+		// 취소는 cancelled로 끝난다(협업방도, 이슈 #413 결정 11) — 오류 프레임이 따라붙으면 화면은 "취소했는데 잠시 뒤 오류"가 된다.
 		// startTurn()이 버려진 턴에 Flux.empty()를 돌려주면 EmptyLlmOutputException을 거쳤
 		// MODEL_UNAVAILABLE이 여기 따라붙는다(이슈 #205).
 		assertThat(room.frames).noneMatch(ErrorFrame.class::isInstance);
 	}
 
-	/** turnId는 클라이언트가 만든 값이라 그 발화가 들어온 커넥션에서만 인정한다 — 다른 커넥션이 같은 값을 보내도 턴은 계속된다. */
+	/** turnId는 클라이언트가 만든 값이라 그 발화를 보낸 사람에게서만 인정한다 — 다른 사람이 같은 값을 보내도 턴은 계속된다. */
 	@Test
-	void ignoresACancelFromAnotherConnection() {
+	void ignoresACancelFromAnotherPerson() {
 		TestRoom room = new TestRoom();
 		AtomicBoolean upstreamCancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1072,10 +1657,9 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID turnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", turnId));
 		verify(llm, timeout(1000)).streamChat(any());
-		// 같은 사용자라도 다른 탭(다른 커넥션)이다.
-		dispatcher.cancel(room.threadId, room.membership.generation(), turnId, UUID.randomUUID());
+		dispatcher.cancel(room.threadId, turnId, "subject-someone-else");
 
 		assertThat(upstreamCancelled).isFalse();
 		assertThat(room.frames).noneMatch(ChatAnswerFrame.class::isInstance);
@@ -1090,16 +1674,39 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI revoke this", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
 
 		awaitTrue(upstreamCancelled);
 		assertThat(upstreamCancelled).isTrue();
-		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+		eventually(() -> assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).status())
-				.contains(ChatAnswerStatus.DONE);
+				.contains(ChatAnswerStatus.CANCELLED));
+	}
+
+	/**
+	* 방 항목은 있지만 듣는 사람이 없을 때(탭을 닫는 순간 구독이 먼저 끊기고 방 퇴장은 조금 뒤) 나간 조각은 방송 실패가
+	* 아니다 — 턴은 이어져 저장된다(이슈 #413). 예전에는 warm-up 버퍼를 넘긴 조각이 실패로 알려져 세대가 닫혔다.
+	*/
+	@Test
+	void aTurnKeepsGoingWhileTheRoomHasNoListener() {
+		TestRoom room = new TestRoom();
+		room.subscription.dispose();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("a", "b", "c").doOnCancel(() -> upstreamCancelled.set(true)));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
+				.thenAnswer(invocation -> Msg.pendingAgent(invocation.getArgument(0), room.threadId,
+						invocation.getArgument(1)));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "@AI 아무도 없음", UUID.randomUUID()));
+
+		verify(msgPersistenceService, timeout(1000)).completeBlocking(any(), eq("abc"), isNull(), isNull());
+		assertThat(upstreamCancelled).isFalse();
 	}
 
 	@Test
@@ -1108,8 +1715,8 @@ class ThreadMessageDispatcherTest {
 		AtomicBoolean triggered = new AtomicBoolean();
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
-				boolean broadcast = super.broadcastIfCurrent(threadId, generation, frame);
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
+				boolean broadcast = super.broadcastToRoom(threadId, frame);
 				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.DONE
 						&& triggered.compareAndSet(false, true)) revokeOnDone.get().run();
 				return broadcast;
@@ -1121,10 +1728,11 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
 		revokeOnDone.set(() -> dispatcher.cancelCollabTurnsFrom(room.participant.subject()));
 
-		dispatcher.dispatch(command(room, "@AI finish", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI finish", UUID.randomUUID()));
 
 		awaitTrue(triggered);
 		assertThat(triggered).isTrue();
+		awaitIdle(registry, room.threadId);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).status())
 				.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.DONE);
@@ -1137,7 +1745,7 @@ class ThreadMessageDispatcherTest {
 		CountDownLatch revocationStarted = new CountDownLatch(1);
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50)) {
 			@Override
-			public boolean broadcastIfCurrent(UUID threadId, UUID generation, WsFrame frame) {
+			public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
 				if (frame instanceof ChatAnswerFrame answer && answer.status() == ChatAnswerStatus.STREAMING) {
 					streamingEntered.countDown();
 					try {
@@ -1146,7 +1754,7 @@ class ThreadMessageDispatcherTest {
 						Thread.currentThread().interrupt();
 					}
 				}
-				return super.broadcastIfCurrent(threadId, generation, frame);
+				return super.broadcastToRoom(threadId, frame);
 			}
 		};
 		TestRoom room = new TestRoom(registry);
@@ -1156,7 +1764,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 		try {
-			dispatcher.dispatch(command(room, "@AI race", UUID.randomUUID()), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI race", UUID.randomUUID()));
 			verify(llm, timeout(1000)).streamChat(any());
 			Future<?> emission = executor.submit(() -> source.tryEmitNext("delta"));
 			assertThat(streamingEntered.await(1, TimeUnit.SECONDS)).isTrue();
@@ -1173,7 +1781,7 @@ class ThreadMessageDispatcherTest {
 			awaitFrameCount(room.frames, 3);
 			assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 					.extracting(frame -> ((ChatAnswerFrame) frame).status())
-					.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.DONE);
+					.containsExactly(ChatAnswerStatus.STREAMING, ChatAnswerStatus.CANCELLED);
 		} finally {
 			releaseStreaming.countDown();
 			executor.shutdownNow();
@@ -1191,7 +1799,7 @@ class ThreadMessageDispatcherTest {
 		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), reservedTurn()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
@@ -1209,7 +1817,7 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI keep going", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
 
 		dispatcher.cancelCollabTurnsFrom("someone-else");
@@ -1225,14 +1833,15 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID queuedTurnId = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(command(room, "@AI queued", queuedTurnId), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI queued", queuedTurnId));
 		awaitFrameCount(room.frames, 3);
 
 		dispatcher.cancelCollabTurnsFrom(room.participant.subject());
 
-		assertThat(room.frames).contains(new ChatQueuedFrame(room.threadId, queuedTurnId, ChatQueuedStatus.CANCELLED));
+		eventually(() -> assertThat(room.frames)
+				.contains(new ChatQueuedFrame(room.threadId, queuedTurnId, ChatQueuedStatus.CANCELLED)));
 		verify(llm, times(1)).streamChat(any());
 	}
 
@@ -1245,13 +1854,13 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID second = UUID.randomUUID();
 
-		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI second", second), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()));
+		dispatcher.dispatch(command(room, "@AI second", second));
 		verify(llm, timeout(1000)).streamChat(any());
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames.get(2)).isEqualTo(new ChatQueuedFrame(room.threadId, second, ChatQueuedStatus.QUEUED));
 
-		dispatcher.cancel(room.threadId, room.membership.generation(), second, room.connectionId);
+		dispatcher.cancel(room.threadId, second, room.participant.subject());
 		firstResponse.tryEmitValue("first");
 
 		awaitFrameCount(room.frames, 6);
@@ -1277,9 +1886,9 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 
 		try {
-			dispatcher.dispatch(command(room, "@AI stop me", turnId), room.membership.generation());
+			dispatcher.dispatch(command(room, "@AI stop me", turnId));
 			assertThat(workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
-			dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId);
+			dispatcher.cancel(room.threadId, turnId, room.participant.subject());
 		} finally {
 			releaseWorker.countDown();
 		}
@@ -1290,6 +1899,28 @@ class ThreadMessageDispatcherTest {
 		verify(msgPersistenceService, timeout(1000)).persistHumanMessageBlocking(any(), anyLong(), eq(room.threadId),
 				eq(room.userId), eq("@AI stop me"), anyList());
 		verify(llm, never()).streamChat(any());
+	}
+
+	/**
+	* 대화가 오가는 방의 입퇴장 줄은 그 방의 블록에서 seq를 받는다 — DB에서 따로 뽑으면 이미 예약된 블록 뒤
+	* 번호라 그 뒤의 대화보다 뒤로 정렬된다. 대화가 없는 방은 DB에서 하나만 뽑는다.
+	*/
+	@Test
+	void allocateSeqUsesTheOpenRoomsBlockAndFallsBackToTheDatabaseOtherwise() {
+		TestRoom room = new TestRoom();
+		UUID quietThreadId = UUID.randomUUID();
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.allocateSeqBlockBlocking(room.threadId, 100)).thenReturn(500L);
+		when(msgPersistenceService.allocateSeqBlockBlocking(quietThreadId, 1)).thenReturn(900L);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, mock(LlmChatStreamService.class),
+				msgPersistenceService);
+
+		dispatcher.dispatch(command(room, "안녕하세요"));
+		awaitFrameCount(room.frames, 1);
+
+		assertThat(((ChatMessageFrame) room.frames.get(0)).seq()).isEqualTo(500L);
+		assertThat(dispatcher.allocateSeqBlocking(room.threadId)).isEqualTo(501L);
+		assertThat(dispatcher.allocateSeqBlocking(quietThreadId)).isEqualTo(900L);
 	}
 
 	/** DIRECT는 멘션 파서를 안 타고 모든 발화에 답하며, HUMAN·AGENT 모두 미리 예약된 msgId·seq를
@@ -1304,7 +1935,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "멘션 없는 발화", null, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "멘션 없는 발화", null, reserved));
 
 		awaitFrameCount(room.frames, 3);
 		verify(llm, timeout(1000)).streamChat(any());
@@ -1335,7 +1966,7 @@ class ThreadMessageDispatcherTest {
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "질문", null, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "질문", null, reserved));
 
 		awaitFrameCount(room.frames, 3);
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
@@ -1356,9 +1987,9 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn second = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", null, first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", null, first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "second", null, second), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "second", null, second));
 
 		verify(msgPersistenceService, timeout(1000)).failBlocking(second.agentMsgId(), MsgStatus.DENIED);
 		awaitFrameCount(room.frames, 5);
@@ -1371,8 +2002,8 @@ class ThreadMessageDispatcherTest {
 				.containsExactly(ChatAnswerStatus.DENIED);
 	}
 
-	/** DIRECT는 turnId만으로 취소를 인정한다 — 다른 탭(다른 커넥션)의 재연결·OWNER도 멈출 수
-	 * 있어야 하기 때문이다(이슈 #162). COLLAB의 대비는 ignoresACancelFromAnotherConnection. */
+	/** DIRECT는 turnId만으로 취소를 인정한다 — 방의 OWNER만 구독할 수 있어 누구인지는 핸들러가 이미 확인했다(이슈 #162).
+	 * COLLAB의 대비는 ignoresACancelFromAnotherPerson. */
 	@Test
 	void directCancelFromAnotherConnectionStillCancelsTheActiveTurn() {
 		TestRoom room = new TestRoom();
@@ -1385,18 +2016,17 @@ class ThreadMessageDispatcherTest {
 		UUID turnId = UUID.randomUUID();
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", turnId, reserved), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", turnId, reserved));
 		verify(llm, timeout(1000)).streamChat(any());
-		// 같은 사용자의 다른 탭(다른 커넥션)이어도 DIRECT는 취소를 인정한다.
-		dispatcher.cancel(room.threadId, room.membership.generation(), turnId, UUID.randomUUID());
+		dispatcher.cancel(room.threadId, turnId, "subject-someone-else");
 
 		awaitTrue(upstreamCancelled);
 		assertThat(upstreamCancelled).isTrue();
 		verify(msgPersistenceService, timeout(1000)).cancelBlocking(eq(reserved.agentMsgId()), any());
-		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
+		eventually(() -> assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
 						&& answerFrame.msgId().equals(reserved.agentMsgId()))
 				.extracting(frame -> ((ChatAnswerFrame) frame).status())
-				.contains(ChatAnswerStatus.CANCELLED);
+				.contains(ChatAnswerStatus.CANCELLED));
 	}
 
 	/** 대기 중(pending)인 DIRECT 턴을 취소하면 COLLAB처럼 chat.queued(cancelled)가 아니라
@@ -1414,30 +2044,31 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn second = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
-		dispatcher.dispatch(directCommand(room, "second", secondTurnId, second), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
+		dispatcher.dispatch(directCommand(room, "second", secondTurnId, second));
 		verify(llm, timeout(1000)).streamChat(any());
 
-		dispatcher.cancel(room.threadId, room.membership.generation(), secondTurnId, room.connectionId);
+		dispatcher.cancel(room.threadId, secondTurnId, room.participant.subject());
 
 		verify(msgPersistenceService, timeout(1000)).cancelBlocking(second.agentMsgId(), "");
-		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
+		eventually(() -> assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
 						&& answerFrame.msgId().equals(second.agentMsgId()))
 				.extracting(frame -> ((ChatAnswerFrame) frame).status())
-				.containsExactly(ChatAnswerStatus.CANCELLED);
+				.containsExactly(ChatAnswerStatus.CANCELLED));
+		awaitIdle(room.registry, room.threadId);
 		assertThat(room.frames).filteredOn(ChatQueuedFrame.class::isInstance)
 				.noneMatch(frame -> ((ChatQueuedFrame) frame).status() == ChatQueuedStatus.CANCELLED);
 	}
 
 	/**
-	* 재검토로 확인한 버그(이슈 #233) — activeTurnContentIfMatches가 state.active만 보면, 아직
+	* 재검토로 확인한 버그(이슈 #233) — liveAnswer(예전 activeTurnContentIfMatches)가 state.active만 보면, 아직
 	* 시작 전이라 FIFO 대기 중인(state.pending) 정상 턴을 "고아"로 오판한다. DIRECT는 같은
 	* OWNER가 첫 턴이 스트리밍 중인 동안 다음 발화를 보낼 수 있고 그 발화도 정상적으로
 	* 큐잉된다 — 이 상태에서 재시도가 오면 그 턴을 FAILED로 잘못 닫고 중복 턴을 새로
 	* 시작하게 된다.
 	*/
 	@Test
-	void activeTurnContentIfMatchesRecognizesAQueuedDirectTurnAsStillAlive() {
+	void liveAnswerRecognizesAQueuedDirectTurnAsStillAlive() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
@@ -1448,58 +2079,64 @@ class ThreadMessageDispatcherTest {
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn queued = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "second", UUID.randomUUID(), queued), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "second", UUID.randomUUID(), queued));
 
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId, room.membership.generation(),
-				queued.agentMsgId())).contains("");
+		assertThat(dispatcher.liveAnswer(room.threadId,
+				queued.agentMsgId()).map(ThreadMessageDispatcher.LiveAnswer::content)).contains("");
 		// active 쪽도 여전히 정상 동작해야 한다 — pending 지원을 더하면서 active 분기를
 		// 깨뜨리지 않았는지 같은 테스트에서 함께 확인한다.
-		assertThat(dispatcher.activeTurnContentIfMatches(room.threadId, room.membership.generation(),
+		assertThat(dispatcher.liveAnswer(room.threadId,
 				first.agentMsgId())).isPresent();
 	}
 
+	/** 1:1에서 워커가 아직 꺼내지 않은 예약 턴도 마지막 연결이 빠진 뒤 끝까지 답한다(이슈 #413). */
 	@Test
-	void closingTheLastDirectConnectionCancelsReservedTurnsStillInTheInbox() throws InterruptedException {
+	void answersAReservedDirectTurnStillInTheInboxAfterTheLastConnectionLeaves() throws InterruptedException {
 		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
 		TestRoom room = new TestRoom(registry);
 		registry.blockOnContent = "blocked before pending";
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm, persistence);
 		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved),
-				room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved));
 		assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
 		registry.releaseWorker.countDown();
 
-		verify(persistence, timeout(1000).times(1)).cancelBlocking(reserved.agentMsgId(), "");
-		verify(llm, never()).streamChat(any());
+		verify(persistence, timeout(1000)).completeBlocking(eq(reserved.agentMsgId()), eq("답"), isNull(), isNull());
+		verify(persistence, never()).cancelBlocking(any(), any());
 	}
 
 	@Test
-	void closingTheLastDirectConnectionCancelsQueuedReservedTurns() {
+	void answersQueuedReservedDirectTurnsAfterTheLastConnectionLeaves() {
 		TestRoom room = new TestRoom();
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
+		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("둘째"));
 		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
 		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, persistence);
 		ChatMessageCommand.ReservedTurn first = reservedTurn();
 		ChatMessageCommand.ReservedTurn queued = reservedTurn();
 
-		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first));
 		verify(llm, timeout(1000)).streamChat(any());
-		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued));
+		room.subscription.dispose();
 		room.registry.leave(room.threadId, room.connectionId, room.participant)
-				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+				.ifPresent(generation -> dispatcher.roomVacated(room.threadId));
+		firstResponse.tryEmitValue("첫째");
 
-		verify(persistence, timeout(1000).times(1)).cancelBlocking(queued.agentMsgId(), "");
+		verify(persistence, timeout(1000)).completeBlocking(eq(queued.agentMsgId()), eq("둘째"), isNull(), isNull());
+		verify(persistence, never()).cancelBlocking(any(), any());
 	}
 
 	@Test
@@ -1509,8 +2146,8 @@ class ThreadMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("a"), Flux.just("b"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
-		dispatcher.dispatch(command(room, "@AI one", null, null, "picked-model"), room.membership.generation());
-		dispatcher.dispatch(command(room, "@AI two", null, null, " "), room.membership.generation());
+		dispatcher.dispatch(command(room, "@AI one", null, null, "picked-model"));
+		dispatcher.dispatch(command(room, "@AI two", null, null, " "));
 
 		ArgumentCaptor<ChatStreamRequest> requests = ArgumentCaptor.forClass(ChatStreamRequest.class);
 		verify(llm, timeout(1000).times(2)).streamChat(requests.capture());
@@ -1520,6 +2157,210 @@ class ThreadMessageDispatcherTest {
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).model())
 				.containsExactly("picked-model", "picked-model", "test-model", "test-model");
+	}
+
+	/**
+	* 조각마다 답변의 몇 번째 글자(UTF-16 단위)부터인지를 싣고, 앞쪽 공백 조각도 제 위치를 든다. 끝 프레임은 delta를 비우고
+	* 최종 전체 내용을 content에 싣는다(이슈 #413 결정 3·12) — 화면은 이것으로 겹침을 버리고 빈틈을 메운다.
+	*/
+	@Test
+	void streamingChunksCarryTheirOffsetAndTheEndFrameCarriesTheWholeAnswer() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just(" ", "가😀", "나"));
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 위치"));
+
+		awaitFrameCount(room.frames, 5);
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).offset(),
+						frame -> ((ChatAnswerFrame) frame).content(), frame -> ((ChatAnswerFrame) frame).status())
+				.containsExactly(tuple(" ", 0, null, ChatAnswerStatus.STREAMING),
+						tuple("가😀", 1, null, ChatAnswerStatus.STREAMING),
+						tuple("나", 4, null, ChatAnswerStatus.STREAMING),
+						tuple("", null, " 가😀나", ChatAnswerStatus.DONE));
+		// 요청자는 서버 안에서만 들고(받는 사람마다 mine을 채울 때 쓴다), 방송 프레임의 mine은 비어 있다.
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).requesterSubject(), frame -> ((ChatAnswerFrame) frame).mine())
+				.containsOnly(tuple(room.participant.subject(), null));
+	}
+
+	/**
+	* 방에 막 들어온 연결에 보낼 진행 중인 답의 지금 모습(이슈 #413 결정 3·7·9) — 첫 글자 전이면 "생각 중"(THINKING), 도구가
+	* 돌면 그 도구, 글자가 있으면 지금까지 내용(delta가 아니라 content, 받는 사람이 요청자인지 mine). 진행 중인 턴이 없으면
+	* 아무것도 없다.
+	*/
+	@Test
+	void snapshotShowsThinkingTheRunningToolOrTheContentSoFar() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch streamRequested = new CountDownLatch(1);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			streamRequested.countDown();
+			return source.asFlux();
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).isEmpty();
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(streamRequested.await(1, TimeUnit.SECONDS)).isTrue();
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> assertThat(frame.kind()).isEqualTo("THINKING"));
+		source.tryEmitNext("지금까지");
+		awaitFrameCount(room.frames, 2);
+
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> {
+					assertThat(frame.status()).isEqualTo(ChatAnswerStatus.STREAMING);
+					assertThat(frame.delta()).isEmpty();
+					assertThat(frame.content()).isEqualTo("지금까지");
+					assertThat(frame.mine()).isTrue();
+					assertThat(frame.requesterSubject()).isNull();
+				});
+		assertThat(dispatcher.snapshotFor(room.threadId, "subject-someone-else")).singleElement()
+				.isInstanceOfSatisfying(ChatAnswerFrame.class, frame -> assertThat(frame.mine()).isFalse());
+		source.tryEmitComplete();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).isEmpty());
+	}
+
+	/** 도구가 도는 중에 들어오면 그 도구의 진행 표시를 바로 받는다(이슈 #413 결정 7). 도구가 끝나면 다시 보내지 않는다. */
+	@Test
+	void snapshotIncludesTheToolThatIsRunningNow() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch toolRunning = new CountDownLatch(1);
+		CountDownLatch releaseTool = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		ToolCallback blocking = new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name("webSearch").description("d").inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String input) {
+				toolRunning.countDown();
+				try {
+					releaseTool.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+				return "결과";
+			}
+		};
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback search = toolExecutions.wrap(new ToolCallback[] { blocking })[0];
+			return Mono.fromCallable(() -> search.call("{\"query\":\"서울 날씨\"}"))
+					.subscribeOn(Schedulers.boundedElastic())
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(toolRunning.await(1, TimeUnit.SECONDS)).isTrue();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> {
+					assertThat(frame.kind()).isEqualTo("WEB_SEARCH");
+					assertThat(frame.target()).isEqualTo("서울 날씨");
+					assertThat(frame.active()).isTrue();
+				}));
+		releaseTool.countDown();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class,
+						frame -> assertThat(frame.kind()).isEqualTo("THINKING")));
+	}
+
+	/** 도구 둘이 겹쳐 돌 때 먼저 끝난 도구가 아직 도는 도구의 진행 표시를 지우지 않는다(이슈 #413 결정 7). */
+	@Test
+	void snapshotKeepsTheStillRunningToolWhenAnOverlappingToolFinishes() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch bothRunning = new CountDownLatch(2);
+		CountDownLatch releaseSearch = new CountDownLatch(1);
+		CountDownLatch releaseFetch = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenAnswer(invocation -> {
+			TurnToolExecutions toolExecutions = ((ChatStreamRequest) invocation.getArgument(0)).toolExecutions();
+			ToolCallback[] tools = toolExecutions.wrap(new ToolCallback[] {
+					blockingTool("webSearch", bothRunning, releaseSearch), blockingTool("webFetch", bothRunning, releaseFetch) });
+			return Flux.merge(
+					Mono.fromCallable(() -> tools[0].call("{\"query\":\"서울 날씨\"}")).subscribeOn(Schedulers.boundedElastic()),
+					Mono.fromCallable(() -> tools[1].call("{\"url\":\"https://example.com/a\"}"))
+							.subscribeOn(Schedulers.boundedElastic()))
+					.thenMany(Flux.<String>never());
+		});
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		dispatcher.dispatch(command(room, "@AI 서울 날씨"));
+		assertThat(bothRunning.await(1, TimeUnit.SECONDS)).isTrue();
+		AtomicReference<String> running = new AtomicReference<>();
+		eventually(() -> assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject()))
+				.singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> running.set(frame.kind())));
+		// 나중에 시작해 지금 기억된 도구가 아닌 쪽을 먼저 끝낸다.
+		boolean searchIsRemembered = running.get().equals("WEB_SEARCH");
+		(searchIsRemembered ? releaseFetch : releaseSearch).countDown();
+		eventually(() -> assertThat(room.frames).anySatisfy(frame -> assertThat(frame)
+				.isInstanceOfSatisfying(ChatActivityFrame.class, activity -> assertThat(activity.active()).isFalse())));
+
+		assertThat(dispatcher.snapshotFor(room.threadId, room.participant.subject())).singleElement()
+				.isInstanceOfSatisfying(ChatActivityFrame.class, frame -> {
+					assertThat(frame.kind()).isEqualTo(running.get());
+					assertThat(frame.active()).isTrue();
+				});
+		(searchIsRemembered ? releaseSearch : releaseFetch).countDown();
+	}
+
+	private static ToolCallback blockingTool(String name, CountDownLatch running, CountDownLatch release) {
+		return new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return DefaultToolDefinition.builder().name(name).description("d").inputSchema("{}").build();
+			}
+
+			@Override
+			public String call(String input) {
+				running.countDown();
+				try {
+					release.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+				return "결과";
+			}
+		};
+	}
+
+	/** 같은 사람이 다른 방에서 돌리는 답이 있으면 그 수를 남긴다 — 내용 없이 개수만(이슈 #413 결정 5). */
+	@Test
+	void logsHowManyOtherRoomsTheSamePersonIsRunningTurnsIn() {
+		ch.qos.logback.classic.Logger logger =
+				(ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(ThreadMessageDispatcher.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+				new ch.qos.logback.core.read.ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+			TestRoom first = new TestRoom(registry);
+			TestRoom second = new TestRoom(registry, first.userId);
+			LlmChatStreamService llm = mock(LlmChatStreamService.class);
+			when(llm.streamChat(any())).thenReturn(Flux.never());
+			ThreadMessageDispatcher dispatcher = dispatcher(registry, llm);
+
+			dispatcher.dispatch(command(first, "@AI 하나"));
+			verify(llm, timeout(1000)).streamChat(any());
+			dispatcher.dispatch(command(second, "@AI 둘"));
+
+			eventually(() -> assertThat(appender.list).extracting(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+					.anyMatch(message -> message.startsWith("사람당 동시 AI 턴 threadId=" + second.threadId)
+							&& message.endsWith("others=1")));
+		} finally {
+			logger.detachAppender(appender);
+		}
 	}
 
 	@Test
@@ -1555,13 +2396,10 @@ class ThreadMessageDispatcherTest {
 				new ObjectMapper(), "test-model", timeout, maxPending, 20, scheduler);
 	}
 
-	/** 이 파일의 테스트는 RAG 검색을 다루지 않는다 — 항상 근거 없음으로 답해서 messages를 안
-	 * 건드리게 한다(이슈 #347 도입분). */
+	/** 이 파일의 테스트는 대부분 RAG 검색을 다루지 않는다 — 검색할 고정 문서가 없는 방으로 두어 검색 도구도 지시도 붙지 않게 한다. */
 	private static ThreadDocumentSearch noOpDocumentSearch() {
 		ThreadDocumentSearch documents = mock(ThreadDocumentSearch.class);
-		when(documents.search(any(), any(), any(), any(), any())).thenReturn(Mono.just(
-				new SearchResult(SearchResult.Status.NO_EVIDENCE, SearchResult.Reason.NO_PINNED_DOCUMENTS, "", false,
-						List.of())));
+		when(documents.searchableDocuments(any(), any())).thenReturn(Mono.just(List.of()));
 		return documents;
 	}
 
@@ -1622,6 +2460,12 @@ class ThreadMessageDispatcherTest {
 				null);
 	}
 
+	/** 끝 프레임 — delta는 비고 최종 전체 내용이 content에 실린다(이슈 #413 결정 12). */
+	private static ChatAnswerFrame done(TestRoom room, String content) {
+		return new ChatAnswerFrame(room.threadId, null, null, "test-model", 0L, "", List.of(), false,
+				ChatAnswerStatus.DONE, null, null, null, content, null, null);
+	}
+
 	private static void awaitAttemptedDelta(FailingRoomSessionRegistry registry, String delta) {
 		long deadline = System.currentTimeMillis() + 2000;
 		while (registry.attemptedFrames.stream()
@@ -1674,11 +2518,10 @@ class ThreadMessageDispatcherTest {
 
 		private final UUID connectionId = UUID.randomUUID();
 
-		private final UUID userId = UUID.randomUUID();
+		private final UUID userId;
 
 		/** 저장은 내부 id(userId)로, 방송 프레임은 subject·표시 이름으로 사람을 가리킨다(이슈 #130). */
-		private final PresenceParticipant participant =
-				new PresenceParticipant("subject-" + userId, "발화자");
+		private final PresenceParticipant participant;
 
 		private final RoomSessionRegistry.RoomMembership membership;
 
@@ -1691,7 +2534,14 @@ class ThreadMessageDispatcherTest {
 		}
 
 		TestRoom(RoomSessionRegistry registry) {
+			this(registry, UUID.randomUUID());
+		}
+
+		/** 같은 사람이 여러 방에 있을 때 — 사람(userId)을 정해 방을 만든다. */
+		TestRoom(RoomSessionRegistry registry, UUID userId) {
 			this.registry = registry;
+			this.userId = userId;
+			this.participant = new PresenceParticipant("subject-" + userId, "발화자");
 			this.membership = registry.join(threadId, connectionId, participant);
 			this.subscription = membership.frames().subscribe(frames::add);
 		}
@@ -1719,7 +2569,7 @@ class ThreadMessageDispatcherTest {
 		}
 
 		@Override
-		public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
+		public boolean broadcastToRoom(UUID threadId, WsFrame frame) {
 			attemptedFrames.add(frame);
 			if (frame instanceof ChatMessageFrame message && message.content().equals(blockOnContent)) {
 				workerBlocked.countDown();
@@ -1732,7 +2582,7 @@ class ThreadMessageDispatcherTest {
 			if (failBroadcasts) {
 				throw new IllegalStateException("sink failure");
 			}
-			return super.broadcastIfCurrent(threadId, roomGeneration, frame);
+			return super.broadcastToRoom(threadId, frame);
 		}
 	}
 

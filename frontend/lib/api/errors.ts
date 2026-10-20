@@ -20,6 +20,7 @@ export type BffErrorCode =
   | 'INVITEE_NO_WORKSPACE_ACCESS' // 409 CORE — 초대 대상이 그 방의 워크스페이스를 볼 수 없음
   | 'RBAC_STATE_CONFLICT' // 409 CORE — Workspace·부여 관리가 현재 권한 구성 때문에 거부됨(선언 리소스, 마지막 ADMIN 등)
   | 'MODEL_UNAVAILABLE' // 502 CORE — 게이트웨이가 모델 호출을 거절
+  | 'AI_TURN_TIMEOUT' // WS CORE — AI 턴이 시간 제한(turn-timeout)을 넘겨 중단됨(이슈 #389)
   | 'MESSAGE_DELIVERY_FAILED' // WS — 협업방 메시지 방송 실패
   | 'UNSUPPORTED_FILE' // 400·415 CORE — 첨부·방 문서 형식이 txt·md·csv·pdf·docx가 아님(방 문서는 415)
   | 'FILE_TOO_LARGE' // 413 CORE — 첨부·방 문서가 크기 상한을 넘음
@@ -27,6 +28,7 @@ export type BffErrorCode =
   | 'UNREADABLE_FILE' // 422 CORE — 첨부가 손상됐거나 암호가 걸림
   | 'INVALID_ATTACHMENT' // 400·WS CORE — 발화에 실은 첨부가 없거나 이미 쓰였거나 개수 초과
   | 'DOCUMENT_STATE_CONFLICT' // 409 CORE — 방 문서가 잠긴 방·업로드 중·이미 그 상태라 지금은 바꿀 수 없음
+  | 'APPROVAL_ALREADY_PENDING' // 409 CORE — 같은 글에 처리 전인 승인 요청이 이미 있음(#423)
   | 'DOCUMENT_STORAGE_UNAVAILABLE' // 503 CORE — 방 문서 원본 저장소(문서 워커)에 저장·조회하지 못함
   | 'SERVICE_UNAVAILABLE' // 503 CORE·WS — 새 대화를 놓을 고객사(Tenant)를 정할 수 없음(서버 설정 문제)
   | 'REBUILD_IN_PROGRESS' // 409 CORE — 방 문서 일괄 재처리가 이미 진행 중(운영자 전용 API, 화면에서 부르지 않음)
@@ -66,6 +68,9 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   // 남이 먼저 바꿨거나 방이 잠겼다 — 다시 불러오면 지금 할 수 있는 작업이 보인다.
   DOCUMENT_STATE_CONFLICT:
     '방이나 문서 상태가 방금 바뀌었어요. 목록을 새로고침한 뒤 다시 시도해 주세요.',
+  // 같은 글에 대기 중인 요청이 있다 — 그 요청이 승인이나 반려로 끝나야 다시 요청할 수 있어 새로고침만으로는 풀리지 않는다.
+  APPROVAL_ALREADY_PENDING:
+    '이 글에는 이미 승인 대기 중인 요청이 있어요. 처리가 끝난 뒤에 다시 요청해 주세요.',
   // 서버 설정 문제(SERVICE_UNAVAILABLE)와 달리 저장소가 돌아오면 같은 요청이 성공한다.
   DOCUMENT_STORAGE_UNAVAILABLE:
     '문서 저장소에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.',
@@ -85,6 +90,9 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
   // 때문이다. 그래서 고르기 전에 막지 못하고 이 시점에 안내한다.
   MODEL_UNAVAILABLE:
     '이 모델을 사용할 수 없어요. API 키가 설정되어 있는지 확인하거나 다른 모델을 선택해 주세요.',
+  // 답이 길어 턴 시간 제한에 걸렸다(이슈 #389). 모델 문제가 아니라서 API 키 안내를 띄우지 않는다.
+  AI_TURN_TIMEOUT:
+    '답변이 시간 제한을 넘겨 중단됐어요. 질문을 나눠서 다시 요청해 주세요.',
   // 서버가 이 방 구독을 잃었다(버퍼 넘침 등, 이슈 #161). 다시 구독하고 놓친 대화는 따라잡지만,
   // 그 사이 보낸 메시지는 들어가지 않았을 수 있다.
   NOT_SUBSCRIBED:

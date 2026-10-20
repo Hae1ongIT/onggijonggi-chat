@@ -5,6 +5,7 @@
  *********************************************************/
 
 import type { MessageAttachment } from '@/lib/transport/frames';
+import type { Citation } from './chat';
 import { bffUrl, threadMessagesPath } from './config';
 import { authFetch } from './http';
 
@@ -33,6 +34,31 @@ export interface ThreadMessageItem {
    * #357). `@AI`로 답했거나 HUMAN·SYSTEM이면 null이다 — WS chat.answer의 같은 필드와 짝이다.
    * 이 필드가 없던 과거 응답의 역직렬화 호환을 위해 optional이다. */
   agent?: 'sol' | 'fin' | 'law' | null;
+  /** SYSTEM 메시지가 협업방 입퇴장 줄이면 그 내용. 그 밖의 메시지는 null이다 — WS
+   * participant.changed의 msgId·seq와 짝이다. 이 필드가 없던 과거 응답과 맞물리도록 optional이다. */
+  membership?: {
+    event: 'JOINED' | 'LEFT';
+    subject: string;
+    displayName: string;
+  } | null;
+  /** SYSTEM 메시지가 협업방 승인 요청·처리 줄이면 그 내용(이슈 #407). 그 밖의 메시지는 null이다 — WS
+   * approval.changed의 msgId·seq와 짝이다. 이 필드가 없던 과거 응답과 맞물리도록 optional이다. event는
+   * 서버가 사건을 더해도 깨지지 않게 string으로 받는다. */
+  approval?: {
+    event: string;
+    approvalId: string;
+    requesterSubject: string;
+    requesterDisplayName: string;
+    targetSubject: string;
+    targetDisplayName: string;
+    /** 승인을 요청한 원글의 id(이슈 #416). 이 필드가 생기기 전에 저장된 줄은 null이다. */
+    originMsgId?: string | null;
+    /** 반려 사유(이슈 #416). 반려가 아니거나 사유를 적지 않았으면 null이다. */
+    reason?: string | null;
+  } | null;
+  /** AGENT 답변에 저장된 근거(방 문서·웹 출처) — 실시간 chat.answer DONE 프레임과 같은 값이다(이슈 #401).
+   * 근거 없이 답했거나 HUMAN·SYSTEM이면 빈 배열이다. 목업·과거 응답 호환을 위해 optional이다. */
+  citations?: Citation[];
 }
 
 export async function fetchThreadMessages(

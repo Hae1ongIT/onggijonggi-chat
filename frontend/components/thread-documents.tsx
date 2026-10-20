@@ -9,7 +9,15 @@ import {
   useRef,
   useState,
 } from 'react';
-import { FileText, MoreHorizontal, Pin, RefreshCw, Upload } from 'lucide-react';
+import {
+  FileDown,
+  FileText,
+  MoreHorizontal,
+  Paperclip,
+  Pin,
+  RefreshCw,
+  Upload,
+} from 'lucide-react';
 import { useMediaQuery } from 'usehooks-ts';
 import {
   AlertDialog,
@@ -40,12 +48,17 @@ import {
 import { cn } from '@/lib/utils';
 import {
   changeThreadDocument,
+  downloadThreadAttachment,
   downloadThreadDocument,
+  downloadThreadOutput,
   listThreadDocuments,
+  listThreadOutputs,
+  registerThreadAttachment,
   uploadThreadDocument,
   type ThreadDocument,
   type ThreadDocumentAction,
   type ThreadDocumentsListing,
+  type ThreadOutput,
 } from '@/lib/api/thread-documents';
 
 const statuses: Record<string, string> = {
@@ -110,16 +123,31 @@ function useDocuments(): ThreadDocumentsContext {
  * 일회성 첨부와 별도로, 생성된 방에 남기는 검색용 문서의 등록·고정을 관리한다.
  * 상태는 방마다 한 곳에 두고, 좁은 화면은 헤더 버튼의 시트(ThreadDocumentsButton)로,
  * 넓은 화면은 오른쪽 패널(ThreadDocumentsPanel)로 같은 목록을 보여 준다. 폴링은 둘 중 하나가 보일 때만 한다.
+ * 이 방에 보낸 채팅 첨부도 같은 목록 응답에 실려 오고, 원본 내려받기와 방 문서 등록을 여기서 한다.
+ * AI가 만든 문서(출력)는 별도 API로 읽어 같은 패널의 "출력" 구역에 보이고 내려받기만 한다.
+ * attachmentCount는 화면에 받은 메시지의 첨부 수다. 바뀌면 폴링을 기다리지 않고 바로 다시 읽는다.
+ * senderNames는 subject → 표시 이름이다. 첨부를 보낸 사람 이름을 화면이 이미 받은 메시지 작성자에서 찾는다.
  */
 export function ThreadDocumentsProvider({
   threadId,
   available = true,
+  attachmentCount = 0,
+  senderNames,
   children,
-}: { threadId: string; available?: boolean; children: ReactNode }) {
+}: {
+  threadId: string;
+  available?: boolean;
+  attachmentCount?: number;
+  senderNames?: ReadonlyMap<string, string>;
+  children: ReactNode;
+}) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [panelActive, setPanelActive] = useState(false);
   const open = sheetOpen || panelActive;
   const [listing, setListing] = useState<ThreadDocumentsListing | null>(null);
+  // 출력은 방 문서와 따로 읽는다. 출력 조회가 실패해도 방 문서 목록은 그대로 보여 준다.
+  const [outputs, setOutputs] = useState<ThreadOutput[] | null>(null);
+  const [outputError, setOutputError] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   // 조회 오류는 다음 조회 성공이 지우고, 변경·내려받기 오류는 사용자가 다음 작업을 할 때까지 남긴다.
@@ -146,9 +174,23 @@ export function ThreadDocumentsProvider({
     request.current = controller;
     reading.current = true;
     try {
-      const next = await listThreadDocuments(threadId, controller.signal);
+      const outputRead = listThreadOutputs(threadId, controller.signal).then(
+        (value) => ({ value }),
+        (cause: unknown) => ({ cause }),
+      );
+      const [next, read] = await Promise.all([
+        listThreadDocuments(threadId, controller.signal),
+        outputRead,
+      ]);
       if (alive.current && version === sequence.current) {
         setListing(next);
+        if ('value' in read) {
+          setOutputs(read.value);
+          setOutputError('');
+        } else if (!aborted(read.cause)) {
+          if (revoked(read.cause)) setOutputs(null);
+          setOutputError(messageOf(read.cause, '출력을 불러오지 못했어요.'));
+        }
         setConfirmation((id) =>
           id && next.documents.some((doc) => doc.id === id && doc.canDelete)
             ? id
@@ -163,6 +205,7 @@ export function ThreadDocumentsProvider({
       if (alive.current && version === sequence.current) {
         if (revoked(cause)) {
           setListing(null);
+          setOutputs(null);
           setConfirmation(null);
         }
         setListError(messageOf(cause, '목록을 불러오지 못했어요.'));
@@ -176,6 +219,8 @@ export function ThreadDocumentsProvider({
   useEffect(() => {
     alive.current = true;
     setListing(null);
+    setOutputs(null);
+    setOutputError('');
     setFile(null);
     setConfirmation(null);
     setListError('');
@@ -212,6 +257,14 @@ export function ThreadDocumentsProvider({
       reading.current = false;
     };
   }, [open, available, refresh]);
+  // 첨부가 실린 메시지가 도착하면 그 첨부가 목록에 바로 보이게 한다. 처음 그릴 때는 위의 조회가 맡는다.
+  const seenAttachments = useRef(attachmentCount);
+  useEffect(() => {
+    if (seenAttachments.current === attachmentCount) return;
+    seenAttachments.current = attachmentCount;
+    if (available && !writing.current && !reading.current)
+      void refresh().catch(() => {});
+  }, [attachmentCount, available, refresh]);
 
   async function mutate(action: () => Promise<unknown>, uploaded = false) {
     if (writing.current) return;
@@ -251,11 +304,11 @@ export function ThreadDocumentsProvider({
     }
   }
 
-  async function download(id: string, name: string) {
+  async function download(name: string, fetchOriginal: () => Promise<Blob>) {
     const generation = scope.current;
     setError('');
     try {
-      const blob = await downloadThreadDocument(threadId, id);
+      const blob = await fetchOriginal();
       if (!alive.current || generation !== scope.current) return;
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -307,6 +360,7 @@ export function ThreadDocumentsProvider({
   // 삭제 확인창이 열려 있으면 변경 오류는 확인창 안에 보인다(뒤 화면은 화면 낭독기에서 가려진다).
   const errors = [
     { key: 'list', message: listError },
+    { key: 'outputs', message: outputError },
     { key: 'action', message: confirmation ? '' : error },
   ].filter((entry) => entry.message);
   const total = listing?.documents.length ?? 0;
@@ -476,7 +530,11 @@ export function ThreadDocumentsProvider({
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   disabled={busy || !doc.canReadOriginal}
-                  onSelect={() => void download(doc.id, doc.fileName)}
+                  onSelect={() =>
+                    void download(doc.fileName, () =>
+                      downloadThreadDocument(threadId, doc.id),
+                    )
+                  }
                 >
                   원본 내려받기
                 </DropdownMenuItem>
@@ -497,6 +555,153 @@ export function ThreadDocumentsProvider({
           </li>
         ))}
       </ul>
+      {listing && outputs && (
+        <section aria-labelledby="thread-outputs" className="space-y-2">
+          <h3
+            id="thread-outputs"
+            className="pt-2 text-xs font-semibold text-muted-foreground"
+          >
+            출력 {outputs.length}
+          </h3>
+          {outputs.length === 0 && (
+            <p className="py-2 text-center text-muted-foreground">
+              AI가 만든 문서가 없습니다.
+            </p>
+          )}
+          <ul className="space-y-2" aria-live="polite">
+            {outputs.map((output) => (
+              <li
+                key={output.id}
+                className="flex items-start gap-2 rounded-lg border p-3"
+              >
+                <FileDown className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p
+                    id={`thread-output-${output.id}`}
+                    className="truncate font-medium"
+                    title={output.fileName}
+                  >
+                    {output.fileName}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {[
+                      output.fileKind,
+                      `${Math.ceil(output.fileSize / 1024)}KB`,
+                      senderNames?.get(output.authorSubject) ?? null,
+                      new Date(output.createdAt).toLocaleString('ko-KR', {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      }),
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 shrink-0 text-muted-foreground"
+                  aria-label="출력 내려받기"
+                  title="내려받기"
+                  aria-describedby={`thread-output-${output.id}`}
+                  disabled={busy}
+                  onClick={() =>
+                    void download(output.fileName, () =>
+                      downloadThreadOutput(threadId, output.id),
+                    )
+                  }
+                >
+                  <FileDown className="size-4" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {listing && listing.attachments.length > 0 && (
+        <section aria-labelledby="thread-attachments" className="space-y-2">
+          <h3
+            id="thread-attachments"
+            className="pt-2 text-xs font-semibold text-muted-foreground"
+          >
+            채팅 첨부 {listing.attachments.length}
+          </h3>
+          <ul className="space-y-2" aria-live="polite">
+            {listing.attachments.map((attachment) => (
+              <li
+                key={attachment.id}
+                className="flex items-start gap-2 rounded-lg border p-3"
+              >
+                <Paperclip className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p
+                    id={`thread-attachment-${attachment.id}`}
+                    className="truncate font-medium"
+                    title={attachment.fileName}
+                  >
+                    {attachment.fileName}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {[
+                      attachment.size === null
+                        ? null
+                        : `${Math.ceil(attachment.size / 1024)}KB`,
+                      attachment.own
+                        ? '내가 보냄'
+                        : (senderNames?.get(attachment.senderSubject) ?? null),
+                      attachment.registered ? '방 문서로 등록됨' : null,
+                      attachment.canReadOriginal ? null : '원본 없음',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                </div>
+                {(attachment.canReadOriginal || attachment.canRegister) && (
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 shrink-0 text-muted-foreground"
+                        aria-label="첨부 작업"
+                        aria-describedby={`thread-attachment-${attachment.id}`}
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        disabled={busy || !attachment.canReadOriginal}
+                        onSelect={() =>
+                          void download(attachment.fileName, () =>
+                            downloadThreadAttachment(threadId, attachment.id),
+                          )
+                        }
+                      >
+                        원본 내려받기
+                      </DropdownMenuItem>
+                      {attachment.canRegister && (
+                        <DropdownMenuItem
+                          disabled={busy}
+                          onSelect={() =>
+                            void mutate(() =>
+                              registerThreadAttachment(threadId, attachment.id),
+                            )
+                          }
+                        >
+                          방 문서로 등록
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 

@@ -119,6 +119,7 @@ const SERVER_ONLY_TYPES = [
   'system.notice',
   'chat.queued',
   'pong',
+  'room.subscribed',
 ];
 
 function nonEmptyString(value: unknown): value is string {
@@ -222,6 +223,7 @@ export function answerFrame(
   restrictedResultsOmitted = false,
   groundingNotice: ChatAnswerFrame['groundingNotice'] = null,
   agent: ChatAnswerFrame['agent'] = null,
+  position: { offset?: number | null; content?: string | null } = {},
 ): ChatAnswerFrame {
   return {
     type: 'chat.answer',
@@ -236,6 +238,10 @@ export function answerFrame(
     status,
     groundingNotice,
     agent,
+    // 실서버처럼 조각의 위치와 끝 프레임의 전체 내용을 싣는다(이슈 #413). 목업은 보낸 사람 구분이 없어 mine은 모른다.
+    offset: position.offset ?? null,
+    content: position.content ?? null,
+    mine: null,
   };
 }
 
@@ -278,10 +284,24 @@ export function aiTurnFrames(
     );
   }
 
+  let offset = 0;
   for (const [index, token] of tokens.entries()) {
     frames.push(
-      answerFrame(threadId, answerMsgId, turnId, answerSeq, token, 'streaming'),
+      answerFrame(
+        threadId,
+        answerMsgId,
+        turnId,
+        answerSeq,
+        token,
+        'streaming',
+        [],
+        false,
+        null,
+        null,
+        { offset },
+      ),
     );
+    offset += token.length;
     if (scenario === 'error-mid' && index === 0) {
       frames.push(
         errorFrame(
@@ -296,7 +316,19 @@ export function aiTurnFrames(
   }
 
   frames.push(
-    answerFrame(threadId, answerMsgId, turnId, answerSeq, '', 'done'),
+    answerFrame(
+      threadId,
+      answerMsgId,
+      turnId,
+      answerSeq,
+      '',
+      'done',
+      [],
+      false,
+      null,
+      null,
+      { content: reply },
+    ),
   );
   return frames;
 }

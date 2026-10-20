@@ -4,11 +4,12 @@
  *********************************************************/
 
 import type { RenderedMessage } from '@/lib/chat/rendered-message';
+import type { TerminalStatus } from '@/lib/chat/room-state';
 import equal from 'fast-deep-equal';
 import { memo, useEffect, useRef, useState } from 'react';
 
 import type { CitationsState } from './citations-panel';
-import { PreviewMessage, ThinkingMessage } from './message';
+import { ActivityLine, PreviewMessage, ThinkingMessage } from './message';
 import { Overview } from './overview';
 import { useScrollToBottom } from './use-scroll-to-bottom';
 
@@ -17,11 +18,13 @@ interface MessagesProps {
   isLoading: boolean;
   messages: Array<RenderedMessage>;
   citationsByMessageId: Record<string, CitationsState>;
-  /** DIRECT 전용(이슈 #162, §3.2) — done이 아닌 message.id만 들어 있다. */
-  terminalStatusByMessageId: Record<string, 'cancelled' | 'denied'>;
+  /** 평범하게 끝나지 않은(중단·거부·실패) 답변의 message.id만 들어 있다(이슈 #162 §3.2·#413). */
+  terminalStatusByMessageId: Record<string, TerminalStatus>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;
   onAppendTurn: (content: string) => void;
+  /** AI가 지금 실행 중인 도구의 문구(이슈 #397). 없으면 null. */
+  activityLabel?: string | null;
 }
 
 /** 마지막 메시지가 user이고 아직 로딩 중이면 ThinkingMessage로 대기 상태를 보여준다. */
@@ -34,6 +37,7 @@ function PureMessages({
   failedMessageIds,
   onResendFailedMessage,
   onAppendTurn,
+  activityLabel = null,
 }: MessagesProps) {
   const [messagesContainerRef, messagesEndRef] =
     useScrollToBottom<HTMLDivElement>();
@@ -94,9 +98,17 @@ function PureMessages({
         />
       ))}
 
+      {/* 답변이 아직 없으면 "생각 중" 자리에, 흐르는 답변이 있으면 그 아래에 도구 실행 중 문구를 보인다(이슈 #397). */}
       {isLoading &&
         messages.length > 0 &&
-        messages[messages.length - 1].role === 'user' && <ThinkingMessage />}
+        messages[messages.length - 1].role === 'user' && (
+          <ThinkingMessage label={activityLabel} />
+        )}
+      {activityLabel &&
+        messages.length > 0 &&
+        messages[messages.length - 1].role === 'assistant' && (
+          <ActivityLine label={activityLabel} />
+        )}
 
       <div
         ref={messagesEndRef}
@@ -108,6 +120,7 @@ function PureMessages({
 
 export const Messages = memo(PureMessages, (prevProps, nextProps) => {
   if (prevProps.isLoading !== nextProps.isLoading) return false;
+  if (prevProps.activityLabel !== nextProps.activityLabel) return false;
   if (prevProps.isLoading && nextProps.isLoading) return false;
   if (prevProps.messages.length !== nextProps.messages.length) return false;
   if (!equal(prevProps.messages, nextProps.messages)) return false;

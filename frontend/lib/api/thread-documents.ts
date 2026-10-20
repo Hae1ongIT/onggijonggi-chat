@@ -19,13 +19,46 @@ export interface ThreadDocument {
 }
 /** 처리 실패 문서를 보관된 원본으로 다시 처리하는 reprocess도 같은 요청 UUID 재시도 규칙을 따른다. */
 export type ThreadDocumentAction = 'pin' | 'unpin' | 'delete' | 'reprocess';
+/**
+ * 이 방 메시지에 실려 보낸 채팅 첨부(백엔드 ThreadDocumentView.Attachment). 원본을 두기 전에 올린 첨부는
+ * size가 null이고 내려받기·등록을 할 수 없다. 방 문서로 등록하면 첨부 id가 그 문서의 id가 된다.
+ */
+export interface ThreadAttachment {
+  id: string;
+  fileName: string;
+  size: number | null;
+  /** 보낸 사람의 Keycloak subject. 이름은 화면이 가진 참여자·메시지 작성자에서 찾는다. */
+  senderSubject: string;
+  own: boolean;
+  canReadOriginal: boolean;
+  canRegister: boolean;
+  registered: boolean;
+  createdAt: string;
+}
+/**
+ * AI가 만든 문서 한 건(백엔드 ThreadOutputView). 저장소 위치는 내려오지 않고, 내려받기는 서버가 방 접근을 확인한 뒤 대신 읽는다.
+ * 만든 사람은 Keycloak subject라 이름은 화면이 가진 참여자·메시지 작성자에서 찾는다.
+ */
+export interface ThreadOutput {
+  id: string;
+  fileName: string;
+  fileKind: 'DOCX' | 'PDF' | 'MD';
+  fileSize: number;
+  authorSubject: string;
+  createdAt: string;
+}
 export interface ThreadDocumentsListing {
   threadStatus: string;
   canUpload: boolean;
   documents: ThreadDocument[];
+  attachments: ThreadAttachment[];
 }
 const path = (thread: string) =>
   `/api/threads/${encodeURIComponent(thread)}/documents`;
+const outputPath = (thread: string) =>
+  `/api/threads/${encodeURIComponent(thread)}/outputs`;
+const attachmentPath = (thread: string, file: string) =>
+  `/api/threads/${encodeURIComponent(thread)}/attachments/${encodeURIComponent(file)}`;
 
 /** 화면이 접근권 회수(401·403·404)와 일시 실패를 가를 수 있게 상태 코드를 싣는다. message는 사용자 문구다. */
 export class ThreadDocumentError extends Error {
@@ -147,6 +180,48 @@ export async function downloadThreadDocument(thread: string, id: string) {
   const response = await checked(
     await fetchDocument(
       bffUrl(`${path(thread)}/${encodeURIComponent(id)}/original`),
+      { cache: 'no-store' },
+    ),
+  );
+  return response.blob();
+}
+export async function downloadThreadAttachment(thread: string, file: string) {
+  const response = await checked(
+    await fetchDocument(bffUrl(`${attachmentPath(thread, file)}/original`), {
+      cache: 'no-store',
+    }),
+  );
+  return response.blob();
+}
+/** 첨부 id가 문서 id가 되므로 다시 보내도 문서는 하나만 생긴다. */
+export async function registerThreadAttachment(
+  thread: string,
+  file: string,
+): Promise<ThreadDocument> {
+  const response = await checked(
+    await fetchDocument(bffUrl(`${attachmentPath(thread, file)}/register`), {
+      method: 'POST',
+    }),
+  );
+  return json<ThreadDocument>(response);
+}
+/** 방의 출력(AI가 만든 문서)을 최신순으로 읽는다. 방 문서 목록과 따로 조회한다. */
+export async function listThreadOutputs(
+  thread: string,
+  signal?: AbortSignal,
+): Promise<ThreadOutput[]> {
+  const response = await checked(
+    await fetchDocument(bffUrl(outputPath(thread)), {
+      signal,
+      cache: 'no-store',
+    }),
+  );
+  return json<ThreadOutput[]>(response);
+}
+export async function downloadThreadOutput(thread: string, id: string) {
+  const response = await checked(
+    await fetchDocument(
+      bffUrl(`${outputPath(thread)}/${encodeURIComponent(id)}/download`),
       { cache: 'no-store' },
     ),
   );

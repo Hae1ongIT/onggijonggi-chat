@@ -55,6 +55,8 @@ class WsFrameGoldenTest {
 	private static final UUID TURN_ID = UUID.fromString("44444444-4444-4444-8444-444444444444");
 
 	private static final UUID FILE_ID = UUID.fromString("55555555-5555-4555-8555-555555555555");
+	private static final UUID APPROVAL_ID = UUID.fromString("66666666-6666-4666-8666-666666666666");
+	private static final UUID ORIGIN_MSG_ID = UUID.fromString("77777777-7777-4777-8777-777777777777");
 
 	private final ObjectMapper objectMapper = new JsonMapper();
 
@@ -63,8 +65,11 @@ class WsFrameGoldenTest {
 		PresenceParticipant participant = new PresenceParticipant("kc-1", "주성민");
 		Map<String, WsFrame> samples = new LinkedHashMap<>();
 		samples.put("chat.answer", new ChatAnswerFrame(THREAD_ID, MSG_ID, TURN_ID, "gemini-3.6-flash", 7L, "안녕",
-				List.of(new Citation("doc-001", "제목", "발췌", 0.91, "chunk-001", "page=1")), false,
-				ChatAnswerStatus.STREAMING, GroundingNotice.NO_EVIDENCE, Agent.FIN));
+				List.of(new Citation("doc-001", "제목", "발췌", 0.91, "chunk-001", "page=1"),
+						Citation.web("https://example.com/a", "웹 제목", "웹 요약", "검색어", true)), false,
+				// offset·mine은 이슈 #413 — 이 조각이 답변의 12번째 글자부터이고, 받는 사람이 요청자다. content(전체 내용)는
+				// 끝 프레임·들어올 때 프레임에만 실려 조각에서는 null이다. 요청자 subject는 직렬화하지 않아 샘플에서 비운다.
+				ChatAnswerStatus.STREAMING, GroundingNotice.NO_EVIDENCE, Agent.FIN, 12, null, true, null));
 		samples.put("chat.message", new ChatMessageFrame(THREAD_ID, MSG_ID, CLIENT_MSG_ID, TURN_ID, 3L,
 				participant.subject(), participant.displayName(), "@AI 요약해줘",
 				List.of(new MsgFileView(FILE_ID, "보고서.pdf"))));
@@ -77,11 +82,17 @@ class WsFrameGoldenTest {
 				"검토가 필요한 내용이 감지되었습니다.", "trace-1"));
 		samples.put("error", new ErrorFrame(THREAD_ID, "FORBIDDEN", "권한이 없습니다.", "trace-1"));
 		samples.put("participant.changed", new ParticipantChangedFrame(THREAD_ID, ParticipantChangeAction.INVITED,
-				"kc-2", "이한결"));
+				"kc-2", "이한결", MSG_ID, 43L));
 		samples.put("chat.queued", new ChatQueuedFrame(THREAD_ID, TURN_ID, ChatQueuedStatus.QUEUED));
 		samples.put("pong", new PongFrame());
 		samples.put("chat.typing", new ChatTypingFrame(THREAD_ID, participant.subject(), participant.displayName(),
 				true));
+		samples.put("room.subscribed", new RoomSubscribedFrame(THREAD_ID));
+		samples.put("approval.changed", new ApprovalChangedFrame(THREAD_ID, APPROVAL_ID,
+				ApprovalNotice.Event.REQUESTED, participant.subject(), participant.displayName(), "kc-2", "이한결",
+				MSG_ID, 44L, ORIGIN_MSG_ID, null));
+		samples.put("chat.activity", new ChatActivityFrame(THREAD_ID, MSG_ID, TURN_ID, "WEB_SEARCH", "서울 날씨", true,
+				Agent.FIN));
 		return samples;
 	}
 

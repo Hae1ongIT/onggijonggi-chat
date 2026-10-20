@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgFile;
 import com.onggijonggi.common.chat.domain.ThrMbr;
@@ -8,6 +9,7 @@ import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -93,26 +95,86 @@ public class ThreadMessageQueryService {
 				.flatMap(lookups -> {
 					Map<UUID, String> subjectByThrMbrId = lookups.getT1();
 					Map<UUID, List<MsgFile>> filesByMsgId = lookups.getT2();
-					Set<String> subjects = Set.copyOf(subjectByThrMbrId.values());
+					Map<UUID, MembershipNotice> noticeByMsgId = membershipNotices(messages);
+					Map<UUID, ApprovalNotice> approvalByMsgId = approvalNotices(messages);
+					Set<String> subjects = new HashSet<>(subjectByThrMbrId.values());
+					noticeByMsgId.values().forEach(notice -> subjects.add(notice.subject()));
+					approvalByMsgId.values().forEach(notice -> {
+						subjects.add(notice.requesterSubject());
+						subjects.add(notice.targetSubject());
+					});
 					return Flux.fromIterable(subjects)
 							.flatMap(subject -> rankedDisplayNames.displayName(subject)
 									.map(displayName -> Map.entry(subject, displayName.orElse(subject))),
 									DISPLAY_NAME_LOOKUP_CONCURRENCY)
 							.collectMap(Map.Entry::getKey, Map.Entry::getValue)
 							.map(displayNameBySubject -> messages.stream()
-									.map(msg -> MsgItem.from(msg, subjectByThrMbrId.get(msg.getThrMbrId()),
+									.map(msg -> MsgItem.from(msg, subjectOf(msg, subjectByThrMbrId),
 											displayNameFor(msg, subjectByThrMbrId, displayNameBySubject),
 											filesByMsgId.getOrDefault(msg.getId(), List.of()).stream()
 													.map(MsgFileView::from).toList(),
+											membershipView(noticeByMsgId.get(msg.getId()), displayNameBySubject),
+											approvalView(approvalByMsgId.get(msg.getId()), displayNameBySubject),
 											objectMapper))
 									.toList());
 				});
 	}
 
+	/** SYSTEM 메시지 중 입퇴장 줄만 골라 msgId로 묶는다. */
+	private Map<UUID, MembershipNotice> membershipNotices(List<Msg> messages) {
+		Map<UUID, MembershipNotice> notices = new HashMap<>();
+		for (Msg msg : messages) {
+			if (msg.getAthKind() != AthKind.SYSTEM) {
+				continue;
+			}
+			MembershipNotice notice = MembershipNotice.fromPylJson(objectMapper, msg.getPylJson());
+			if (notice != null) {
+				notices.put(msg.getId(), notice);
+			}
+		}
+		return notices;
+	}
+
+	/** SYSTEM 메시지 중 승인 요청·처리 줄만 골라 msgId로 묶는다. */
+	private Map<UUID, ApprovalNotice> approvalNotices(List<Msg> messages) {
+		Map<UUID, ApprovalNotice> notices = new HashMap<>();
+		for (Msg msg : messages) {
+			if (msg.getAthKind() != AthKind.SYSTEM) {
+				continue;
+			}
+			ApprovalNotice notice = ApprovalNotice.fromPylJson(objectMapper, msg.getPylJson());
+			if (notice != null) {
+				notices.put(msg.getId(), notice);
+			}
+		}
+		return notices;
+	}
+
+	private static MsgItem.Approval approvalView(ApprovalNotice notice, Map<String, String> displayNameBySubject) {
+		return notice == null ? null : new MsgItem.Approval(notice.event().name(), notice.approvalId(),
+				notice.requesterSubject(), displayNameBySubject.getOrDefault(notice.requesterSubject(), notice.requesterSubject()),
+				notice.targetSubject(), displayNameBySubject.getOrDefault(notice.targetSubject(), notice.targetSubject()),
+				notice.originMsgId(), notice.reason());
+	}
+
+	private static MsgItem.Membership membershipView(MembershipNotice notice, Map<String, String> displayNameBySubject) {
+		return notice == null ? null : new MsgItem.Membership(notice.event().name(), notice.subject(),
+				displayNameBySubject.getOrDefault(notice.subject(), notice.subject()));
+	}
+
 	/** thrMbrId가 없는(AGENT·SYSTEM) 메시지는 subject도 없어 여기서 null로 끝난다. */
 	private String displayNameFor(Msg msg, Map<UUID, String> subjectByThrMbrId, Map<String, String> displayNameBySubject) {
-		String subject = subjectByThrMbrId.get(msg.getThrMbrId());
+		String subject = subjectOf(msg, subjectByThrMbrId);
 		return subject == null ? null : displayNameBySubject.get(subject);
+	}
+
+	/**
+	* 작성자의 subject. AGENT·SYSTEM은 thrMbrId가 null이라 맵을 찾지 않고 null이다 — 사람 메시지가 없으면
+	* resolveThrMbrIdToSubject가 불변 맵(Map.of())을 돌려주는데, 불변 맵의 get(null)은 NPE라 재접속
+	* 따라잡기가 AI·시스템 메시지만 받을 때 500이 났다(이슈 #381).
+	*/
+	private static String subjectOf(Msg msg, Map<UUID, String> subjectByThrMbrId) {
+		return msg.getThrMbrId() == null ? null : subjectByThrMbrId.get(msg.getThrMbrId());
 	}
 
 	/** thrMbrId → 그 참가자의 Keycloak subject. thr_mbr을 거쳐 app_user까지 두 번 조회한다. */

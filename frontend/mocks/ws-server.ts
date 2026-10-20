@@ -115,13 +115,22 @@ async function streamAiAnswer(job: MockAiJob): Promise<void> {
   );
 
   for (let i = 0; i < frames.length; i++) {
-    // 부른 사람이 멈추면 COLLAB은 빈 done 한 장으로(이슈 #160), DIRECT는 빈 cancelled로
-    // 스트림을 닫는다(이슈 #162, §3.2) — 화면이 이 둘을 다르게 그린다.
+    // 부른 사람이 멈추면 cancelled 한 장으로 스트림을 닫는다 — 실서버처럼 그때까지 보낸 내용을 content에 싣는다
+    // (이슈 #162 §3.2, #413 — 협업방도 예전의 done이 아니라 cancelled다).
     if (job.cancelled) {
       const last = frames.at(-1);
       if (last?.type === 'chat.answer') {
-        const status = directRooms.has(job.threadId) ? 'cancelled' : 'done';
-        broadcast(job, { ...last, delta: '', citations: [], status });
+        const sent = frames
+          .slice(0, i)
+          .map((frame) => (frame.type === 'chat.answer' ? frame.delta : ''))
+          .join('');
+        broadcast(job, {
+          ...last,
+          delta: '',
+          citations: [],
+          status: 'cancelled',
+          content: sent,
+        });
       }
       return;
     }
@@ -293,14 +302,20 @@ const server = Bun.serve<SocketData>({
         const others = registry.membersOf(threadId);
         rooms.set(threadId, registry.join(threadId, member));
         // 스냅샷은 이 구독에게만, 본인을 포함해서 보낸다(#26). 클라이언트는 이것을 구독 완료로 읽는다.
-        if (!directRooms.has(threadId))
-          member.send(
-            JSON.stringify({
-              type: 'presence.snapshot',
-              threadId: threadId,
-              participants: distinctParticipants(registry.membersOf(threadId)),
-            }),
-          );
+        // presence가 없는 DIRECT는 스냅샷 대신 구독 완료만 알린다(#382).
+        member.send(
+          JSON.stringify(
+            directRooms.has(threadId)
+              ? { type: 'room.subscribed', threadId }
+              : {
+                  type: 'presence.snapshot',
+                  threadId: threadId,
+                  participants: distinctParticipants(
+                    registry.membersOf(threadId),
+                  ),
+                },
+          ),
+        );
         // 그 사용자의 첫 연결일 때만 입장이다 — 탭을 더 여는 것은 입장이 아니다.
         if (
           !directRooms.has(threadId) &&
@@ -371,6 +386,8 @@ const server = Bun.serve<SocketData>({
         };
         generation = registry.join(threadId, member);
         rooms.set(threadId, generation);
+        // 실서버는 bootstrap의 자동 구독도 같은 구독 경로라 완료 답이 붙는다(#382).
+        member.send(JSON.stringify({ type: 'room.subscribed', threadId }));
         console.log(`[mock-ws] bootstrap ${subject} → ${threadId}`);
       }
       registry.broadcastIfCurrent(threadId, generation, {

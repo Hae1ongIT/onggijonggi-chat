@@ -1,5 +1,6 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import java.time.Instant;
 import java.util.List;
@@ -26,6 +27,10 @@ import tools.jackson.databind.ObjectMapper;
  *        빈 배열이다 — 실시간 스트리밍 DONE 프레임과 같은 값을 이력 조회에서도 복원한다
  * @param agent `@SOL`·`@FIN`·`@LAW`로 멘션해 역할별 페르소나로 답했을 때만 채워진다(이슈 #357).
  *        `@AI`로 답했거나 HUMAN·SYSTEM 메시지면 null이다 — WS chat.answer의 같은 필드와 짝이다
+ * @param membership SYSTEM 메시지가 입퇴장 줄이면 그 내용. 그 밖의 메시지는 null이다. 표시 이름은 authorDisplayName처럼
+ *        요청마다 다시 조회한다 — WS participant.changed의 msgId·seq와 짝이다
+ * @param approval SYSTEM 메시지가 승인 요청·처리 줄이면 그 내용. 그 밖의 메시지는 null이다 — WS approval.changed의
+ *        msgId·seq와 짝이다
  */
 public record MsgItem(
 		UUID id,
@@ -39,15 +44,38 @@ public record MsgItem(
 		Instant completedAt,
 		List<MsgFileView> attachments,
 		List<Citation> citations,
-		Agent agent
+		Agent agent,
+		Membership membership,
+		Approval approval
 ) {
 
+	/**
+	* @param event JOINED/LEFT
+	* @param subject 들어오거나 나간 사람의 Keycloak subject
+	* @param displayName 그 사람의 표시 이름. 찾지 못하면 subject다
+	*/
+	public record Membership(String event, String subject, String displayName) {
+	}
+
+	/**
+	* @param event REQUESTED/APPROVED/REJECTED
+	* @param requesterDisplayName 요청한 사람의 표시 이름. 찾지 못하면 subject다
+	* @param targetDisplayName 지정된 사람의 표시 이름. 찾지 못하면 subject다
+	* @param originMsgId 승인을 요청한 원글의 id. 이 필드가 생기기 전에 저장된 줄은 null이다
+	* @param reason 반려 사유. 반려가 아니거나 사유를 적지 않았으면 null이다
+	*/
+	public record Approval(String event, UUID approvalId, String requesterSubject, String requesterDisplayName,
+			String targetSubject, String targetDisplayName, UUID originMsgId, String reason) {
+	}
+
+	/** pyl_json은 종류마다 담는 것이 달라, AGENT만 에이전트 표시로·SYSTEM만 입퇴장 줄로 읽는다. */
 	static MsgItem from(Msg msg, String authorSubject, String authorDisplayName, List<MsgFileView> attachments,
-			ObjectMapper objectMapper) {
+			Membership membership, Approval approval, ObjectMapper objectMapper) {
 		return new MsgItem(msg.getId(), msg.getSeq(), msg.getAthKind().name(), msg.getStatus().name(),
 				msg.getContent(), authorSubject, authorDisplayName, msg.getCreatedAt(), msg.getCompletedAt(),
 				attachments, Citation.fromSrcJson(objectMapper, msg.getSrcJson()),
-				Agent.fromPylJson(objectMapper, msg.getPylJson()));
+				msg.getAthKind() == AthKind.AGENT ? Agent.fromPylJson(objectMapper, msg.getPylJson()) : null,
+				membership, approval);
 	}
 
 }

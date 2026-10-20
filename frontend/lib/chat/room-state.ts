@@ -9,8 +9,10 @@
  살아남을 규칙이라는 것이다 — 방 레지스트리(#16)와 `@AI` 분기(#17)가 서버에 들어와도 프레임을
  상태로 접는 방식 자체는 바뀌지 않는다.
 
- 입퇴장은 두 군데에 남는다 — 참여자 목록(#26)에는 지금 상태로, 메시지 흐름(#111)에는
- 일어난 사건으로. 같은 프레임을 두 번 쓰는 것이지 중복이 아니다.
+ 접속(presence)과 참가는 다르게 남는다. 참여자 목록(#26)은 지금 접속한 사람이라 presence 프레임으로
+ 갱신하고, 메시지 흐름의 입퇴장 줄은 참가자가 되거나 빠진 사건이라 서버가 저장한 SYSTEM 메시지(이력)와
+ participant.changed로만 들어온다 — 방 목록과 방을 오가는 것은 입퇴장이 아니다. 승인 요청·처리 줄(#407)도
+ 같은 방식으로 SYSTEM 메시지(이력)와 approval.changed로만 들어온다.
 
  `chat.answer`의 citations·restrictedResultsOmitted는 현재 AI 답변에 누적한다. 참여자 목록은
  붙는 순간 오는 `presence.snapshot`(#26)으로 채우고, 그 뒤로는 `presence.join`·`presence.leave`
@@ -21,6 +23,7 @@
 import type { Citation } from '@/lib/api/chat';
 import { friendlyMessageForCode } from '@/lib/api/errors';
 import type { ThreadMessageItem } from '@/lib/api/thread-history';
+import { citationKey } from '@/lib/chat/citations';
 import type {
   ChatAnswerFrame,
   MessageAttachment,
@@ -32,18 +35,26 @@ import type {
 /** chat.answer가 실어 보내는 진행 상태. 프레임 계약에서 그대로 따와 둘이 어긋나지 않게 한다. */
 type AnswerStatus = ChatAnswerFrame['status'];
 
+/**
+ * AI 답변이 평범하게 끝나지 않은 사유. 실시간 프레임(chat.answer.status)과 이력(MsgItem.status) 양쪽에서 온다 — 실패도
+ * msgId를 단 failed 끝 프레임으로 온다(이슈 #413 결정 8).
+ */
+export type TerminalStatus = 'cancelled' | 'denied' | 'failed';
+
 /** 평범한 완료가 아닌 종료인지. 화면이 "중지됨"·"거부됨"을 표시할 근거다. */
-function isTerminalStatus(
-  status: AnswerStatus,
-): status is 'cancelled' | 'denied' {
-  return status === 'cancelled' || status === 'denied';
+function isTerminalStatus(status: AnswerStatus): status is TerminalStatus {
+  return status === 'cancelled' || status === 'denied' || status === 'failed';
 }
+
+/** 도구가 아니라 첫 글자를 기다리는 중이라는 활동 종류(이슈 #413 결정 9) — 방에 막 들어온 화면에만 온다. */
+export const THINKING_ACTIVITY = 'THINKING';
 
 /** 방에 접근할 수 없다는 뜻의 에러 코드(백엔드 ErrorFrame이 02·EDGE에서 쓰는 값). */
 const FORBIDDEN_CODE = 'FORBIDDEN';
 const TERMINAL_AI_ERROR_CODES = new Set([
   'MODEL_UNAVAILABLE',
   'INTERNAL_ERROR',
+  'AI_TURN_TIMEOUT',
 ]);
 
 /** 메시지 하나. 사람과 AI를 role이 아니라 보낸 사람 유무로 가른다 — 협업방에는 보낸 사람이 여럿이다. */
@@ -66,16 +77,19 @@ export interface RoomMessage {
    * 실시간 프레임(chat.answer.status)과 이력(MsgItem.status) 양쪽에서 채운다. 이력에서도
    * 읽어야 방을 다시 열었을 때 중지 표시가 살아남는다.
    */
-  terminalStatus: 'cancelled' | 'denied' | null;
+  terminalStatus: TerminalStatus | null;
   /**
    * 이 AI 답변을 불러낸 턴의 식별자(이슈 #160). 사람 메시지와 REST 이력은 null이다 —
    * 이력에는 저장되지 않는 값이고, 지나간 턴은 어차피 중지할 수 없기 때문이다.
    *
-   * 중지 버튼이 "내가 부른 턴"만 골라내는 근거다 — 서버는 그 턴을 시작한 커넥션이 보낸
-   * 취소만 받으므로(CollabMessageDispatcher.cancel), 남의 답변에 버튼을 달면 눌러도 아무 일도
-   * 일어나지 않는다.
+   * 서버는 그 턴을 요청한 사람의 취소만 받는다(이슈 #413 — 예전엔 보낸 연결).
    */
   turnId: string | null;
+  /**
+   * 이 AI 답변을 받는 내가 요청한 사람인지(이슈 #413). 서버가 받는 사람마다 채워 보낸다 — 방을 떠났다 돌아와도(새
+   * 연결·새로고침) 중지 버튼을 띄우는 근거다. 사람 메시지·이력은 false다.
+   */
+  mine: boolean;
   citations: Citation[];
   restrictedResultsOmitted: boolean;
   /** 방 문서 검색이 FOUND가 아니었을 때의 안내(이슈 #353). 재접속 복원 대상이 아니라 그 턴에만
@@ -86,34 +100,81 @@ export interface RoomMessage {
   agent: ChatAnswerFrame['agent'];
   /** 사람 메시지에 실린 첨부. 이름만 든다. AI 답변은 언제나 빈 배열이다. */
   attachments: MessageAttachment[];
+  /**
+   * 앞에 빈틈이 있어 아직 붙이지 못한 조각(이슈 #413). 방에 들어올 때 받는 지금까지 내용과 방 프레임은 서로 다른 길로
+   * 와 순서가 섞인다 — 지금까지 내용보다 뒤 조각이 먼저 오면 버리지 않고 들고 있다가 앞이 채워지면 붙인다. 버리면 그 뒤
+   * 조각도 모두 빈틈 뒤라 끝 프레임까지 글자가 멈춘다. 흐르는 AI 답변에만 있다.
+   */
+  heldChunks?: readonly AnswerChunk[];
 }
 
+/** 위치(offset)를 단 답변 조각. */
+export interface AnswerChunk {
+  offset: number;
+  delta: string;
+}
+
+/** 들고 있는 조각의 상한 — 앞이 끝내 안 채워져도 끝 프레임의 전체 내용이 메우므로 넘치는 것은 버린다. */
+const MAX_HELD_CHUNKS = 200;
+
 /**
- * 입퇴장을 시간 순서에 남기는 줄(이슈 #111). 목록(#26)이 "지금 누가 있나"라면 이쪽은
- * "언제 누가 오갔나"다 — 그래서 상태가 아니라 메시지 흐름에 낀다.
+ * 참가자가 되거나 참가가 끝난 것을 시간 순서에 남기는 줄. 목록(#26)이 "지금 누가 접속해 있나"라면
+ * 이쪽은 "언제 누가 이 방에 들어오고 나갔나"다 — 그래서 상태가 아니라 메시지 흐름에 낀다.
+ *
+ * 서버가 SYSTEM 메시지로 저장한 줄이라 id·seq가 메시지와 같은 체계다. 이력과 실시간
+ * (participant.changed)이 같은 줄을 id로 알아보고, seq 자리에 끼운다.
  *
  * 문구를 여기서 만들지 않고 사건과 사람만 담는다 — 어떻게 쓸지는 화면이 정하는 편이
  * 갈아끼우기 쉽다. 사람은 subject로 식별하고 표시는 displayName으로 한다(이슈 #130).
- *
- * 자기 입퇴장은 서버가 자기에게 보내지 않으므로 "내가 입장했습니다" 줄은 생기지 않는다.
- * 붙는 순간 받는 참여자 명단(presence.snapshot)도 여기에 줄을 만들지 않는다 — 명단은
- * 사건이 아니라 상태다.
  */
-export interface RoomPresenceNotice {
+export interface RoomMembershipNotice {
   id: string;
+  seq: number;
   event: 'join' | 'leave';
   participant: PresenceParticipant;
 }
 
-/** 대화 흐름에 놓이는 것. 사람·AI 메시지이거나, 입퇴장 시스템 라인이다. */
-export type RoomEntry = RoomMessage | RoomPresenceNotice;
+/**
+ * 승인 요청이 생기거나 승인·반려로 처리된 때 대화 흐름에 남는 줄(이슈 #407). 입퇴장 줄과 같은 SYSTEM
+ * 메시지라 id·seq 체계가 같고, 이력과 실시간(approval.changed)이 같은 줄을 id로 알아본다.
+ *
+ * 요청한 메시지의 내용은 담지 않는다 — 누가 누구에게 무엇을 했는지만 남기고, 요청 내용은 요청자·지정된 사람이
+ * 읽는 REST 목록에 있다. 문구는 입퇴장 줄처럼 화면이 정한다.
+ */
+export interface RoomApprovalNotice {
+  id: string;
+  seq: number;
+  approvalId: string;
+  event: 'requested' | 'approved' | 'rejected';
+  requester: PresenceParticipant;
+  target: PresenceParticipant;
+  /** 승인을 요청한 원글의 id(이슈 #416). 이 필드가 생기기 전에 저장된 줄은 null이라 한 줄 문구로만 보인다. */
+  originMsgId: string | null;
+  /** 반려 사유(이슈 #416). 반려가 아니거나 사유를 적지 않았으면 null이다. */
+  reason: string | null;
+}
 
-/** 시스템 라인인지. 판별 태그를 따로 두지 않고 event 유무로 가른다 — 메시지 쪽 모양을
- * 건드리지 않으려는 것이다. */
-export function isPresenceNotice(
+export type RoomNotice = RoomMembershipNotice | RoomApprovalNotice;
+
+/** 대화 흐름에 놓이는 것. 사람·AI 메시지이거나, 입퇴장·승인 시스템 줄이다. */
+export type RoomEntry = RoomMessage | RoomNotice;
+
+/** 입퇴장 줄인지. 판별 태그를 따로 두지 않고 필드 유무로 가른다 — 메시지 쪽 모양을 건드리지 않으려는 것이다. */
+export function isMembershipNotice(
   entry: RoomEntry,
-): entry is RoomPresenceNotice {
-  return 'event' in entry;
+): entry is RoomMembershipNotice {
+  return 'participant' in entry;
+}
+
+export function isApprovalNotice(
+  entry: RoomEntry,
+): entry is RoomApprovalNotice {
+  return 'approvalId' in entry;
+}
+
+/** 메시지가 아닌 시스템 줄인지(입퇴장·승인). 메시지만 다루는 곳이 이것으로 걸러낸다. */
+export function isNotice(entry: RoomEntry): entry is RoomNotice {
+  return isMembershipNotice(entry) || isApprovalNotice(entry);
 }
 
 /**
@@ -153,8 +214,6 @@ export interface RoomState {
   /** 닫기 전까지 방 위에 남아 있는 알림. 도착 순서대로다. */
   notices: SystemNotice[];
   error: RoomError | null;
-  /** 다음 메시지에 붙일 번호. 순수 함수로 두려고 상태에 담았다 — 시계나 난수에 기대지 않는다. */
-  nextMessageId: number;
   /**
    * 지금까지 받은 가장 큰 seq — 재접속 따라잡기의 커서다(이슈 #190).
    *
@@ -163,6 +222,27 @@ export interface RoomState {
    * 큰 것"을 요구하는 값으로만 쓴다.
    */
   lastSeq: number | null;
+  /**
+   * 이력에서 아직 PENDING이던(그리지 않은) AI 답변의 id → seq(이슈 #413). 이력을 받은 뒤 구독을 걸기 전에 그 답이 끝나면
+   * 끝 프레임도 지금까지 내용도 오지 않는다 — 따라잡기 커서를 그 앞에서 멈춰(catchUpCursor) 다음 따라잡기가 끝난 답을
+   * 다시 가져오게 한다. 말풍선이 생기거나 이력이 끝난 상태로 오면 더는 보지 않는다.
+   */
+  pendingAnswers: Record<string, number>;
+  /**
+   * 지금 AI 턴이 실행 중인 도구(이슈 #397). 방마다 AI 턴은 한 번에 하나라 한 칸이고, 다음 도구가 시작하면
+   * 덮어쓴다. 도구 끝 알림, 그 턴 답변의 종료, 종결 오류, 연결 끊김(clearActivity)에서 지운다 — 서버가
+   * 저장하지 않으므로 재접속한 화면은 다음 알림부터 본다.
+   */
+  activity: RoomActivity | null;
+}
+
+/** 실행 중인 도구 하나. 문구는 화면이 kind로 고른다(lib/chat/activity.ts). */
+export interface RoomActivity {
+  /** 그 턴의 AI 답변 msgId — 답변 말풍선이 이미 있으면 그 아래에 붙인다. */
+  msgId: string;
+  kind: string;
+  target: string | null;
+  agent: ChatAnswerFrame['agent'];
 }
 
 export const initialRoomState: RoomState = {
@@ -170,9 +250,28 @@ export const initialRoomState: RoomState = {
   messages: [],
   notices: [],
   error: null,
-  nextMessageId: 1,
   lastSeq: null,
+  pendingAnswers: {},
+  activity: null,
 };
+
+/** 연결이 끊기면 진행 중 표시를 지운다 — 끊긴 동안 끝 알림을 놓칠 수 있다(이슈 #397). */
+export function clearActivity(state: RoomState): RoomState {
+  return state.activity === null ? state : { ...state, activity: null };
+}
+
+/** 그 msgId의 답변이 이미 있고 더 흐르지 않는지. 말풍선이 아직 없으면(도구가 첫 글자보다 먼저 돎) false다. */
+function isFinishedAnswer(state: RoomState, msgId: string): boolean {
+  const index = messageIndexById(state, msgId);
+  if (index === null) return false;
+  const entry = state.messages[index];
+  return !isNotice(entry) && !entry.streaming;
+}
+
+/** 그 턴의 진행 중 표시만 지운다. 다른 턴의 표시는 그대로 둔다. */
+function clearActivityOf(state: RoomState, msgId: string): RoomState {
+  return state.activity?.msgId === msgId ? { ...state, activity: null } : state;
+}
 
 /** error.code가 방 접근 거부인지. 화면은 이 경우에만 방 대신 안내를 그린다. */
 export function isForbidden(error: RoomError | null): boolean {
@@ -232,6 +331,7 @@ function appendMessage(
         streaming,
         terminalStatus: null,
         turnId,
+        mine: false,
         citations: [],
         restrictedResultsOmitted: false,
         groundingNotice: null,
@@ -247,7 +347,7 @@ function appendMessage(
 /** 같은 msgId가 이미 흐름에 있는지. 이력과 실시간이 겹칠 때 한 번만 남기는 근거다(#190). */
 function messageIndexById(state: RoomState, id: string): number | null {
   const index = state.messages.findIndex(
-    (entry) => !isPresenceNotice(entry) && entry.id === id,
+    (entry) => !isNotice(entry) && entry.id === id,
   );
   return index === -1 ? null : index;
 }
@@ -256,16 +356,15 @@ function messageIndexById(state: RoomState, id: string): number | null {
  * seq가 가리키는 자리에 메시지를 끼워 넣는다(이슈 #190).
  *
  * 앞에 붙는 진입 이력과 뒤에 붙는 재접속 따라잡기를 한 규칙으로 다루려는 것이다 — 어느
- * 쪽이든 "seq 순서대로 있어야 할 자리"는 같은 방식으로 구해진다. 입퇴장 줄은 seq가 없어
- * 비교에서 빼고, 그래서 도착했던 자리에 그대로 남는다.
+ * 쪽이든 "seq 순서대로 있어야 할 자리"는 같은 방식으로 구해진다. 입퇴장 줄도 seq가 있어
+ * 메시지와 같은 규칙으로 자리를 찾는다.
  *
- * 비교할 메시지가 하나도 없을 때(흐름이 비었거나 입퇴장 줄뿐일 때)는 커서로 가른다. 커서보다
- * 큰 seq면 따라잡기라 끝에, 아니면 진입 이력이라 앞에 둔다 — 이 경우에만 판단할 근거가
- * 흐름 안에 없다.
+ * 흐름이 비었을 때는 커서로 가른다. 커서보다 큰 seq면 따라잡기라 끝에, 아니면 진입 이력이라
+ * 앞에 둔다 — 이 경우에만 판단할 근거가 흐름 안에 없다.
  */
 function insertBySeq(
   messages: RoomEntry[],
-  incoming: RoomMessage[],
+  incoming: RoomEntry[],
   cursor: number | null,
 ): RoomEntry[] {
   const merged = [...messages];
@@ -273,7 +372,6 @@ function insertBySeq(
     let index: number | null = null;
     for (let i = merged.length - 1; i >= 0; i -= 1) {
       const entry = merged[i];
-      if (isPresenceNotice(entry)) continue;
       if (entry.seq <= message.seq) {
         index = i + 1;
         break;
@@ -296,32 +394,72 @@ export function advanceCursor(current: number | null, seq: number): number {
 }
 
 /**
+ * 재연결·따라잡기에 실을 커서(이슈 #413). 받은 가장 큰 seq(lastSeq)에서, 아직 흐르는 중인 AI 말풍선과 이력에서 PENDING이던
+ * 답변 앞에서 멈춘다 — 끊긴 사이 그 답이 끝났으면 끝 프레임이 안 와 "생성 중"에 머무르는데, 커서가 그 seq를 지나 있으면
+ * 따라잡기도 그 행을 다시 가져오지 않는다. 이미 받은 행이 다시 와도 applyHistory가 id로 거른다.
+ */
+export function catchUpCursor(state: RoomState): number | null {
+  let cursor = state.lastSeq;
+  const holdBefore = (seq: number) => {
+    cursor = cursor === null ? seq - 1 : Math.min(cursor, seq - 1);
+  };
+  for (const entry of state.messages) {
+    if (!isNotice(entry) && entry.from === null && entry.streaming) {
+      holdBefore(entry.seq);
+    }
+  }
+  for (const [id, seq] of Object.entries(state.pendingAnswers)) {
+    if (messageIndexById(state, id) === null) holdBefore(seq);
+  }
+  return cursor;
+}
+
+/** 이력을 받은 직후의 커서 — 상태가 반영되기 전에 최초 따라잡기를 쏠 때 쓴다(use-room). catchUpCursor와 같은 규칙이다. */
+export function historyCursor(
+  current: number | null,
+  items: ThreadMessageItem[],
+): number | null {
+  let cursor = items.reduce(
+    (seen, item) => advanceCursor(seen, item.seq),
+    current,
+  );
+  for (const item of items) {
+    if (isPendingAnswer(item) && cursor !== null) {
+      cursor = Math.min(cursor, item.seq - 1);
+    }
+  }
+  return cursor;
+}
+
+/** 아직 만들어지는 중인(본문이 빈) AI 답변 행인지. */
+function isPendingAnswer(item: ThreadMessageItem): boolean {
+  return item.athKind === 'AGENT' && item.status === 'PENDING';
+}
+
+/**
  * 불러온 과거 대화를 흐름에 합친다(이슈 #190). 방 진입 시의 전체 이력과 재접속 시의 따라잡기가
  * 같은 함수를 쓴다 — 둘 다 "REST로 받은 메시지를 seq 자리에 넣는다"는 같은 일이다.
  *
  * 이미 있는 msgId는 건너뛴다 — 이력을 받기 전에 WS로 먼저 도착한 메시지가 있을 수 있고,
  * 그때 같은 말이 두 번 보이면 안 된다. 남는 것들은 seq로 정렬해 앞에 통째로 붙인다: 이력은
  * 진입 시점의 과거이고 지금 흐름에 있는 것은 그보다 새것이라, 둘을 섞어 정렬할 이유가 없다.
- * 입퇴장 줄(seq가 없다)이 제자리에 남는 것도 같은 이유다.
  *
  * PENDING·CANCELLED처럼 본문이 빈 행은 그리지 않는다 — 빈 말풍선은 아무것도 알리지 못하면서
  * 자리만 차지한다(chat.answer의 빈 패킷을 버리는 것과 같은 결).
  *
- * SYSTEM도 그리지 않는다. 사람도 AI도 아닌 줄을 이 화면이 표현할 방법이 아직 없어서다 —
- * from이 null이면 AI 답변으로 보인다. 위험 알림은 system.notice 배너가 따로 전한다(#29).
+ * SYSTEM은 입퇴장 줄만 그린다. 나머지 SYSTEM은 사람도 AI도 아닌 줄을 이 화면이 표현할 방법이
+ * 아직 없어서 그리지 않는다 — from이 null이면 AI 답변으로 보인다. 위험 알림은 system.notice
+ * 배너가 따로 전한다(#29).
  */
 export function applyHistory(
   state: RoomState,
   items: ThreadMessageItem[],
 ): RoomState {
-  const known = new Set(
-    state.messages
-      .filter((entry) => !isPresenceNotice(entry))
-      .map((entry) => entry.id),
-  );
-  const restored = items
+  const settled = settleStreamingAnswers(state, items);
+  const known = new Set(settled.messages.map((entry) => entry.id));
+  const restored: RoomEntry[] = items
     .filter((item) => !known.has(item.id))
-    .filter((item) => item.athKind !== 'SYSTEM')
+    .filter((item) => item.athKind !== 'SYSTEM' || isKnownSystemLine(item))
     // 빈 본문은 아직 채워지지 않은 예약 행(PENDING)이라 그리지 않는다. 다만 중지·거부로 끝난
     // 답변은 비는 것이 정상이고 그 사실 자체가 보여야 할 내용이라 예외로 남긴다 — 여기서
     // 걸러 버리면 방을 다시 열었을 때 "중지됨"이 조용히 사라진다.
@@ -329,23 +467,115 @@ export function applyHistory(
     .filter(
       (item) =>
         item.content !== '' ||
+        isKnownSystemLine(item) ||
         terminalStatusOf(item.status) !== null ||
         item.attachments.length > 0,
     )
     .sort((left, right) => left.seq - right.seq)
-    .map(toRoomMessage);
+    .map(toRoomEntry);
 
   // 건너뛴 줄(SYSTEM·아직 빈 예약 행)도 커서는 지나쳐야 한다 — 그러지 않으면 다음 따라잡기가
-  // 같은 것을 또 받아온다.
+  // 같은 것을 또 받아온다. 아직 빈 AI 답변 행은 따로 기억해 따라잡기 커서만 그 앞에서 멈춘다(catchUpCursor).
   const lastSeq = items.reduce(
     (cursor, item) => advanceCursor(cursor, item.seq),
-    state.lastSeq,
+    settled.lastSeq,
   );
-  if (restored.length === 0) return { ...state, lastSeq };
+  const pendingAnswers = { ...settled.pendingAnswers };
+  for (const item of items) {
+    if (isPendingAnswer(item)) pendingAnswers[item.id] = item.seq;
+    else delete pendingAnswers[item.id];
+  }
+  if (restored.length === 0) return { ...settled, lastSeq, pendingAnswers };
   return {
-    ...state,
-    messages: insertBySeq(state.messages, restored, state.lastSeq),
+    ...settled,
+    messages: insertBySeq(settled.messages, restored, settled.lastSeq),
     lastSeq,
+    pendingAnswers,
+  };
+}
+
+/**
+ * 화면에서 아직 흐르는 중인 AI 말풍선이 이력에서는 끝나 있으면(완료·중지·거부·실패) 이력의 내용·상태·근거로 마무리한다
+ * (이슈 #413). 끊긴 사이 끝나 끝 프레임을 놓친 답이다 — 그 턴의 진행 표시도 끝 알림을 못 받았으니 지운다. 실패는
+ * 서버가 받은 내용을 버렸으므로 흐르던 조각도 비운다. 이력이 아직 PENDING이면 건드리지 않는다 — 들어올 때 받는 지금까지
+ * 내용과 이어 오는 조각이 채운다.
+ */
+function settleStreamingAnswers(
+  state: RoomState,
+  items: ThreadMessageItem[],
+): RoomState {
+  let next = state;
+  for (const item of items) {
+    if (item.athKind !== 'AGENT' || item.status === 'PENDING') continue;
+    const index = messageIndexById(next, item.id);
+    if (index === null) continue;
+    const target = next.messages[index] as RoomMessage;
+    if (!target.streaming) continue;
+    const messages = [...next.messages];
+    messages[index] = {
+      ...target,
+      content: item.content,
+      streaming: false,
+      terminalStatus: terminalStatusOf(item.status),
+      citations: item.citations ?? target.citations,
+      agent: item.agent ?? target.agent,
+    };
+    next = clearActivityOf({ ...next, messages }, item.id);
+  }
+  return next;
+}
+
+/** 승인 사건 이름을 줄의 event로. 모르는 값이면 null이다 — 서버가 사건을 더해도 화면이 깨지지 않게 한다. */
+function approvalEventOf(event: string): RoomApprovalNotice['event'] | null {
+  switch (event) {
+    case 'REQUESTED':
+      return 'requested';
+    case 'APPROVED':
+      return 'approved';
+    case 'REJECTED':
+      return 'rejected';
+    default:
+      return null;
+  }
+}
+
+/** 화면이 그릴 줄을 아는 SYSTEM 메시지인지. 모르는 승인 사건은 그리지 않고 건너뛴다. */
+function isKnownSystemLine(item: ThreadMessageItem): boolean {
+  if (item.membership != null) return true;
+  return item.approval != null && approvalEventOf(item.approval.event) !== null;
+}
+
+/** 입퇴장·승인 줄이면 그 줄로, 아니면 메시지로 옮긴다. */
+function toRoomEntry(item: ThreadMessageItem): RoomEntry {
+  const approvalEvent =
+    item.approval == null ? null : approvalEventOf(item.approval.event);
+  if (item.approval != null && approvalEvent !== null) {
+    return {
+      id: item.id,
+      seq: item.seq,
+      approvalId: item.approval.approvalId,
+      event: approvalEvent,
+      requester: {
+        subject: item.approval.requesterSubject,
+        displayName: item.approval.requesterDisplayName,
+      },
+      target: {
+        subject: item.approval.targetSubject,
+        displayName: item.approval.targetDisplayName,
+      },
+      originMsgId: item.approval.originMsgId ?? null,
+      reason: item.approval.reason ?? null,
+    };
+  }
+  if (item.membership == null) return toRoomMessage(item);
+  return {
+    id: item.id,
+    seq: item.seq,
+    event: item.membership.event === 'JOINED' ? 'join' : 'leave',
+    participant: {
+      subject: item.membership.subject,
+      displayName: item.membership.displayName,
+    },
   };
 }
 
@@ -365,7 +595,9 @@ function toRoomMessage(item: ThreadMessageItem): RoomMessage {
     streaming: false,
     terminalStatus: terminalStatusOf(item.status),
     turnId: null,
-    citations: [],
+    mine: false,
+    // 저장된 근거(방 문서·웹 출처)를 이력에서도 복원한다(이슈 #401). 안내(groundingNotice)·권한 제외는 저장되지 않는다.
+    citations: item.citations ?? [],
     restrictedResultsOmitted: false,
     groundingNotice: null,
     agent: item.agent ?? null,
@@ -376,14 +608,15 @@ function toRoomMessage(item: ThreadMessageItem): RoomMessage {
 /**
  * 이력 행의 status를 화면이 쓰는 종료 사유로 옮긴다. 저장된 값은 대문자라 그대로 쓸 수 없다.
  *
- * FAILED는 남기지 않는다 — 실패는 사용자가 고른 결말이 아니라서 "중지됨"과 같은 자리에 두면
- * 안 된다(실시간 경로에서 종결 오류를 terminalStatus 없이 끝내는 것과 같은 판단이다).
+ * FAILED도 남긴다(이슈 #413 결정 8) — 예전엔 "사용자가 고른 결말이 아니다"라며 버려, 빈 본문의 실패 행이 이력에서 아예
+ * 사라졌다. 자리를 비운 사이 실패한 답을 돌아온 사람이 알 수 있어야 한다. "중지됨"과는 문구로 가른다.
  */
 function terminalStatusOf(
   status: ThreadMessageItem['status'],
-): 'cancelled' | 'denied' | null {
+): TerminalStatus | null {
   if (status === 'CANCELLED') return 'cancelled';
   if (status === 'DENIED') return 'denied';
+  if (status === 'FAILED') return 'failed';
   return null;
 }
 
@@ -407,32 +640,35 @@ function distinctBySubject(
   return [...bySubject.values()];
 }
 
-/** 입퇴장 줄 하나를 덧붙인다. 번호는 메시지와 같은 자리에서 뽑는다 — 한 목록에 섞이므로
- * key가 겹치면 안 된다. */
-function appendNotice(
-  state: RoomState,
-  event: 'join' | 'leave',
-  participant: PresenceParticipant,
-): RoomState {
+/**
+ * participant.changed·approval.changed에 실려 온 입퇴장·승인 줄을 seq 자리에 넣는다. 이미 이력으로 받은 줄이면 건너뛴다.
+ *
+ * 커서(lastSeq)는 밀지 않는다. 이 줄의 seq는 방송 워커 밖에서 정해져, 그보다 작은 seq의 대화가
+ * 아직 오는 중일 수 있다 — 여기서 커서를 밀면 그때 끊겼을 때 따라잡기가 그 대화를 건너뛴다.
+ * 커서를 밀지 않아 다음 따라잡기가 이 줄을 다시 받아도 id로 걸러진다.
+ */
+function insertNotice(state: RoomState, notice: RoomNotice): RoomState {
+  if (state.messages.some((entry) => entry.id === notice.id)) return state;
   return {
     ...state,
-    messages: [
-      ...state.messages,
-      { id: `m${state.nextMessageId}`, event, participant },
-    ],
-    nextMessageId: state.nextMessageId + 1,
+    messages: insertBySeq(state.messages, [notice], state.lastSeq),
   };
 }
 
+/** 같은 근거는 citationKey로 가린다 — 방 문서는 청크, 웹은 주소(이슈 #401). 예전엔 docId로 가려 같은 문서의
+ * 청크 여러 개가 하나로 뭉쳤다. 키가 없는 근거는 합치지 않고 그대로 더한다. */
 function mergeCitations(current: Citation[], incoming: Citation[]): Citation[] {
   const merged = [...current];
-  const indexes = new Map(
-    merged.map((citation, index) => [citation.docId, index]),
-  );
+  const indexes = new Map<string, number>();
+  merged.forEach((citation, index) => {
+    const key = citationKey(citation);
+    if (key !== null) indexes.set(key, index);
+  });
   for (const citation of incoming) {
-    const index = indexes.get(citation.docId);
+    const key = citationKey(citation);
+    const index = key === null ? undefined : indexes.get(key);
     if (index === undefined) {
-      indexes.set(citation.docId, merged.length);
+      if (key !== null) indexes.set(key, merged.length);
       merged.push(citation);
     } else {
       merged[index] = citation;
@@ -448,63 +684,178 @@ function mergeCitations(current: Citation[], incoming: Citation[]): Citation[] {
 function streamingAnswerIndex(state: RoomState): number | null {
   for (let index = state.messages.length - 1; index >= 0; index -= 1) {
     const message = state.messages[index];
-    if (isPresenceNotice(message)) continue;
+    if (isNotice(message)) continue;
     if (message.from === null && message.streaming) return index;
   }
   return null;
 }
 
-/** 흐르는 중인 AI 답변에 delta를 잇고 종료 여부를 반영한다. */
+/**
+ * 지금 가진 답변 내용에 프레임을 적용한다(이슈 #413 결정 3·12).
+ * - content(처음부터 그 시점까지 전체)가 있으면 지금 것보다 짧지 않을 때 통째로 바꾼다 — 짧으면 늦게 온 것이다.
+ * - delta는 offset(답변의 몇 번째 글자부터인지)으로 이어 붙인다. 이미 가진 범위는 버리고, 겹친 앞부분은 잘라 내고,
+ *   빈틈이 생기면(offset > 지금 길이) 붙이지 않고 들고 있다가(heldChunks) 앞이 채워지면 붙인다 — 화면의 내용은 언제나
+ *   답변의 올바른 앞부분으로만 남는다. offset이 없으면(옛 서버) 예전처럼 이어 붙인다.
+ * 길이는 UTF-16 단위(string.length) — 서버(Java String.length)와 같은 값으로 센다.
+ */
+function nextAnswerContent(
+  current: string,
+  held: readonly AnswerChunk[],
+  frame: Pick<ChatAnswerFrame, 'delta' | 'offset' | 'content'>,
+): { content: string; held: readonly AnswerChunk[] } {
+  let content = current;
+  if (frame.content != null && frame.content.length >= content.length) {
+    content = frame.content;
+  }
+  let chunks = held;
+  if (frame.delta !== '') {
+    if (frame.offset == null) content += frame.delta;
+    else chunks = [...held, { offset: frame.offset, delta: frame.delta }];
+  }
+  if (chunks.length === 0) return { content, held: chunks };
+  // 위치 순으로 붙일 수 있는 것을 붙인다. 이미 가진 범위는 버리고 겹친 앞부분은 잘라 낸다. 빈틈 뒤 조각은 남긴다 —
+  // 위치 순이라 하나가 남으면 그 뒤도 모두 빈틈 뒤다.
+  const rest: AnswerChunk[] = [];
+  for (const chunk of [...chunks].sort((a, b) => a.offset - b.offset)) {
+    if (chunk.offset + chunk.delta.length <= content.length) continue;
+    if (chunk.offset > content.length) {
+      rest.push(chunk);
+      continue;
+    }
+    content += chunk.delta.slice(content.length - chunk.offset);
+  }
+  return { content, held: rest.slice(0, MAX_HELD_CHUNKS) };
+}
+
+/**
+ * 흐르는 중인 AI 답변에 프레임을 반영한다. 끝난 말풍선은 늦게 온 streaming 프레임이 다시 열지 않는다 — 방에 들어올 때
+ * 받는 지금까지 내용과 방 프레임은 순서가 섞여 올 수 있다(이슈 #413).
+ */
 function extendAnswer(
   state: RoomState,
   index: number,
-  delta: string,
-  status: AnswerStatus,
-  citations: Citation[],
-  restrictedResultsOmitted: boolean,
-  groundingNotice: ChatAnswerFrame['groundingNotice'] = null,
-  agent: ChatAnswerFrame['agent'] = null,
+  frame: Pick<
+    ChatAnswerFrame,
+    | 'delta'
+    | 'offset'
+    | 'content'
+    | 'status'
+    | 'citations'
+    | 'restrictedResultsOmitted'
+    | 'groundingNotice'
+    | 'agent'
+    | 'mine'
+  >,
 ): RoomState {
   const messages = [...state.messages];
-  // index는 streamingAnswerIndex가 고른 자리라 언제나 흐르는 중인 AI 답변이다.
   const target = messages[index] as RoomMessage;
+  if (!target.streaming) {
+    // 이미 끝난 말풍선 — 늦게 온 streaming은 다시 열지 않고, 늦게 온 끝 프레임은 상태를 바꾸지 않는다(이력으로 먼저
+    // 마무리했거나 같은 끝이 두 번 온 경우). 더 긴 최종 내용과 근거만 받는다.
+    if (frame.status === 'streaming' || target.terminalStatus === 'failed') {
+      return state;
+    }
+    messages[index] = {
+      ...target,
+      content: nextAnswerContent(target.content, [], { ...frame, delta: '' })
+        .content,
+      citations: mergeCitations(target.citations, frame.citations),
+    };
+    return { ...state, messages };
+  }
+  const next = nextAnswerContent(
+    target.content,
+    target.heldChunks ?? [],
+    frame,
+  );
+  const { heldChunks: _held, ...rest } = target;
   messages[index] = {
-    ...target,
-    content: target.content + delta,
+    ...rest,
+    // 끝난 답에는 들고 있던 조각이 필요 없다 — 끝 프레임의 전체 내용이 메웠다.
+    ...(frame.status === 'streaming' && next.held.length > 0
+      ? { heldChunks: next.held }
+      : {}),
+    // 실패는 서버가 받은 내용을 버렸다 — 흐르던 조각도 비운다(남기면 새로고침했을 때 달라진다).
+    content: frame.status === 'failed' ? '' : next.content,
     // streaming 외의 모든 상태가 종료다 — 예전에는 done만 봐서 취소·거부된 답변이 영영 흐르는
     // 중으로 남았다(COLLAB은 그 둘을 안 써서 드러나지 않던 구멍이다).
-    streaming: status === 'streaming',
-    terminalStatus: isTerminalStatus(status) ? status : null,
-    citations: mergeCitations(target.citations, citations),
+    streaming: frame.status === 'streaming',
+    terminalStatus:
+      frame.status === 'streaming'
+        ? target.terminalStatus
+        : isTerminalStatus(frame.status)
+          ? frame.status
+          : null,
+    mine: target.mine || frame.mine === true,
+    citations: mergeCitations(target.citations, frame.citations),
     restrictedResultsOmitted:
-      target.restrictedResultsOmitted || restrictedResultsOmitted,
+      target.restrictedResultsOmitted || frame.restrictedResultsOmitted,
     // 안내는 한 턴에 한 번만 결정되고 사라지지 않는다 — 이후 패킷이 null을 보내도 덮어쓰지 않는다.
-    groundingNotice: target.groundingNotice ?? groundingNotice,
+    groundingNotice: target.groundingNotice ?? frame.groundingNotice,
     // 역할별 에이전트도 한 턴에 한 번만 정해지고 사라지지 않는다(이슈 #357) — groundingNotice와
     // 같은 이유다.
-    agent: target.agent ?? agent,
+    agent: target.agent ?? frame.agent,
   };
   return { ...state, messages };
 }
 
+/** 그 턴의 "생각 중" 표시(THINKING)를 지운다 — 첫 글자가 오면 더 기다리는 중이 아니다(이슈 #413 결정 9). */
+function clearThinkingOf(state: RoomState, msgId: string): RoomState {
+  return state.activity?.msgId === msgId &&
+    state.activity.kind === THINKING_ACTIVITY
+    ? { ...state, activity: null }
+    : state;
+}
+
+/**
+ * 처음 보는 AI 답변의 말풍선을 만든다. 목록 끝이 아니라 seq 자리에 넣는다 — 방에 들어올 때 받는 지금까지 내용은 이력으로
+ * 먼저 그린 뒤의 대기 질문(seq가 더 큼)보다 앞에 놓여야 한다(이슈 #413). 커서는 지금처럼 이 seq까지 민다.
+ */
+function insertAnswer(state: RoomState, frame: ChatAnswerFrame): RoomState {
+  const { [frame.msgId]: _seen, ...pendingAnswers } = state.pendingAnswers;
+  const message: RoomMessage = {
+    id: frame.msgId,
+    seq: frame.seq,
+    from: null,
+    content: '',
+    streaming: true,
+    terminalStatus: null,
+    turnId: frame.turnId,
+    mine: false,
+    citations: [],
+    restrictedResultsOmitted: false,
+    groundingNotice: null,
+    agent: null,
+    attachments: [],
+  };
+  const inserted: RoomState = {
+    ...state,
+    // 말풍선이 생겼으니 이력의 PENDING으로 커서를 멈출 까닭이 없다 — 이제 흐르는 말풍선으로 멈춘다.
+    pendingAnswers,
+    messages: insertBySeq(state.messages, [message], state.lastSeq),
+    lastSeq: advanceCursor(state.lastSeq, frame.seq),
+  };
+  const index = messageIndexById(inserted, frame.msgId) as number;
+  return extendAnswer(inserted, index, frame);
+}
+
 /**
  * 프레임 하나를 상태에 접는다. 알 수 없는 프레임은 parse-frame.ts가 이미 걸러내므로
- * 여기 도착하는 것은 계약 안의 열 가지뿐이고, switch는 그 열을 모두 다룬다.
+ * 여기 도착하는 것은 계약 안의 프레임뿐이고, switch는 그 전부를 다룬다.
  */
 export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
   switch (frame.type) {
+    // 접속은 참여자 목록만 바꾼다. 방 목록과 방을 오가는 것은 입퇴장이 아니라 흐름에 줄을 남기지 않는다.
     case 'presence.join': {
-      // 이미 아는 사람의 join이 또 오면(재연결 등) 목록도 흐름도 건드리지 않는다.
+      // 이미 아는 사람의 join이 또 오면(재연결 등) 목록을 건드리지 않는다.
       if (hasParticipant(state, frame.subject)) return state;
-      const participant = {
-        subject: frame.subject,
-        displayName: frame.displayName,
-      };
-      const joined = {
+      return {
         ...state,
-        participants: [...state.participants, participant],
+        participants: [
+          ...state.participants,
+          { subject: frame.subject, displayName: frame.displayName },
+        ],
       };
-      return appendNotice(joined, 'join', participant);
     }
 
     // 명단은 서버가 방금 뜬 것이라 지금까지 쌓인 것보다 정확하다 — 덧붙이지 않고 갈아끼운다.
@@ -513,26 +864,32 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       return { ...state, participants: distinctBySubject(frame.participants) };
 
     case 'presence.leave': {
-      // join과 대칭이다. 모르는 사람의 퇴장은 목록도 흐름도 건드리지 않는다 — 본 적 없는
-      // 사람이 나갔다는 줄만 남으면 읽는 쪽은 놓친 입장이 있다고 오해한다.
+      // join과 대칭이다. 모르는 사람의 퇴장은 목록을 건드리지 않는다.
       if (!hasParticipant(state, frame.subject)) return state;
-      const left = {
+      return {
         ...state,
         participants: state.participants.filter(
           (participant) => participant.subject !== frame.subject,
         ),
       };
-      return appendNotice(left, 'leave', {
-        subject: frame.subject,
-        displayName: frame.displayName,
-      });
     }
 
-    // 참여자 명단이 바뀌었다는 신호일 뿐 이 상태에 접을 것이 없다(이슈 #129·#172).
-    // 여기 participants는 접속자(presence)라 명단과 다른 목록이고, 명단은 REST로 읽는
-    // 참여자 시트가 들고 있다 — 재조회는 use-collab-room이 신호로 내보낸다.
+    // 여기 participants는 접속자(presence)라 참가자 명단과 다른 목록이고, 명단은 REST로 읽는
+    // 참여자 시트가 들고 있다 — 재조회는 use-room이 신호로 내보낸다(이슈 #129·#172).
+    // 참가자가 되거나 빠진 변경이면 서버가 남긴 입퇴장 줄이 함께 실려 와 흐름에 넣는다.
     case 'participant.changed':
-      return state;
+      if (frame.msgId === null || frame.seq === null) return state;
+      if (frame.action !== 'INVITED' && frame.action !== 'REMOVED')
+        return state;
+      return insertNotice(state, {
+        id: frame.msgId,
+        seq: frame.seq,
+        event: frame.action === 'INVITED' ? 'join' : 'leave',
+        participant: {
+          subject: frame.subject,
+          displayName: frame.displayName,
+        },
+      });
 
     // AI 턴 대기·시작 전 취소(이슈 #160). 이 화면은 아직 "대기 중"을 그리지 않는다 — 1:1을 이
     // 프레임으로 옮기는 #162가 두 화면에 함께 붙인다. 시작한 턴은 chat.answer가 따로 온다.
@@ -544,9 +901,62 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
     case 'pong':
       return state;
 
+    // DIRECT 구독 완료(#382)는 선제 갱신이 쓰는 신호라 방 상태와 무관하다. 허브가 화면에 넘기지 않는다.
+    case 'room.subscribed':
+      return state;
+
     // 입력 중 표시는 만료 시각이 있어 이 순수 상태에 두지 않는다 — use-room이 typing.ts로 따로 든다.
     case 'chat.typing':
       return state;
+
+    // 승인 요청·처리(#407). 서버가 남긴 승인 줄이 함께 실려 와 흐름에 넣는다. 줄을 남기지 못했거나 모르는
+    // 사건이면 흐름은 그대로이고, 토스트·모달은 use-room이 따로 다룬다.
+    case 'approval.changed': {
+      const event = approvalEventOf(frame.event);
+      if (frame.msgId === null || frame.seq === null || event === null)
+        return state;
+      return insertNotice(state, {
+        id: frame.msgId,
+        seq: frame.seq,
+        approvalId: frame.approvalId,
+        event,
+        requester: {
+          subject: frame.requesterSubject,
+          displayName: frame.requesterDisplayName,
+        },
+        target: {
+          subject: frame.targetSubject,
+          displayName: frame.targetDisplayName,
+        },
+        originMsgId: frame.originMsgId,
+        reason: frame.reason,
+      });
+    }
+
+    // 도구 실행 중 표시(이슈 #397). 지금 도는 것 하나만 둔다 — 시작이면 덮어쓰고, 끝이면 그 턴의 것만 지운다.
+    // 이미 끝난 답변의 늦은 시작은 받지 않는다 — 서버가 경합 때 끝을 바로 잇지만, 그 끝을 못 받으면 완료된 말풍선
+    // 아래에 진행 표시가 남는다.
+    case 'chat.activity':
+      if (frame.active && isFinishedAnswer(state, frame.msgId)) return state;
+      // "생각 중"은 첫 글자 전에만 뜻이 있다 — 방에 들어올 때 받은 이 표시가 첫 조각보다 늦게 와도 남기지 않는다(이슈 #413).
+      if (
+        frame.active &&
+        frame.kind === THINKING_ACTIVITY &&
+        messageIndexById(state, frame.msgId) !== null
+      ) {
+        return state;
+      }
+      return frame.active
+        ? {
+            ...state,
+            activity: {
+              msgId: frame.msgId,
+              kind: frame.kind,
+              target: frame.target,
+              agent: frame.agent,
+            },
+          }
+        : clearActivityOf(state, frame.msgId);
 
     case 'chat.message':
       // 같은 메시지가 이력으로도 실시간으로도 올 수 있다 — msgId로 한 번만 남긴다(이슈 #190).
@@ -563,20 +973,19 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       );
 
     case 'chat.answer': {
+      // 답변이 끝나면(완료·중지·거부·실패) 그 턴의 도구 진행 표시도 함께 지운다(이슈 #397). 글자가 오면 "생각 중"도 지운다(이슈 #413).
+      const hasText = frame.delta !== '' || (frame.content ?? '') !== '';
+      const answered =
+        frame.status === 'streaming'
+          ? hasText
+            ? clearThinkingOf(state, frame.msgId)
+            : state
+          : clearActivityOf(state, frame.msgId);
       // 이전에는 "흐르는 중인 답변"을 뒤에서 찾았다. 이제 프레임이 자기 msgId를 들고 오므로
       // 그 값으로 직접 찾는다(이슈 #190) — 턴이 겹쳐도 어느 답변의 delta인지 분명하다.
-      const index = messageIndexById(state, frame.msgId);
+      const index = messageIndexById(answered, frame.msgId);
       if (index !== null) {
-        return extendAnswer(
-          state,
-          index,
-          frame.delta,
-          frame.status,
-          frame.citations,
-          frame.restrictedResultsOmitted,
-          frame.groundingNotice,
-          frame.agent,
-        );
+        return extendAnswer(answered, index, frame);
       }
       // 아직 아무것도 안 실린 패킷으로 빈 말풍선을 만들 이유는 없다 — delta 없이 status만
       // 알리는 패킷도 유효한 계약이다(frames.ts 주석).
@@ -588,34 +997,16 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       // groundingNotice만 실린 패킷도 예외다 — 방 문서 근거를 못 찾았다는 안내는 delta가
       // 비어 있어도 사용자에게 보여야 한다(이슈 #353).
       if (
-        frame.delta === '' &&
+        !hasText &&
         frame.citations.length === 0 &&
         !frame.restrictedResultsOmitted &&
         !isTerminalStatus(frame.status) &&
         frame.groundingNotice === null &&
         frame.agent === null
       ) {
-        return state;
+        return answered;
       }
-      const appended = appendMessage(
-        state,
-        frame.msgId,
-        frame.seq,
-        null,
-        frame.delta,
-        frame.status === 'streaming',
-        frame.turnId,
-      );
-      return extendAnswer(
-        appended,
-        appended.messages.length - 1,
-        '',
-        frame.status,
-        frame.citations,
-        frame.restrictedResultsOmitted,
-        frame.groundingNotice,
-        frame.agent,
-      );
+      return insertAnswer(answered, frame);
     }
 
     // info 알림은 상태로 남기지 않는다 — 지나가도 되는 안내라 훅이 그 자리에서 토스트로
@@ -627,10 +1018,25 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       const index = streamingAnswerIndex(state);
       // 종결 오류는 흐름만 끊는다 — 중지·거부와 달리 사용자가 고른 결말이 아니라
       // terminalStatus를 남기지 않는다. 사유는 방 위 배너(error)가 따로 알린다.
-      const nextState =
-        index !== null && TERMINAL_AI_ERROR_CODES.has(frame.code)
-          ? extendAnswer(state, index, '', 'done', [], false)
+      const terminal = TERMINAL_AI_ERROR_CODES.has(frame.code);
+      // 실패한 답은 그 msgId를 단 failed 끝 프레임이 먼저 실패로 끝낸다(이슈 #413). 여기는 그 프레임을 모르는 옛 서버를
+      // 위한 대비라 예전처럼 흐름만 끝낸다 — 오류 프레임에는 msgId가 없어 실패로 단정하면 남의 답을 지울 수 있다.
+      const ended =
+        index !== null && terminal
+          ? extendAnswer(state, index, {
+              delta: '',
+              offset: null,
+              content: null,
+              status: 'done',
+              citations: [],
+              restrictedResultsOmitted: false,
+              groundingNotice: null,
+              agent: null,
+              mine: null,
+            })
           : state;
+      // 종결 오류는 턴을 끝내므로 도구 진행 표시도 지운다(이슈 #397). 답변 말풍선이 생기기 전에 끝났을 수도 있다.
+      const nextState = terminal ? clearActivity(ended) : ended;
       return {
         ...nextState,
         error: {
