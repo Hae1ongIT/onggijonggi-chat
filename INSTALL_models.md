@@ -20,7 +20,7 @@
 | `.env.ollama.example` | 내 PC의 Ollama | `LLM_MODEL` |
 | `.env.vllm.example` | 사내·온프렘 OpenAI 호환 서버 | `VLLM_API_BASE`·`LLM_MODEL` |
 
-네 템플릿은 **여는 모델만 다르고 나머지는 같다.** 각각 `LITELLM_CONFIG_FILE`로 짝이 되는 `config/litellm_config*.yaml`을 가리키므로, 저장소의 설정 파일이 그대로라 다음 `git pull`이 충돌하지 않는다.
+네 템플릿은 **여는 모델만 다르고 나머지는 같다.** 기본 템플릿은 compose 기본값인 `config/litellm_config.yaml`을, 나머지 셋은 `LITELLM_CONFIG_FILE`로 짝이 되는 `config/litellm_config_*.yaml`을 가리키므로, 저장소의 설정 파일이 그대로라 다음 `git pull`이 충돌하지 않는다.
 
 > ⚠️ **이미 `.env`를 만들어 고친 뒤라면 통째로 덮어쓰지 않는다.** LiteLLM 절만 옮겨 적는다 — 자격증명을 직접 정했다면 그 값이 날아간다.
 
@@ -207,6 +207,14 @@ curl http://192.168.0.20:8000/v1/models
 새 환경변수를 쓴다면 `docker-compose.yml`의 litellm 서비스에도 그 변수를 전달해야 한다. LiteLLM이 지원하는 공급자 목록은 [docs.litellm.ai/docs/providers](https://docs.litellm.ai/docs/providers) 참조.
 
 > 저장소의 프리셋을 직접 고치면 다음 `git pull`이 충돌할 수 있다. 자기 구성을 오래 쓸 거라면 프리셋을 복사해 두고 `.env`의 `LITELLM_CONFIG_FILE`로 그 사본을 가리킨다 — **저장소 밖의 절대경로도 된다.**
+
+---
+
+## 대화 모델 말고 따로 필요한 모델
+
+- **도구 호출**: 방 문서 검색·웹 검색·문서 만들기·개정본은 AI가 도구를 불러 처리한다. 대화 모델은 도구 호출(function calling)을 지원해야 이 기능들이 동작한다 — 작은 로컬 모델을 고를 때 확인한다.
+- **임베딩**: 방 문서 검색(근거 패널)에는 OpenAI 호환 `/v1/embeddings`를 내는 임베딩 서버(1024차원, 예: bge-m3)가 따로 필요하다. 위 프리셋들은 대화 모델만 열고 임베딩은 열지 않는다. `.env`의 `EMBEDDING_URL`로 직접 연결한다 → [INSTALL.md — 방 문서 검색 준비 켜기](INSTALL.md#방-문서-검색-준비-켜기-etl).
+- **태깅·검색 문장 다시 쓰기(선택)**: 문서 자동 태깅은 `TAGGING_URL`로 사내 LLM 서버를 직접 부르고, 후속 질문의 검색 문장 다시 쓰기는 `RAG_REWRITE_MODEL`로 게이트웨이 모델을 고른다 → [INSTALL.md — 문서 자동 태깅](INSTALL.md#문서-자동-태깅-선택).
 
 ---
 

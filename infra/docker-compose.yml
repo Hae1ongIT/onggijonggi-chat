@@ -5,7 +5,7 @@ services:
     image: caddy:2.9-alpine
     container_name: infra-caddy
     # 기본 설치는 caddy 없이 http://localhost:3010 으로 쓴다(INSTALL.md). HTTPS가 필요하면
-    # .env에 COMPOSE_PROFILES=caddy 를 넣어 이 서비스를 켠다(전용 설치 문서는 준비 중).
+    # .env에 COMPOSE_PROFILES=caddy 를 넣어 이 서비스를 켠다(INSTALL_r-proxy.md).
     profiles:
       - caddy
     networks:

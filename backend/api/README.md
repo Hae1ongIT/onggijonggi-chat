@@ -5,5 +5,6 @@
 - 03 CORE: Spring AI `ChatClient` 스트리밍(WebFlux, `Flux<String>` — 프레이밍 없는 `text/plain`)
 - 04 DATA: PostgreSQL(JPA/Hibernate + Flyway)
 
-RAG Advisor Chain · Elasticsearch(벡터 검색) · Spring AI ETL은 다음 단계에서 구현 예정이다.
-`ChatClient`의 `.advisors()`를 빈 채로 호출해 advisor 삽입 지점을 미리 잡아뒀다.
+그 밖에 협업방 WebSocket(`chat/`), 팀·직급 권한 판정(Casbin 연동, `authz/`), 방 문서 검색(Elasticsearch 키워드·벡터 하이브리드, `rag/`)을 맡는다.
+AI 답변은 도구로 방 문서 검색·웹 검색(`web/`)·현재 시각·새 문서 만들기·docx 개정본을 부르고, 문서 생성·원본 보관은 문서 워커(`worker/`)에 맡긴다.
+방 문서의 추출·청킹·임베딩·색인은 별도 모듈 `backend/etl`이 한다.

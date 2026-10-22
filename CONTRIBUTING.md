@@ -83,11 +83,14 @@ git checkout -b 42-session-rename upstream/dev
 동작이 바뀌는 변경에는 테스트를 붙인다. 붙이기 어렵다면 PR에 왜 어려운지 적는다 — 거기서부터
 이야기하면 된다.
 
-백엔드 테스트는 H2로 돌아 DB나 Keycloak을 띄우지 않아도 된다. `gradlew build`에 테스트가 포함되므로
+백엔드 테스트는 대부분 H2로 돌아 DB나 Keycloak을 띄우지 않아도 된다. 실제 PostgreSQL·Elasticsearch가 필요한 일부 테스트는
+Testcontainers를 쓰므로 Docker가 떠 있어야 하고, Docker가 없으면 대부분 건너뛴다. `gradlew build`에 테스트가 포함되므로
 따로 `test`를 돌릴 필요는 없다(개별 실행은 [5. BFF](#5-bff) 참고).
 
 프론트엔드는 vitest로 돈다. `bun run test`(1회 실행) 또는 `bun run test:watch`(감시 모드)로 돌리고,
-`bun lint:check`도 함께 통과해야 한다.
+`bunx tsc --noEmit`(타입 검사)와 `bun lint:check`도 함께 통과해야 한다.
+
+문서 워커(`worker/doc`)는 pytest로 돈다 — `worker/doc`에서 `uv run --frozen pytest -q`.
 
 ## 커밋
 
@@ -115,12 +118,13 @@ docs: 빠른 시작 누락 단계 보완
 `Refs #`로 바꾼다.
 
 - [ ] `gradlew build` 통과 (백엔드를 고쳤다면 — 테스트가 함께 돈다)
-- [ ] `bun lint:check` 통과 (프론트를 고쳤다면)
+- [ ] `bunx tsc --noEmit`·`bun run test`·`bun lint:check` 통과 (프론트를 고쳤다면)
+- [ ] `uv run --frozen pytest -q` 통과 (문서 워커를 고쳤다면)
 - [ ] 동작이 바뀌었다면 테스트를 붙였다 (어렵다면 그 이유를 PR에 적는다)
 - [ ] 관련 문서를 함께 고쳤다
 
 PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불변식·Flyway 버전과 Java 클래스 헤더를 자동 검사한다. 나머지 항목은 직접 확인한다.
-`flyway-postgres`는 빈 PostgreSQL 16에 전체 migration을 실제 적용한다. Hibernate 매핑과 SQL 제약의 의미는 별도 절차로 확인한다.
+`flyway-postgres`는 빈 PostgreSQL 16에 전체 migration을 실제 적용하고, 그 스키마에 Hibernate 매핑과 대화 삭제 연쇄 등을 검증한다. 백엔드·프론트·워커의 빌드와 테스트도 CI가 함께 돌린다.
 
 승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `dev`에 커밋 하나로 남는다.
 (릴리스 PR과 역머지 PR만 예외로 merge commit이다. 아래 "릴리스" 참고.)
@@ -307,7 +311,7 @@ ollama serve
 
 ## 4. `application-local.properties`
 
-`backend/api/src/main/resources/`에 만든다(gitignore 대상).
+`backend/api/src/main/resources/`에 만든다(gitignore 대상). 같은 폴더의 `application-local.properties.example`을 복사해 시작하면 문서 워커 주소·내부 key 줄까지 들어 있다.
 
 ```properties
 spring.datasource.password=devpassword
