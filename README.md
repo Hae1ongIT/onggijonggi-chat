@@ -9,14 +9,22 @@
 
 한 구성원이 업무 질문을 올리면 권한이 있는 동료가 정보와 판단을 보태고, 필요한 AI 에이전트가 맡은 역할에 맞게 기여한다. 뒤이어 참여하는 사람과 AI는 앞서 오간 설명과 결정을 같은 대화에서 확인하고 그 맥락을 이어받는다. 조직별 데이터와 권한의 경계는 그대로 유지한다.
 
-**현재 공개본은** Keycloak 인증, 모델 게이트웨이, 개인별 대화 저장을 제공하는 셀프호스트 AI 채팅 기반이다. 어떤 모델을 쓸지는 설정 파일 한 곳에서 정한다 — 상용 API(OpenAI·Anthropic 등)든, 직접 띄운 로컬 모델(Ollama·vLLM)이든 같은 방식으로 붙는다.
+**현재 공개본(v0.5)은** 여러 사람이 한 방에서 AI와 함께 일하는 셀프호스트 협업 채팅이다. 어떤 모델을 쓸지는 설정 파일 한 곳에서 정한다 — 상용 API(OpenAI·Anthropic 등)든, 직접 띄운 로컬 모델(Ollama·vLLM)이든 같은 방식으로 붙는다. 지금 무엇이 되고 다음이 무엇인지는 [ROADMAP](ROADMAP.md)에 있다.
 
-여러 사람과 여러 AI가 하나의 대화를 공유하는 협업과 조직별 데이터·권한 격리는 **앞으로 만들어 간다** — 지금 무엇이 되고 다음이 무엇인지는 [ROADMAP](ROADMAP.md)에 있다.
-
-- 🔐 **Keycloak(OIDC) 로그인** + JWT 검증 · 역할 기반 접근 제어 · 분당 요청 제한
-- 💬 **스트리밍 채팅** — 응답이 생성되는 대로 출력, 대화 이력은 DB에 저장
+- 👥 **협업방** — 여러 사람이 한 대화에 실시간으로 참여하고, AI는 `@AI`로 부를 때만 답한다. 연결이 끊겨도 답변은 끝까지 만들어지고 돌아오면 이어 받는다
+- 📎 **첨부·방 문서를 근거로 답변** — 채팅에 붙인 파일을 읽어 답하고, 방에 고정한 문서는 AI가 필요할 때 검색해 근거 패널에 출처(문서·쪽·문단)를 남긴다
+- 📝 **문서 만들기·고치기** — 요청으로 새 문서를 만들고, 고정한 docx는 서식을 유지한 개정본(`_v1`)과 신구조문 대비표로 남긴다
+- ✅ **승인 요청** — 답변에서 지정한 사람에게 승인을 요청하고, 처리 이력이 방에 카드로 남는다
+- 🌐 **웹 검색** — 필요하면 웹을 찾아 읽고 웹 출처를 함께 남긴다
+- 🔐 **Keycloak(OIDC) 로그인** · 팀·직급 기반 Workspace 권한(Casbin) · 권한 변경 감사 기록 · 분당 요청 제한
 - 🔀 **모델 교체가 설정 한 줄** — 애플리케이션 코드를 고치지 않는다
-- 🐳 **`docker compose up` 한 번**으로 9개 서비스 전체 기동
+- 🐳 **`docker compose up` 한 번**으로 9개 서비스 전체 기동 — 문서 검색·권한 판정은 프로필로 켠다
+
+### 시연
+
+근로기준법 개정에 맞춰 세 사람이 한 협업방에서 AI와 함께 사내 취업규칙을 고치는 과정이다 — 첨부 요약 → 사내 규정 대조 → 개정안·승인 요청 → 승인 → 변경본 생성 (2:49, 실제 앱 녹화, AI 대기 구간만 빠르게 돌림). 같은 방을 직접 띄워 보려면 [`infra/README.md`](infra/README.md)의 `scripts/usecase-seed.mjs` 항목을 본다.
+
+https://github.com/user-attachments/assets/6ff01242-7dcd-45ea-bcc3-bafc99be2da7
 
 > 이 저장소는 **Community Edition**이다. 기능을 더한 Pro 버전이 별도로 있으며, 이 저장소에는 포함되지 않는다.
 
@@ -50,19 +58,24 @@ docker compose up -d --build                   # ③ 전체 기동 (첫 빌드 5
 
 ```
 브라우저 → nextjs(3010) → bff(8090) → litellm(4000) → 사용자가 고른 LLM
-        ↘ keycloak(8081)           ↘ postgres(5442)
+        ↘ keycloak(8081)       ├─→ postgres(5442)      대화·첨부·메타데이터
+                               ├─→ document-worker     문서 생성·개정본 → seaweedfs(원본·산출물 보관)
+                               ├─→ elasticsearch       방 문서 검색      ← etl(추출·청킹·임베딩)   [elasticsearch 프로필]
+                               └─→ casbin              팀·직급 권한 판정                          [casbin 프로필]
 ```
+
+기본 기동은 9개 서비스(postgres·keycloak·litellm·bff·nextjs·document-worker·seaweedfs 3종)다. 방 문서 검색(근거 패널)은 `elasticsearch` 프로필(elasticsearch·etl)과 임베딩 모델이, 팀·직급 권한은 `casbin` 프로필이 있어야 켜진다. 웹 검색은 기본으로 켜져 있고 DuckDuckGo를 쓰며, `searxng` 프로필로 바꿀 수 있다. 켜는 법은 [INSTALL.md](INSTALL.md).
 
 선택 사항으로 **caddy 리버스 프록시**를 얹으면 `app.localhost`·`api.localhost`·`auth.localhost`를 각각 nextjs·bff·keycloak으로 넘기고 HTTPS를 종단한다. `.localhost`는 RFC 6761 예약 이름이라 브라우저가 알아서 127.0.0.1로 해석한다 — hosts 파일 등록이 필요 없다. caddy 서비스는 compose에서 `profiles: [caddy]`로 묶여 있어 기본 기동에는 포함되지 않는다([INSTALL_r-proxy.md](INSTALL_r-proxy.md)).
 
 | 디렉터리 | 내용 | 스택 |
 |---|---|---|
-| `frontend/` | 채팅 UI · 로그인 | Next.js(App Router) · React · AI SDK |
-| `backend/api/` | 실행 모듈 — HTTP·WebSocket 엔드포인트, 필터체인, 방 문서 검색 | Spring Boot WebFlux · Spring AI |
+| `frontend/` | 협업 채팅 UI · 방 문서 패널 · 권한 관리 화면 · 로그인 | Next.js(App Router) · React · AI SDK |
+| `backend/api/` | BFF 실행 모듈 — HTTP·WebSocket 엔드포인트, 필터체인, 권한 판정, AI 도구(방 문서 검색·웹·문서 생성·개정본), 승인 | Spring Boot WebFlux · Spring AI |
 | `backend/common/` | 공유 라이브러리 — 인증·사용자·대화 도메인, 마이그레이션 | JPA · Flyway |
 | `backend/etl/` | 방 문서 처리 워커 — 원본 추출·청킹·임베딩·Elasticsearch 적재, LLM 자동 태깅 | Spring Boot · Tika · PDFBox |
-| `infra/` | compose 오케스트레이션 · 게이트웨이 설정 | Docker Compose · LiteLLM · Keycloak · PostgreSQL |
-| `worker/` | 문서 처리 워커 — 문서 생성, 대화방 문서 원본 저장 | Python · FastAPI · SeaweedFS |
+| `infra/` | compose 오케스트레이션 · 게이트웨이·권한·검색 설정, 시연방 시드 | Docker Compose · LiteLLM · Keycloak · PostgreSQL · Casbin · Elasticsearch |
+| `worker/` | 문서 처리 워커 — 문서 생성, docx 개정본(신구조문 대비표), 방 문서 원본 저장 | Python · FastAPI · python-docx · SeaweedFS |
 
 프론트엔드는 **BFF만** 호출한다. 게이트웨이와 모델 자격증명은 브라우저에 노출되지 않는다.
 
@@ -78,6 +91,8 @@ docker compose up -d --build                   # ③ 전체 기동 (첫 빌드 5
 | [ROADMAP.md](ROADMAP.md) | **어디까지 되는지 알고 싶을 때.** 지금 버전의 한계와 다음 방향 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | **코드를 고칠 때.** 이슈·브랜치·커밋·PR 절차와, 프론트·BFF를 호스트에서 직접 띄우는 개발 환경 구성 |
 | [`frontend/README.md`](frontend/README.md) | 프론트엔드 계층의 역할·스택과 동작 메모 |
+| [`infra/README.md`](infra/README.md) | compose·설정 파일이 각각 무엇인지, 프로필·시연방 시드 |
+| [`worker/README.md`](worker/README.md) | 문서 워커의 역할과 방 문서 원본 저장 규칙 |
 
 계층 구조는 코드와 주석에서 `01·CLIENT` ~ `06·DOCUMENT` 번호로 참조한다 — 01은 `frontend/`, 02·EDGE와 03·CORE는 `backend/api/`의 `security/`·`chat/`와 `backend/common/`의 `auth/`·`chat/`, 04·DATA는 스키마·엔티티, 05·INFRA는 `infra/`, 06·DOCUMENT는 `worker/`에 해당한다.
 

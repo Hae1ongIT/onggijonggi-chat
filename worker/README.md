@@ -1,10 +1,10 @@
 # worker — Python 문서 워커
 
 06 DOCUMENT 계층. 격리 컨테이너에서 문서 업로드·분석·구조화 편집.
-- python-docx · openpyxl · python-pptx, LibreOffice headless(PDF 변환)
+- python-docx, LibreOffice headless(PDF 변환)
 - 리소스·네트워크 제한, 화이트리스트 연산만(임의 코드 실행 없음)
 
-`doc/`의 FastAPI가 문서 생성·템플릿 처리와 Thread 문서 원본 저장을 제공한다. 브라우저는 BFF만 호출하며,
+`doc/`의 FastAPI가 문서 생성(`POST /api/v1/documents`, 생성 파일 읽기 `GET /api/v1/documents/files`)·템플릿 처리, docx 개정본(`POST /api/v1/documents/revisions` — 원본 서식을 유지한 채 지정한 문장만 바꾸고 끝에 신구조문 대비표를 붙인다)과 Thread 문서 원본 저장을 제공한다. 산출물과 원본은 SeaweedFS에 보관한다. 브라우저는 BFF만 호출하며,
 워커는 내부 API key와 Tenant 식별자를 확인한다. 사용자·방·문서 인가는 BFF의 책임이다.
 
 ## Thread 문서 원본

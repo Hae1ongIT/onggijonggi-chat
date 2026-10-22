@@ -20,7 +20,7 @@ http://localhost:8081  →  https://auth.localhost
 | HTTPS | 없음 | 있음 (내 PC에서 만든 인증서) |
 | 추가 준비 | 없음 | 공용 네트워크 · 인증서 신뢰 등록(**관리자 권한 1회**) |
 | 필요한 포트 | 3010 등 | **80 · 443** 추가 |
-| 컨테이너 수 | 6 | 7 |
+| 컨테이너 수 | 9 | 10 |
 
 `.localhost`로 끝나는 이름은 브라우저가 표준(RFC 6761)에 따라 `127.0.0.1`로 해석한다 — **hosts 파일을 건드릴 필요가 없고**, Wi-Fi나 IP가 바뀌어도 영향이 없다.
 
@@ -52,6 +52,8 @@ COMPOSE_PROFILES=caddy
 
 > ⚠️ **`COMPOSE_PROFILES=caddy`가 없으면 caddy는 아예 켜지지 않는다.** compose에서 `profiles: [caddy]`로 묶여 있어 기본 기동에서는 빠진다. 이 줄을 넣으면 이후 모든 `docker compose` 명령이 caddy를 함께 다룬다. (`docker compose --profile caddy ...`를 매번 붙여도 되지만 빠뜨리기 쉽다.)
 >
+> ⚠️ **이미 다른 프로필을 켜 두었다면 한 줄에 쉼표로 잇는다**(예: `COMPOSE_PROFILES=casbin,elasticsearch,caddy`). `COMPOSE_PROFILES`를 두 줄 쓰면 마지막 줄만 남아 앞의 프로필이 꺼진다.
+>
 > ⚠️ **이미 기본 설치로 한 번 띄운 뒤라면** 주소만 바꿔선 안 된다 — 아래 [기본 설치에서 전환하기](#기본-설치에서-전환하기)를 본다.
 
 ---
@@ -66,7 +68,7 @@ docker network create proxy-net
 
 compose에서 `external: true`로 선언돼 있어 자동으로 만들어지지 않는다. 없으면 `network proxy-net declared as external, but could not be found`로 기동이 실패한다. 이미 있으면 `already exists`가 나오는데 정상이다.
 
-> 💡 이 저장소 밖의 다른 compose 스택도 같은 caddy 뒤에 붙일 수 있도록 분리해 둔 네트워크다. 앱 7개끼리는 compose가 만드는 `app-net`으로 통신한다.
+> 💡 이 저장소 밖의 다른 compose 스택도 같은 caddy 뒤에 붙일 수 있도록 분리해 둔 네트워크다. 앱 서비스끼리는 compose가 만드는 `app-net`으로 통신한다(파일 저장소 seaweedfs 3개는 문서 워커만 닿는 `document-worker-net`에 따로 있다).
 
 `infra/Caddyfile`은 저장소에 들어 있어 따로 만들 것이 없다. 주소 3개를 각각 nextjs·bff·keycloak으로 넘기고 `local_certs`로 인증서를 자체 발급한다.
 
@@ -81,7 +83,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-**✅ 성공**: `infra-caddy`를 포함해 **6줄**이 뜬다. caddy는 헬스체크가 없어 `Up`으로만 표시되고, 나머지 5개는 `Up (healthy)`가 된다.
+**✅ 성공**: `infra-caddy`를 포함해 **10줄**이 뜬다(다른 프로필을 켰다면 그만큼 더). caddy는 헬스체크가 없어 `Up`으로만 표시되고, 나머지 9개는 `Up (healthy)`가 된다.
 
 > ⚠️ **caddy가 목록에 없으면** 1단계의 `COMPOSE_PROFILES=caddy`가 빠졌거나 오타다.
 
@@ -167,7 +169,7 @@ INSTALL.md의 [문제 해결](INSTALL.md#문제-해결)이 그대로 유효하�
 | `network proxy-net declared as external, but could not be found` | 2단계의 `docker network create proxy-net` 누락 |
 | **"사이트에 연결할 수 없음"** | 주소 오타이거나 caddy가 안 떠 있다. Chrome·Edge·Firefox가 아니면 `*.localhost`를 해석 못 할 수 있다 |
 | **인증서 경고** | 4단계를 안 했거나 브라우저를 안 껐다 켰다 |
-| **`502 Bad Gateway`** | caddy는 떴는데 뒤쪽이 아직이다. `docker compose ps`로 5개가 `healthy`인지 보고 1~2분 기다린다 |
+| **`502 Bad Gateway`** | caddy는 떴는데 뒤쪽이 아직이다. `docker compose ps`로 caddy 말고 모두 `healthy`인지 보고 1~2분 기다린다 |
 | **로그인 후 오류** | 브라우저 주소가 `localhost:3010`이었을 가능성이 크다. `https://app.localhost`로 다시 접속 |
 | **`port is already allocated` — 80/443** | 아래 참고 |
 
